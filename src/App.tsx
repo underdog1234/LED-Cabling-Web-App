@@ -337,7 +337,6 @@ function UtilBar({ percent }: { percent: number }) {
 export default function App() {
   const signalPorts = useMemo(() => makeSignalPorts(), []);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const layoutCaptureRef = useRef<HTMLDivElement | null>(null);
 
   const [projectName, setProjectName] = useState("Untitled Project");
   const [panelType, setPanelType] = useState<PanelTypeKey>("MG9");
@@ -592,24 +591,123 @@ export default function App() {
   const safeProjectName = projectName.trim() || "Untitled Project";
   const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
 
-  const addCanvasToPdf = (pdf: any, canvas: HTMLCanvasElement, margin = 10) => {
-    const pageWidth = pdf.internal.pageSize.getWidth();
+  const ensurePdfSpace = (pdf: any, y: number, needed = 10) => {
     const pageHeight = pdf.internal.pageSize.getHeight();
-    const usableWidth = pageWidth - margin * 2;
-    const scaledHeight = (canvas.height * usableWidth) / canvas.width;
-    const imgData = canvas.toDataURL("image/png");
-    let remainingHeight = scaledHeight;
-    let offsetY = 0;
+    if (y + needed <= pageHeight - 12) return y;
+    pdf.addPage("a4", "portrait");
+    return 18;
+  };
 
-    pdf.addImage(imgData, "PNG", margin, margin + offsetY, usableWidth, scaledHeight);
-    remainingHeight -= pageHeight - margin * 2;
+  const addPdfLine = (pdf: any, label: string, value: string, y: number) => {
+    const nextY = ensurePdfSpace(pdf, y, 8);
+    pdf.setFont("helvetica", "bold");
+    pdf.text(label, 14, nextY);
+    pdf.setFont("helvetica", "normal");
+    pdf.text(value, 68, nextY);
+    return nextY + 6;
+  };
 
-    while (remainingHeight > 0) {
-      offsetY -= pageHeight - margin * 2;
-      pdf.addPage("a4", "landscape");
-      pdf.addImage(imgData, "PNG", margin, margin + offsetY, usableWidth, scaledHeight);
-      remainingHeight -= pageHeight - margin * 2;
+  const addPdfSectionTitle = (pdf: any, title: string, y: number) => {
+    const nextY = ensurePdfSpace(pdf, y, 12);
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(14);
+    pdf.text(title, 14, nextY);
+    pdf.setDrawColor(203, 213, 225);
+    pdf.line(14, nextY + 2, 196, nextY + 2);
+    pdf.setFontSize(11);
+    return nextY + 10;
+  };
+
+  const buildLayoutCanvas = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = svgW + 96;
+    canvas.height = svgH + 96;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Canvas context unavailable");
+
+    ctx.fillStyle = "#0f172a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const offsetX = 56;
+    const offsetY = 40;
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+
+    ctx.fillStyle = "#e2e8f0";
+    ctx.font = "16px Arial";
+    ctx.textAlign = "center";
+    for (let i = 0; i < cols; i += 1) {
+      ctx.fillText(String(i + 1), i * (CELL_SIZE + GRID_GAP) + CELL_SIZE / 2, -10);
     }
+
+    ctx.textAlign = "left";
+    for (let i = 0; i < rows; i += 1) {
+      ctx.fillText(String(i + 1), -28, i * (CELL_SIZE + GRID_GAP) + CELL_SIZE / 2 + 6);
+    }
+
+    Object.entries(signalPortStats).forEach(([portId, stat]) => {
+      if (!stat.path || stat.path.length < 2) return;
+      const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 4;
+      stat.path.forEach((cell, idx) => {
+        if (idx === 0) return;
+        const prev = stat.path[idx - 1];
+        let { x1, y1, x2, y2 } = getLineEndpoints(prev, cell, 0);
+        if (cell.y !== prev.y) {
+          const sideOffset = GRID_GAP * 0.5;
+          x1 -= sideOffset;
+          x2 -= sideOffset;
+        }
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      });
+    });
+
+    powerPorts.forEach((port) => {
+      const stat = powerPortStats[port.id];
+      const path = stat?.path ?? [];
+      if (path.length < 2) return;
+      ctx.strokeStyle = POWER_COLOR;
+      ctx.lineWidth = 4;
+      path.forEach((cell, idx) => {
+        if (idx === 0) return;
+        const prev = path[idx - 1];
+        let { x1, y1, x2, y2 } = getLineEndpoints(prev, cell, 4);
+        if (cell.y !== prev.y) {
+          const sideOffset = GRID_GAP * 0.5;
+          x1 += sideOffset;
+          x2 += sideOffset;
+        }
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      });
+    });
+
+    grid.flat().forEach((cell) => {
+      const x = cell.x * (CELL_SIZE + GRID_GAP);
+      const y = cell.y * (CELL_SIZE + GRID_GAP);
+      const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+      ctx.strokeStyle = "#e2e8f0";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, CELL_SIZE, CELL_SIZE);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 10px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText(`↓ ${cell.y + 1} → ${cell.x + 1}`, x + CELL_SIZE / 2, y + 18);
+      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + CELL_SIZE / 2, y + 34);
+      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + CELL_SIZE / 2, y + 50);
+    });
+
+    ctx.restore();
+    return canvas;
   };
 
   const exportJson = () => {
@@ -675,163 +773,80 @@ export default function App() {
 
   const generatePdf = async () => {
   try {
-    const html2canvas = (await import("html2canvas")).default;
     const jsPDF = (await import("jspdf")).default;
-    const layoutEl = layoutCaptureRef.current;
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    let y = 18;
 
-    if (!layoutEl) {
-      window.alert("Could not capture the layout. Please try again.");
-      return;
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(18);
+    pdf.text(safeProjectName, 14, y);
+    y += 8;
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(10);
+    pdf.text(`Generated ${new Date().toLocaleString()}`, 14, y);
+    y += 10;
+    pdf.setFontSize(11);
+
+    y = addPdfSectionTitle(pdf, "Wall", y);
+    y = addPdfLine(pdf, "Panel type", panel.name, y);
+    y = addPdfLine(pdf, "Power distro", distro.label, y);
+    y = addPdfLine(pdf, "Panels", `${cols} x ${rows} = ${totalPanels}`, y);
+    y = addPdfLine(pdf, "Size", `${wallWidthM}m x ${wallHeightM}m`, y);
+    y = addPdfLine(pdf, "Resolution", `${wallPixelW} x ${wallPixelH}`, y);
+    y = addPdfLine(pdf, "Aspect ratio", aspectRatio, y);
+    y = addPdfLine(pdf, "Reduced ratio", ratioLabel, y);
+
+    y = addPdfSectionTitle(pdf, "Power", y);
+    y = addPdfLine(pdf, "Max draw", `${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A`, y);
+    y = addPdfLine(pdf, "Average draw", `${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A`, y);
+    y = addPdfLine(pdf, "Circuits used", String(circuitsUsedMax), y);
+    y = addPdfLine(pdf, "Per outlet", `${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`, y);
+    y = addPdfLine(pdf, "Signal ports used", String(signalPortsUsed), y);
+    y = addPdfLine(pdf, "Power ports used", String(powerPortsUsed), y);
+
+    y = addPdfSectionTitle(pdf, "Weight + Output", y);
+    y = addPdfLine(pdf, "Total weight", `${totalWeight.toFixed(1)} kg`, y);
+    y = addPdfLine(pdf, "VX1000 use", `${formatNumber(vx1000Percent, 1)}%`, y);
+    y = addPdfLine(pdf, "VX2000 use", `${formatNumber(vx2000Percent, 1)}%`, y);
+    y = addPdfLine(pdf, "Best standard output", bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list", y);
+
+    y = addPdfSectionTitle(pdf, "Phase Load", y);
+    Object.entries(phaseStats).forEach(([phase, stat]) => {
+      y = addPdfLine(pdf, `Phase ${phase.replace("P", "")}`, `${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A, avg ${formatNumber(stat.avgWatts)} W / ${formatNumber(stat.avgAmps, 2)} A, ${formatNumber(stat.utilisation, 1)}%`, y);
+    });
+
+    y = addPdfSectionTitle(pdf, "Stock Summary", y);
+    stockRows.forEach((row) => {
+      y = addPdfLine(pdf, row.name, `Req ${row.required}, Stock ${row.stock}, Net ${row.net}, ${row.method}`, y);
+    });
+
+    y = addPdfSectionTitle(pdf, "Additional Details", y);
+    y = addPdfLine(pdf, "Fly bar included", includeFlyBar ? `${flyBarWeight.toFixed(1)} kg` : "No", y);
+    y = addPdfLine(pdf, "Sling included", includeSling ? `${slingWeight.toFixed(1)} kg` : "No", y);
+    y = addPdfLine(pdf, "Power cable included", includePowerCable ? `${powerCableWeight.toFixed(1)} kg` : "No", y);
+    y = addPdfLine(pdf, "Signal cable included", includeSignalCable ? `${signalCableWeight.toFixed(1)} kg` : "No", y);
+    y = addPdfLine(pdf, "Custom weight", includeCustomWeight ? `${customWeight} kg` : "No", y);
+    y = addPdfLine(pdf, "Spare panels", String(sparePanels), y);
+    y = addPdfLine(pdf, "Panels incl. spare", String(totalPanelsWithSpare), y);
+    y = addPdfLine(pdf, "Boxes", `${boxCount} (box spare panels ${boxSparePanels})`, y);
+
+    const layoutCanvas = buildLayoutCanvas();
+    pdf.addPage("a4", "landscape");
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(18);
+    pdf.text(`${safeProjectName} - Panel Layout`, 10, 12);
+    const usableWidth = pageWidth - 20;
+    const usableHeight = pageHeight - 22;
+    const layoutRatio = layoutCanvas.width / layoutCanvas.height;
+    let drawWidth = usableWidth;
+    let drawHeight = drawWidth / layoutRatio;
+    if (drawHeight > usableHeight) {
+      drawHeight = usableHeight;
+      drawWidth = drawHeight * layoutRatio;
     }
-
-    const exportEl = document.createElement("div");
-    exportEl.style.padding = "28px";
-    exportEl.style.background = "#ffffff";
-    exportEl.style.color = "#000000";
-    exportEl.style.width = "1500px";
-    exportEl.style.fontFamily = "Arial, sans-serif";
-
-    exportEl.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:20px;">
-        <div>
-          <div style="font-size:13px;letter-spacing:0.12em;text-transform:uppercase;color:#475569;margin-bottom:8px;">LED Cabling Report</div>
-          <h1 style="font-size:28px;margin:0 0 8px;">${safeProjectName}</h1>
-          <div style="font-size:13px;color:#475569;">Generated ${new Date().toLocaleString()}</div>
-        </div>
-        <div style="font-size:13px;text-align:right;color:#0f172a;">
-          <div><strong>Panel type:</strong> ${panel.name}</div>
-          <div><strong>Power distro:</strong> ${distro.label}</div>
-          <div><strong>Patch mode:</strong> ${patchMode === "signal" ? "Signal" : "Power"}</div>
-        </div>
-      </div>
-
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px;">
-        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
-          <h2 style="font-size:16px;margin:0 0 10px;">Wall</h2>
-          <p><strong>Panels:</strong> ${cols} x ${rows} = ${totalPanels}</p>
-          <p><strong>Size:</strong> ${wallWidthM}m x ${wallHeightM}m</p>
-          <p><strong>Resolution:</strong> ${wallPixelW} x ${wallPixelH}</p>
-          <p><strong>Aspect ratio:</strong> ${aspectRatio}</p>
-          <p><strong>Reduced ratio:</strong> ${ratioLabel}</p>
-        </div>
-        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
-          <h2 style="font-size:16px;margin:0 0 10px;">Power</h2>
-          <p><strong>Max:</strong> ${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A</p>
-          <p><strong>Average:</strong> ${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A</p>
-          <p><strong>Circuits used:</strong> ${circuitsUsedMax}</p>
-          <p><strong>Per outlet:</strong> ${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A</p>
-          <p><strong>Unassigned power panels:</strong> ${unassignedPowerPanels}</p>
-        </div>
-        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
-          <h2 style="font-size:16px;margin:0 0 10px;">Weight + Output</h2>
-          <p><strong>Total weight:</strong> ${totalWeight.toFixed(1)} kg</p>
-          <p><strong>Signal ports used:</strong> ${signalPortsUsed}</p>
-          <p><strong>Power ports used:</strong> ${powerPortsUsed}</p>
-          <p><strong>VX1000 use:</strong> ${formatNumber(vx1000Percent, 1)}%</p>
-          <p><strong>VX2000 use:</strong> ${formatNumber(vx2000Percent, 1)}%</p>
-          <p><strong>Best standard output:</strong> ${bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list"}</p>
-        </div>
-      </div>
-
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px;">
-        ${Object.entries(phaseStats)
-          .map(
-            ([phase, stat]) => `
-              <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
-                <h2 style="font-size:16px;margin:0 0 10px;">Phase ${phase.replace("P", "")}</h2>
-                <p><strong>Max:</strong> ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A</p>
-                <p><strong>Average:</strong> ${formatNumber(stat.avgWatts)} W / ${formatNumber(stat.avgAmps, 2)} A</p>
-                <p><strong>Utilisation:</strong> ${formatNumber(stat.utilisation, 1)}%</p>
-                <p><strong>Safe phase limit:</strong> ${formatNumber(distro.safePhaseWatts)} W</p>
-              </div>
-            `,
-          )
-          .join("")}
-      </div>
-
-      <h2 style="font-size:16px;margin:0 0 10px;">Stock Summary</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px;">
-        <thead>
-          <tr>
-            <th style="border:1px solid #ccc;padding:4px;">Item</th>
-            <th style="border:1px solid #ccc;padding:4px;">Req</th>
-            <th style="border:1px solid #ccc;padding:4px;">Stock</th>
-            <th style="border:1px solid #ccc;padding:4px;">Net</th>
-            <th style="border:1px solid #ccc;padding:4px;">Method</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${stockRows.map(r => `
-            <tr>
-              <td style="border:1px solid #ccc;padding:4px;">${r.name}</td>
-              <td style="border:1px solid #ccc;padding:4px;text-align:right;">${r.required}</td>
-              <td style="border:1px solid #ccc;padding:4px;text-align:right;">${r.stock}</td>
-              <td style="border:1px solid #ccc;padding:4px;text-align:right;">${r.net}</td>
-              <td style="border:1px solid #ccc;padding:4px;">${r.method}</td>
-            </tr>
-          `).join("")}
-        </tbody>
-      </table>
-
-      <h2 style="font-size:16px;margin:0 0 10px;">Additional Details</h2>
-      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;font-size:12px;">
-        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
-          <p><strong>Fly bar included:</strong> ${includeFlyBar ? "Yes" : "No"}</p>
-          <p><strong>Sling included:</strong> ${includeSling ? "Yes" : "No"}</p>
-          <p><strong>Power cable included:</strong> ${includePowerCable ? "Yes" : "No"}</p>
-          <p><strong>Signal cable included:</strong> ${includeSignalCable ? "Yes" : "No"}</p>
-          <p><strong>Custom weight included:</strong> ${includeCustomWeight ? `${customWeight} kg` : "No"}</p>
-        </div>
-        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
-          <p><strong>Spare panels:</strong> ${sparePanels}</p>
-          <p><strong>Panels incl. spare:</strong> ${totalPanelsWithSpare}</p>
-          <p><strong>Boxes:</strong> ${boxCount}</p>
-          <p><strong>Box spare panels:</strong> ${boxSparePanels}</p>
-          <p><strong>Power outlet limit:</strong> ${safePanelsPerPowerOutlet} panels</p>
-          <p><strong>Signal port limit:</strong> ${safePanelsPerSignalPort} panels</p>
-        </div>
-      </div>
-    `;
-
-    document.body.appendChild(exportEl);
-
-    const detailsCanvas = await html2canvas(exportEl, { scale: 2, backgroundColor: "#ffffff", logging: false });
-    document.body.removeChild(exportEl);
-
-    let layoutCanvas: HTMLCanvasElement | null = null;
-    try {
-      layoutCanvas = await html2canvas(layoutEl, {
-        scale: 1,
-        backgroundColor: "#0f172a",
-        logging: false,
-        useCORS: true,
-        windowWidth: layoutEl.scrollWidth,
-        windowHeight: layoutEl.scrollHeight,
-      });
-    } catch (layoutError) {
-      console.error("Layout capture failed", layoutError);
-    }
-
-    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
-    addCanvasToPdf(pdf, detailsCanvas, 10);
-
-    if (layoutCanvas) {
-      pdf.addPage("a4", "landscape");
-      const pageWidth = pdf.internal.pageSize.getWidth();
-      const pageHeight = pdf.internal.pageSize.getHeight();
-      pdf.setFontSize(18);
-      pdf.text(`${safeProjectName} - Panel Layout`, 10, 12);
-      const usableWidth = pageWidth - 20;
-      const usableHeight = pageHeight - 22;
-      const layoutRatio = layoutCanvas.width / layoutCanvas.height;
-      let drawWidth = usableWidth;
-      let drawHeight = drawWidth / layoutRatio;
-      if (drawHeight > usableHeight) {
-        drawHeight = usableHeight;
-        drawWidth = drawHeight * layoutRatio;
-      }
-      pdf.addImage(layoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
-    }
+    pdf.addImage(layoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
     pdf.save(`${fileSafeProjectName}-${panelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
@@ -1328,7 +1343,7 @@ export default function App() {
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
           </CardHeader>
           <CardContent>
-            <div ref={layoutCaptureRef} className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8">
+            <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8">
               <div className="relative" style={{ width: svgW, height: svgH }}>
                 <div className="absolute left-0 top-[-20px] grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateColumns: `repeat(${cols}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
                   {Array.from({ length: cols }).map((_, index) => <div key={`col-${index}`} className="text-center">{index + 1}</div>)}
