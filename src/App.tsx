@@ -1,4 +1,4 @@
-import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
+﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // Simple local UI components (replacing shadcn)
@@ -571,7 +571,7 @@ export default function App() {
         { code: "12224", name: "MG9 LED Panel", required: totalPanelsWithSpare, stock: stock.panels ?? 0, net: (stock.panels ?? 0) - totalPanelsWithSpare, method: `${totalPanels} + ${sparePanels} spare` },
         { code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` },
         { code: "12257", name: "MG9 Floor / Hanging Bar", required: cols, stock: stock.hangingBar ?? 0, net: (stock.hangingBar ?? 0) - cols, method: `1 per column` },
-        { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3Φ Power Distro" : "63A 3Φ Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
+        { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3Î¦ Power Distro" : "63A 3Î¦ Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
         { code: "12254", name: "15m PowerCON Cable", required: circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio), stock: stock.powerCable15m ?? 0, net: (stock.powerCable15m ?? 0) - (circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)), method: `${circuitsUsedMax} + ${Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)} spare` },
         { code: "12263", name: "15m Signal Cable", required: signalPortsUsed + Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio), stock: stock.signalCable15m ?? 0, net: (stock.signalCable15m ?? 0) - (signalPortsUsed + Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio)), method: `${signalPortsUsed} + ${Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio)} spare` },
         { code: "12264", name: "MG9 Reinforcement Plate", required: Math.ceil(totalPanels * 0.86), stock: stock.reinforcementPlate ?? 0, net: (stock.reinforcementPlate ?? 0) - Math.ceil(totalPanels * 0.86), method: `sheet-style factor` },
@@ -583,7 +583,7 @@ export default function App() {
       { code: "12223", name: "MT Mesh Panel", required: totalPanelsWithSpare, stock: stock.panels ?? 0, net: (stock.panels ?? 0) - totalPanelsWithSpare, method: `${totalPanels} + ${sparePanels} spare` },
       { code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` },
       { code: "12262", name: "MT Floor / Hanging Bar", required: cols, stock: stock.hangingBar ?? 0, net: (stock.hangingBar ?? 0) - cols, method: `1 per column` },
-      { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3Φ Power Distro" : "63A 3Φ Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
+      { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3Î¦ Power Distro" : "63A 3Î¦ Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
     ];
   }, [panel, panelType, totalPanelsWithSpare, totalPanels, sparePanels, boxCount, cols, powerDistro, powerPortsUsed, distro.portCount, circuitsUsedMax, signalPortsUsed]);
 
@@ -599,12 +599,13 @@ export default function App() {
   };
 
   const addPdfLine = (pdf: any, label: string, value: string, y: number) => {
-    const nextY = ensurePdfSpace(pdf, y, 8);
+    const wrapped = pdf.splitTextToSize(String(value), 128);
+    const nextY = ensurePdfSpace(pdf, y, Math.max(8, wrapped.length * 5 + 2));
     pdf.setFont("helvetica", "bold");
     pdf.text(label, 14, nextY);
     pdf.setFont("helvetica", "normal");
-    pdf.text(value, 68, nextY);
-    return nextY + 6;
+    pdf.text(wrapped, 68, nextY);
+    return nextY + Math.max(6, wrapped.length * 5);
   };
 
   const addPdfSectionTitle = (pdf: any, title: string, y: number) => {
@@ -619,19 +620,33 @@ export default function App() {
   };
 
   const buildLayoutCanvas = () => {
+    const scale = 2;
     const canvas = document.createElement("canvas");
-    canvas.width = svgW + 96;
-    canvas.height = svgH + 96;
+    canvas.width = (svgW + 96) * scale;
+    canvas.height = (svgH + 96) * scale;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas context unavailable");
+    ctx.scale(scale, scale);
 
     ctx.fillStyle = "#0f172a";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, svgW + 96, svgH + 96);
 
     const offsetX = 56;
     const offsetY = 40;
     ctx.save();
     ctx.translate(offsetX, offsetY);
+
+    const drawArrowHead = (x1: number, y1: number, x2: number, y2: number, color: string) => {
+      const angle = Math.atan2(y2 - y1, x2 - x1);
+      const size = 8;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - size * Math.cos(angle - Math.PI / 6), y2 - size * Math.sin(angle - Math.PI / 6));
+      ctx.lineTo(x2 - size * Math.cos(angle + Math.PI / 6), y2 - size * Math.sin(angle + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
+    };
 
     ctx.fillStyle = "#e2e8f0";
     ctx.font = "16px Arial";
@@ -663,6 +678,7 @@ export default function App() {
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
+        drawArrowHead(x1, y1, x2, y2, color);
       });
     });
 
@@ -685,6 +701,7 @@ export default function App() {
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
+        drawArrowHead(x1, y1, x2, y2, POWER_COLOR);
       });
     });
 
@@ -801,24 +818,48 @@ export default function App() {
     y = addPdfLine(pdf, "Average draw", `${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A`, y);
     y = addPdfLine(pdf, "Circuits used", String(circuitsUsedMax), y);
     y = addPdfLine(pdf, "Per outlet", `${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`, y);
+    y = addPdfLine(pdf, "Outlet limit", `${safePanelsPerPowerOutlet} panels per outlet`, y);
     y = addPdfLine(pdf, "Signal ports used", String(signalPortsUsed), y);
     y = addPdfLine(pdf, "Power ports used", String(powerPortsUsed), y);
+    y = addPdfLine(pdf, "Unassigned power panels", String(unassignedPowerPanels), y);
 
     y = addPdfSectionTitle(pdf, "Weight + Output", y);
     y = addPdfLine(pdf, "Total weight", `${totalWeight.toFixed(1)} kg`, y);
     y = addPdfLine(pdf, "VX1000 use", `${formatNumber(vx1000Percent, 1)}%`, y);
     y = addPdfLine(pdf, "VX2000 use", `${formatNumber(vx2000Percent, 1)}%`, y);
     y = addPdfLine(pdf, "Best standard output", bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list", y);
+    y = addPdfLine(pdf, "Signal port limit", `${safePanelsPerSignalPort} panels / ${formatNumber(signalPortPixels)} pixels`, y);
 
     y = addPdfSectionTitle(pdf, "Phase Load", y);
     Object.entries(phaseStats).forEach(([phase, stat]) => {
       y = addPdfLine(pdf, `Phase ${phase.replace("P", "")}`, `${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A, avg ${formatNumber(stat.avgWatts)} W / ${formatNumber(stat.avgAmps, 2)} A, ${formatNumber(stat.utilisation, 1)}%`, y);
     });
 
+    y = addPdfSectionTitle(pdf, "Signal Port Detail", y);
+    signalPorts.forEach((port) => {
+      const stat = signalPortStats[port.id];
+      y = addPdfLine(pdf, port.name, `${stat.panels} panels assigned${stat.firstKey ? `, start ${stat.firstKey}` : ""}${stat.lastKey ? `, end ${stat.lastKey}` : ""}`, y);
+    });
+
+    y = addPdfSectionTitle(pdf, "Power Output Detail", y);
+    powerPorts.forEach((port) => {
+      const stat = powerPortStats[port.id];
+      y = addPdfLine(pdf, port.name, `${stat.panels} panels, phase ${port.phase.replace("P", "")}, ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A, manual ${stat.manualPanels}`, y);
+    });
+
     y = addPdfSectionTitle(pdf, "Stock Summary", y);
     stockRows.forEach((row) => {
-      y = addPdfLine(pdf, row.name, `Req ${row.required}, Stock ${row.stock}, Net ${row.net}, ${row.method}`, y);
+      y = addPdfLine(pdf, `${row.code} ${row.name}`, `Required ${row.required}, Stock ${row.stock}, Net ${row.net}, ${row.method}`, y);
     });
+
+    y = addPdfSectionTitle(pdf, "Shortfalls", y);
+    if (shortfallRows.length) {
+      shortfallRows.forEach((row) => {
+        y = addPdfLine(pdf, row.name, `Short by ${Math.abs(row.net)}. Required ${row.required}, stock ${row.stock}.`, y);
+      });
+    } else {
+      y = addPdfLine(pdf, "Status", "No stock shortfalls detected.", y);
+    }
 
     y = addPdfSectionTitle(pdf, "Additional Details", y);
     y = addPdfLine(pdf, "Fly bar included", includeFlyBar ? `${flyBarWeight.toFixed(1)} kg` : "No", y);
@@ -1239,16 +1280,16 @@ export default function App() {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
-                  <div>Panels: {cols} × {rows} = {totalPanels}</div>
-                  <div>Size: {wallWidthM}m × {wallHeightM}m</div>
-                  <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
-                  <div>Resolution: {wallPixelW} × {wallPixelH}</div>
+                  <div>Panels: {cols} Ã— {rows} = {totalPanels}</div>
+                  <div>Size: {wallWidthM}m Ã— {wallHeightM}m</div>
+                  <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} mÂ²</div>
+                  <div>Resolution: {wallPixelW} Ã— {wallPixelH}</div>
                   <div>Aspect: {aspectRatio}</div>
                   <div>Ratio: {ratioLabel}</div>
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">{panel.name} Guts</div>
-                  <div>Panel size: {panel.w}m × {panel.h}m</div>
+                  <div>Panel size: {panel.w}m Ã— {panel.h}m</div>
                   <div>Pixels per panel: {formatNumber(panelPixels)}</div>
                   <div>Weight per panel: {panel.weight} kg</div>
                   <div>Max power: {powerSpec.maxW} W / {powerSpec.maxA} A</div>
@@ -1282,7 +1323,7 @@ export default function App() {
                   <div className="mb-2 font-bold">Best Standard Output</div>
                   {bestResolution ? (
                     <>
-                      <div>{bestResolution[0]} × {bestResolution[1]}</div>
+                      <div>{bestResolution[0]} Ã— {bestResolution[1]}</div>
                       <div>Wall uses {formatNumber(((wallPixelW * wallPixelH) / (bestResolution[0] * bestResolution[1])) * 100, 1)}%</div>
                       <div>Spare output: {formatNumber(100 - ((wallPixelW * wallPixelH) / (bestResolution[0] * bestResolution[1])) * 100, 1)}%</div>
                     </>
@@ -1297,22 +1338,22 @@ export default function App() {
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includeFlyBar} onChange={() => setIncludeFlyBar(!includeFlyBar)} />
-                  <span>Fly Bar ({panel.defaults.flyBarWeight}kg per column) → {flyBarWeight.toFixed(1)} kg</span>
+                  <span>Fly Bar ({panel.defaults.flyBarWeight}kg per column) â†’ {flyBarWeight.toFixed(1)} kg</span>
                 </label>
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includeSling} onChange={() => setIncludeSling(!includeSling)} />
-                  <span>Sling &amp; Shackle ({panel.defaults.slingWeight}kg per column) → {slingWeight.toFixed(1)} kg</span>
+                  <span>Sling &amp; Shackle ({panel.defaults.slingWeight}kg per column) â†’ {slingWeight.toFixed(1)} kg</span>
                 </label>
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includePowerCable} onChange={() => setIncludePowerCable(!includePowerCable)} />
-                  <span>Power cables (3kg per outlet used) → {powerCableWeight.toFixed(1)} kg</span>
+                  <span>Power cables (3kg per outlet used) â†’ {powerCableWeight.toFixed(1)} kg</span>
                 </label>
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includeSignalCable} onChange={() => setIncludeSignalCable(!includeSignalCable)} />
-                  <span>Signal cables (1kg per signal port used) → {signalCableWeight.toFixed(1)} kg</span>
+                  <span>Signal cables (1kg per signal port used) â†’ {signalCableWeight.toFixed(1)} kg</span>
                 </label>
 
                 <div className="flex items-center gap-2">
@@ -1423,9 +1464,9 @@ export default function App() {
                         }}
                         className="flex cursor-pointer flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                       >
-                        <div>{`↓ ${cell.y + 1} → ${cell.x + 1}`}</div>
-                        {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                        <div>{`â†“ ${cell.y + 1} â†’ ${cell.x + 1}`}</div>
+                        {cell.assignedPort ? <div className="whitespace-nowrap">{`ðŸ”Œ P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`âš¡ Plug ${cell.assignedPowerPort}`}</div> : null}
                       </div>
                     );
                   })}
@@ -1645,3 +1686,4 @@ export default function App() {
 console.assert(gcd(4032, 1344) === 1344, "gcd should reduce 4032 and 1344 correctly");
 console.assert(`${4032 / gcd(4032, 1344)}:${1344 / gcd(4032, 1344)}` === "3:1", "ratio reduction should produce 3:1");
 console.assert(makeGrid(2, 3).length === 3 && makeGrid(2, 3)[0].length === 2, "makeGrid should build correct dimensions");
+
