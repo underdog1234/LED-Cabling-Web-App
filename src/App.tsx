@@ -2,8 +2,16 @@ import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // Simple local UI components (replacing shadcn)
-const Button = ({ children, className = "", variant, type = "button", ...props }: any) => (
-  <button className={`rounded px-3 py-2 text-white ${className}`} type={type} {...props}>
+const Button = ({ children, className = "", variant = "solid", type = "button", ...props }: any) => (
+  <button
+    className={`inline-flex items-center justify-center rounded-lg border px-3 py-2 font-medium transition-colors ${
+      variant === "outline"
+        ? "border-slate-500 bg-slate-700 text-white hover:bg-slate-600"
+        : "border-sky-400 bg-sky-600 text-white hover:bg-sky-500"
+    } ${className}`}
+    type={type}
+    {...props}
+  >
     {children}
   </button>
 );
@@ -152,6 +160,7 @@ type PowerPortStat = {
 };
 
 type OpenJsonPayload = {
+  projectName?: string;
   panelType?: PanelTypeKey;
   powerDistro?: PowerDistroKey;
   wall?: {
@@ -328,7 +337,9 @@ function UtilBar({ percent }: { percent: number }) {
 export default function App() {
   const signalPorts = useMemo(() => makeSignalPorts(), []);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const layoutCaptureRef = useRef<HTMLDivElement | null>(null);
 
+  const [projectName, setProjectName] = useState("Untitled Project");
   const [panelType, setPanelType] = useState<PanelTypeKey>("MG9");
   const [includeFlyBar, setIncludeFlyBar] = useState(false);
   const [includeSling, setIncludeSling] = useState(false);
@@ -578,10 +589,33 @@ export default function App() {
   }, [panel, panelType, totalPanelsWithSpare, totalPanels, sparePanels, boxCount, cols, powerDistro, powerPortsUsed, distro.portCount, circuitsUsedMax, signalPortsUsed]);
 
   const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
+  const safeProjectName = projectName.trim() || "Untitled Project";
+  const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
+
+  const addCanvasToPdf = (pdf: any, canvas: HTMLCanvasElement, margin = 10) => {
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    const usableWidth = pageWidth - margin * 2;
+    const scaledHeight = (canvas.height * usableWidth) / canvas.width;
+    const imgData = canvas.toDataURL("image/png");
+    let remainingHeight = scaledHeight;
+    let offsetY = 0;
+
+    pdf.addImage(imgData, "PNG", margin, margin + offsetY, usableWidth, scaledHeight);
+    remainingHeight -= pageHeight - margin * 2;
+
+    while (remainingHeight > 0) {
+      offsetY -= pageHeight - margin * 2;
+      pdf.addPage("a4", "landscape");
+      pdf.addImage(imgData, "PNG", margin, margin + offsetY, usableWidth, scaledHeight);
+      remainingHeight -= pageHeight - margin * 2;
+    }
+  };
 
   const exportJson = () => {
   try {
     const payload = {
+      projectName: safeProjectName,
       panelType,
       powerDistro,
       wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
@@ -594,7 +628,7 @@ export default function App() {
 
     const link = document.createElement("a");
     link.href = url;
-    link.setAttribute("download", `LED-Wall-${panelType}-${cols}x${rows}.json`);
+    link.setAttribute("download", `${fileSafeProjectName}-${panelType}-${cols}x${rows}-settings.json`);
 
     document.body.appendChild(link);
     link.click();
@@ -603,7 +637,7 @@ export default function App() {
     setTimeout(() => window.URL.revokeObjectURL(url), 1000);
   } catch (err) {
     console.error("JSON download failed", err);
-    alert("JSON download failed – check console");
+    alert("Settings download failed - check console");
   }
 };
 
@@ -620,6 +654,7 @@ export default function App() {
         const nextRows = Math.max(1, Number(data.wall?.rows || rows));
         const nextGrid = Array.isArray(data.patching?.grid) ? data.patching?.grid : makeGrid(nextCols, nextRows);
 
+        if (data.projectName) setProjectName(data.projectName);
         if (data.panelType && PANEL_TYPES[data.panelType]) setPanelType(data.panelType);
         if (data.powerDistro && POWER_DISTROS[data.powerDistro]) setPowerDistro(data.powerDistro);
 
@@ -642,37 +677,87 @@ export default function App() {
   try {
     const html2canvas = (await import("html2canvas")).default;
     const jsPDF = (await import("jspdf")).default;
+    const layoutEl = layoutCaptureRef.current;
+
+    if (!layoutEl) {
+      window.alert("Could not capture the layout. Please try again.");
+      return;
+    }
 
     const exportEl = document.createElement("div");
-    exportEl.style.padding = "24px";
+    exportEl.style.padding = "28px";
     exportEl.style.background = "#ffffff";
     exportEl.style.color = "#000000";
-    exportEl.style.width = "1200px";
+    exportEl.style.width = "1500px";
     exportEl.style.fontFamily = "Arial, sans-serif";
 
     exportEl.innerHTML = `
-      <h1 style="font-size:22px;margin-bottom:8px;">LED Wall Report</h1>
-      <div style="font-size:12px;margin-bottom:12px;">Generated ${new Date().toLocaleString()}</div>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:24px;margin-bottom:20px;">
+        <div>
+          <div style="font-size:13px;letter-spacing:0.12em;text-transform:uppercase;color:#475569;margin-bottom:8px;">LED Cabling Report</div>
+          <h1 style="font-size:28px;margin:0 0 8px;">${safeProjectName}</h1>
+          <div style="font-size:13px;color:#475569;">Generated ${new Date().toLocaleString()}</div>
+        </div>
+        <div style="font-size:13px;text-align:right;color:#0f172a;">
+          <div><strong>Panel type:</strong> ${panel.name}</div>
+          <div><strong>Power distro:</strong> ${distro.label}</div>
+          <div><strong>Patch mode:</strong> ${patchMode === "signal" ? "Signal" : "Power"}</div>
+        </div>
+      </div>
 
-      <h2 style="font-size:14px;margin-top:10px;">Wall</h2>
-      <p>${cols} x ${rows} (${totalPanels} panels)</p>
-      <p>${wallWidthM}m x ${wallHeightM}m</p>
-      <p>${wallPixelW} x ${wallPixelH} (${ratioLabel})</p>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px;">
+        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
+          <h2 style="font-size:16px;margin:0 0 10px;">Wall</h2>
+          <p><strong>Panels:</strong> ${cols} x ${rows} = ${totalPanels}</p>
+          <p><strong>Size:</strong> ${wallWidthM}m x ${wallHeightM}m</p>
+          <p><strong>Resolution:</strong> ${wallPixelW} x ${wallPixelH}</p>
+          <p><strong>Aspect ratio:</strong> ${aspectRatio}</p>
+          <p><strong>Reduced ratio:</strong> ${ratioLabel}</p>
+        </div>
+        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
+          <h2 style="font-size:16px;margin:0 0 10px;">Power</h2>
+          <p><strong>Max:</strong> ${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A</p>
+          <p><strong>Average:</strong> ${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A</p>
+          <p><strong>Circuits used:</strong> ${circuitsUsedMax}</p>
+          <p><strong>Per outlet:</strong> ${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A</p>
+          <p><strong>Unassigned power panels:</strong> ${unassignedPowerPanels}</p>
+        </div>
+        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
+          <h2 style="font-size:16px;margin:0 0 10px;">Weight + Output</h2>
+          <p><strong>Total weight:</strong> ${totalWeight.toFixed(1)} kg</p>
+          <p><strong>Signal ports used:</strong> ${signalPortsUsed}</p>
+          <p><strong>Power ports used:</strong> ${powerPortsUsed}</p>
+          <p><strong>VX1000 use:</strong> ${formatNumber(vx1000Percent, 1)}%</p>
+          <p><strong>VX2000 use:</strong> ${formatNumber(vx2000Percent, 1)}%</p>
+          <p><strong>Best standard output:</strong> ${bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list"}</p>
+        </div>
+      </div>
 
-      <h2 style="font-size:14px;margin-top:10px;">Power</h2>
-      <p>${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA,2)} A</p>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px;">
+        ${Object.entries(phaseStats)
+          .map(
+            ([phase, stat]) => `
+              <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
+                <h2 style="font-size:16px;margin:0 0 10px;">Phase ${phase.replace("P", "")}</h2>
+                <p><strong>Max:</strong> ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A</p>
+                <p><strong>Average:</strong> ${formatNumber(stat.avgWatts)} W / ${formatNumber(stat.avgAmps, 2)} A</p>
+                <p><strong>Utilisation:</strong> ${formatNumber(stat.utilisation, 1)}%</p>
+                <p><strong>Safe phase limit:</strong> ${formatNumber(distro.safePhaseWatts)} W</p>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
 
-      <h2 style="font-size:14px;margin-top:10px;">Weight</h2>
-      <p>${totalWeight.toFixed(1)} kg</p>
-
-      <h2 style="font-size:14px;margin-top:12px;">Stock</h2>
-      <table style="width:100%;border-collapse:collapse;font-size:11px;">
+      <h2 style="font-size:16px;margin:0 0 10px;">Stock Summary</h2>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:18px;">
         <thead>
           <tr>
             <th style="border:1px solid #ccc;padding:4px;">Item</th>
             <th style="border:1px solid #ccc;padding:4px;">Req</th>
             <th style="border:1px solid #ccc;padding:4px;">Stock</th>
             <th style="border:1px solid #ccc;padding:4px;">Net</th>
+            <th style="border:1px solid #ccc;padding:4px;">Method</th>
           </tr>
         </thead>
         <tbody>
@@ -682,28 +767,60 @@ export default function App() {
               <td style="border:1px solid #ccc;padding:4px;text-align:right;">${r.required}</td>
               <td style="border:1px solid #ccc;padding:4px;text-align:right;">${r.stock}</td>
               <td style="border:1px solid #ccc;padding:4px;text-align:right;">${r.net}</td>
+              <td style="border:1px solid #ccc;padding:4px;">${r.method}</td>
             </tr>
           `).join("")}
         </tbody>
       </table>
+
+      <h2 style="font-size:16px;margin:0 0 10px;">Additional Details</h2>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px;font-size:12px;">
+        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
+          <p><strong>Fly bar included:</strong> ${includeFlyBar ? "Yes" : "No"}</p>
+          <p><strong>Sling included:</strong> ${includeSling ? "Yes" : "No"}</p>
+          <p><strong>Power cable included:</strong> ${includePowerCable ? "Yes" : "No"}</p>
+          <p><strong>Signal cable included:</strong> ${includeSignalCable ? "Yes" : "No"}</p>
+          <p><strong>Custom weight included:</strong> ${includeCustomWeight ? `${customWeight} kg` : "No"}</p>
+        </div>
+        <div style="border:1px solid #cbd5e1;border-radius:12px;padding:14px;">
+          <p><strong>Spare panels:</strong> ${sparePanels}</p>
+          <p><strong>Panels incl. spare:</strong> ${totalPanelsWithSpare}</p>
+          <p><strong>Boxes:</strong> ${boxCount}</p>
+          <p><strong>Box spare panels:</strong> ${boxSparePanels}</p>
+          <p><strong>Power outlet limit:</strong> ${safePanelsPerPowerOutlet} panels</p>
+          <p><strong>Signal port limit:</strong> ${safePanelsPerSignalPort} panels</p>
+        </div>
+      </div>
     `;
 
     document.body.appendChild(exportEl);
 
-    const canvas = await html2canvas(exportEl, { scale: 2 });
+    const detailsCanvas = await html2canvas(exportEl, { scale: 2, backgroundColor: "#ffffff" });
+    const layoutCanvas = await html2canvas(layoutEl, { scale: 2, backgroundColor: "#ffffff" });
     document.body.removeChild(exportEl);
 
-    const imgData = canvas.toDataURL("image/png");
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
+    addCanvasToPdf(pdf, detailsCanvas, 10);
 
-    const pdf = new jsPDF({ unit: "mm", format: "a4" });
-    const width = pdf.internal.pageSize.getWidth();
-    const height = (canvas.height * width) / canvas.width;
-
-    pdf.addImage(imgData, "PNG", 0, 0, width, height);
-    pdf.save(`LED-Wall-${panelType}-${cols}x${rows}.pdf`);
+    pdf.addPage("a4", "landscape");
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const pageHeight = pdf.internal.pageSize.getHeight();
+    pdf.setFontSize(18);
+    pdf.text(`${safeProjectName} - Panel Layout`, 10, 12);
+    const usableWidth = pageWidth - 20;
+    const usableHeight = pageHeight - 22;
+    const layoutRatio = layoutCanvas.width / layoutCanvas.height;
+    let drawWidth = usableWidth;
+    let drawHeight = drawWidth / layoutRatio;
+    if (drawHeight > usableHeight) {
+      drawHeight = usableHeight;
+      drawWidth = drawHeight * layoutRatio;
+    }
+    pdf.addImage(layoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
+    pdf.save(`${fileSafeProjectName}-${panelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
-    alert("PDF failed – check console (did you install deps?)");
+    alert("PDF failed - check console");
   }
 };
 
@@ -944,16 +1061,19 @@ export default function App() {
 
       <div className="mx-auto max-w-[1900px] space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3 no-print">
-          <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
+          <div>
+            <div className="text-sm uppercase tracking-[0.2em] text-sky-300">LED cabling planner</div>
+            <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
+          </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={generatePdf}>
+            <Button className="border-cyan-400 bg-cyan-600 hover:bg-cyan-500" onClick={generatePdf}>
               <FileText className="mr-2 h-4 w-4" />Generate PDF
             </Button>
-            <Button variant="outline" className="border-slate-500 bg-slate-700 text-white hover:bg-slate-700 hover:text-white" onClick={exportJson}>
-              <Download className="mr-2 h-4 w-4" />Download JSON
+            <Button variant="outline" onClick={exportJson}>
+              <Download className="mr-2 h-4 w-4" />Download Settings
             </Button>
-            <Button variant="outline" className="border-slate-500 bg-slate-700 text-white hover:bg-slate-700 hover:text-white" onClick={() => fileInputRef.current?.click()}>
-              <Upload className="mr-2 h-4 w-4" />Open JSON
+            <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
+              <Upload className="mr-2 h-4 w-4" />Open Settings
             </Button>
             <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={openJson} />
           </div>
@@ -962,10 +1082,14 @@ export default function App() {
         <div className="grid gap-4 xl:grid-cols-[1.1fr_1.2fr]">
           <Card className="border-slate-700 bg-slate-800 print-card">
             <CardHeader>
-              <CardTitle className="text-white [text-shadow:0_0_2px_black]">LED Wall Setup</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
+            <CardTitle className="text-white [text-shadow:0_0_2px_black]">LED Wall Setup</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
               <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-1 md:col-span-2">
+                  <label className="text-xs text-slate-300">Project Name</label>
+                  <Input className="bg-white text-black" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Enter project name" />
+                </div>
                 <div className="space-y-1">
                   <label className="text-xs text-slate-300">Columns</label>
                   <Input className="bg-white text-black" type="number" min="1" step="1" value={draftCols} onChange={(e) => setDraftCols(e.target.value)} />
@@ -1043,30 +1167,36 @@ export default function App() {
               <div className="flex flex-wrap gap-2 no-print">
                 <Button
                   variant="outline"
-                  className={patchMode === "signal" ? "border-white bg-white text-black hover:bg-white hover:text-black" : "border-slate-500 bg-slate-700 text-white hover:bg-slate-700 hover:text-white"}
+                  className={patchMode === "signal" ? "border-sky-300 bg-sky-200 font-semibold text-slate-950 hover:bg-sky-100" : ""}
                   onClick={() => setPatchMode("signal")}
                 >
                   Signal Patch Mode
                 </Button>
                 <Button
                   variant="outline"
-                  className={patchMode === "power" ? "border-white bg-white text-black hover:bg-white hover:text-black" : "border-slate-500 bg-slate-700 text-white hover:bg-slate-700 hover:text-white"}
+                  className={patchMode === "power" ? "border-amber-300 bg-amber-200 font-semibold text-slate-950 hover:bg-amber-100" : ""}
                   onClick={() => setPatchMode("power")}
                 >
                   <Zap className="mr-2 h-4 w-4" />Power Patch Mode
                 </Button>
               </div>
 
+              <div className={`rounded-lg border px-4 py-3 text-sm font-medium no-print ${
+                patchMode === "signal" ? "border-sky-300 bg-sky-100 text-slate-950" : "border-amber-300 bg-amber-100 text-slate-950"
+              }`}>
+                Current mode: {patchMode === "signal" ? `Signal patching on port ${activePort}` : `Power patching on plug ${activePowerPort}`}
+              </div>
+
               <div className="flex flex-wrap items-center gap-2 no-print">
                 <select className="rounded bg-white p-2 text-black" value={snakeDirection} onChange={(e) => setSnakeDirection(e.target.value)}>
-                  <option value="LR">Left → Right</option>
-                  <option value="RL">Right → Left</option>
-                  <option value="TB">Top → Bottom</option>
-                  <option value="BT">Bottom → Top</option>
+                  <option value="LR">Left to Right</option>
+                  <option value="RL">Right to Left</option>
+                  <option value="TB">Top to Bottom</option>
+                  <option value="BT">Bottom to Top</option>
                 </select>
-                <Button onClick={snakePatch}><Wand2 className="mr-2 h-4 w-4" />Auto Snake</Button>
-                <Button onClick={clearSignalCabling}>Clear Signal</Button>
-                <Button onClick={clearPowerAssignments}>Clear Power</Button>
+                <Button className="border-violet-400 bg-violet-600 hover:bg-violet-500" onClick={snakePatch}><Wand2 className="mr-2 h-4 w-4" />Auto Snake</Button>
+                <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSignalCabling}>Clear Signal</Button>
+                <Button className="border-orange-400 bg-orange-600 hover:bg-orange-500" onClick={clearPowerAssignments}>Clear Power</Button>
               </div>
             </CardContent>
           </Card>
@@ -1180,10 +1310,10 @@ export default function App() {
 
         <Card className="border-slate-700 bg-slate-800 print-card">
           <CardHeader>
-            <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) — {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
+            <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="w-full overflow-auto pt-6 pl-8">
+            <div ref={layoutCaptureRef} className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8">
               <div className="relative" style={{ width: svgW, height: svgH }}>
                 <div className="absolute left-0 top-[-20px] grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateColumns: `repeat(${cols}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
                   {Array.from({ length: cols }).map((_, index) => <div key={`col-${index}`} className="text-center">{index + 1}</div>)}
@@ -1263,9 +1393,9 @@ export default function App() {
                         }}
                         className="flex cursor-pointer flex-col items-center justify-center gap-[2px] p-1 text-[10px] leading-tight [text-shadow:0_0_2px_black]"
                       >
-                        <div>↓ {cell.y + 1} → {cell.x + 1}</div>
-                        {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                        <div>Row {cell.y + 1} / Col {cell.x + 1}</div>
+                        {cell.assignedPort ? <div className="whitespace-nowrap">{`Signal P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`Power Plug ${cell.assignedPowerPort}`}</div> : null}
                       </div>
                     );
                   })}
