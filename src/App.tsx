@@ -599,13 +599,15 @@ export default function App() {
   };
 
   const addPdfLine = (pdf: any, label: string, value: string, y: number) => {
-    const wrapped = pdf.splitTextToSize(String(value), 128);
-    const nextY = ensurePdfSpace(pdf, y, Math.max(8, wrapped.length * 5 + 2));
+    const wrappedLabel = pdf.splitTextToSize(String(label), 52);
+    const wrappedValue = pdf.splitTextToSize(String(value), 118);
+    const lineCount = Math.max(wrappedLabel.length, wrappedValue.length);
+    const nextY = ensurePdfSpace(pdf, y, Math.max(8, lineCount * 5 + 2));
     pdf.setFont("helvetica", "bold");
-    pdf.text(label, 14, nextY);
+    pdf.text(wrappedLabel, 14, nextY);
     pdf.setFont("helvetica", "normal");
-    pdf.text(wrapped, 68, nextY);
-    return nextY + Math.max(6, wrapped.length * 5);
+    pdf.text(wrappedValue, 72, nextY);
+    return nextY + Math.max(6, lineCount * 5);
   };
 
   const addPdfSectionTitle = (pdf: any, title: string, y: number) => {
@@ -660,6 +662,17 @@ export default function App() {
       ctx.fillText(String(i + 1), -28, i * (CELL_SIZE + GRID_GAP) + CELL_SIZE / 2 + 6);
     }
 
+    grid.flat().forEach((cell) => {
+      const x = cell.x * (CELL_SIZE + GRID_GAP);
+      const y = cell.y * (CELL_SIZE + GRID_GAP);
+      const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+      ctx.fillStyle = fill;
+      ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+      ctx.strokeStyle = "#e2e8f0";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x, y, CELL_SIZE, CELL_SIZE);
+    });
+
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
       if (!stat.path || stat.path.length < 2) return;
       const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
@@ -708,13 +721,6 @@ export default function App() {
     grid.flat().forEach((cell) => {
       const x = cell.x * (CELL_SIZE + GRID_GAP);
       const y = cell.y * (CELL_SIZE + GRID_GAP);
-      const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-      ctx.fillStyle = fill;
-      ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
-      ctx.strokeStyle = "#e2e8f0";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, CELL_SIZE, CELL_SIZE);
-
       ctx.fillStyle = "#ffffff";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
