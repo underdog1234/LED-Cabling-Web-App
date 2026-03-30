@@ -105,26 +105,26 @@ const POWER_DISTROS = {
 } as const;
 
 const PORT_COLORS = [
-  "#e6194B",
-  "#3cb44b",
-  "#4363d8",
-  "#006400",
-  "#911eb4",
-  "#46f0f0",
-  "#f032e6",
-  "#bcf60c",
-  "#fabebe",
-  "#008080",
-  "#e6beff",
-  "#9A6324",
-  "#fffac8",
-  "#800000",
-  "#aaffc3",
-  "#808000",
-  "#ffd8b1",
-  "#000075",
-  "#808080",
-  "#ffe119",
+  "#d946ef",
+  "#2563eb",
+  "#dc2626",
+  "#0891b2",
+  "#7c3aed",
+  "#ea580c",
+  "#be123c",
+  "#0f766e",
+  "#4338ca",
+  "#b45309",
+  "#1d4ed8",
+  "#9d174d",
+  "#0369a1",
+  "#6d28d9",
+  "#c2410c",
+  "#1f2937",
+  "#0f766e",
+  "#4f46e5",
+  "#b91c1c",
+  "#7e22ce",
 ];
 
 type PanelTypeKey = keyof typeof PANEL_TYPES;
@@ -795,28 +795,43 @@ export default function App() {
 
     document.body.appendChild(exportEl);
 
-    const detailsCanvas = await html2canvas(exportEl, { scale: 2, backgroundColor: "#ffffff" });
-    const layoutCanvas = await html2canvas(layoutEl, { scale: 2, backgroundColor: "#ffffff" });
+    const detailsCanvas = await html2canvas(exportEl, { scale: 2, backgroundColor: "#ffffff", logging: false });
     document.body.removeChild(exportEl);
+
+    let layoutCanvas: HTMLCanvasElement | null = null;
+    try {
+      layoutCanvas = await html2canvas(layoutEl, {
+        scale: 1,
+        backgroundColor: "#0f172a",
+        logging: false,
+        useCORS: true,
+        windowWidth: layoutEl.scrollWidth,
+        windowHeight: layoutEl.scrollHeight,
+      });
+    } catch (layoutError) {
+      console.error("Layout capture failed", layoutError);
+    }
 
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
     addCanvasToPdf(pdf, detailsCanvas, 10);
 
-    pdf.addPage("a4", "landscape");
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    pdf.setFontSize(18);
-    pdf.text(`${safeProjectName} - Panel Layout`, 10, 12);
-    const usableWidth = pageWidth - 20;
-    const usableHeight = pageHeight - 22;
-    const layoutRatio = layoutCanvas.width / layoutCanvas.height;
-    let drawWidth = usableWidth;
-    let drawHeight = drawWidth / layoutRatio;
-    if (drawHeight > usableHeight) {
-      drawHeight = usableHeight;
-      drawWidth = drawHeight * layoutRatio;
+    if (layoutCanvas) {
+      pdf.addPage("a4", "landscape");
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      pdf.setFontSize(18);
+      pdf.text(`${safeProjectName} - Panel Layout`, 10, 12);
+      const usableWidth = pageWidth - 20;
+      const usableHeight = pageHeight - 22;
+      const layoutRatio = layoutCanvas.width / layoutCanvas.height;
+      let drawWidth = usableWidth;
+      let drawHeight = drawWidth / layoutRatio;
+      if (drawHeight > usableHeight) {
+        drawHeight = usableHeight;
+        drawWidth = drawHeight * layoutRatio;
+      }
+      pdf.addImage(layoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
     }
-    pdf.addImage(layoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
     pdf.save(`${fileSafeProjectName}-${panelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
@@ -1181,7 +1196,7 @@ export default function App() {
                 </Button>
               </div>
 
-              <div className={`rounded-lg border px-4 py-3 text-sm font-medium no-print ${
+              <div className={`rounded-lg border px-4 py-3 text-sm font-medium [text-shadow:none] no-print ${
                 patchMode === "signal" ? "border-sky-300 bg-sky-100 text-slate-950" : "border-amber-300 bg-amber-100 text-slate-950"
               }`}>
                 Current mode: {patchMode === "signal" ? `Signal patching on port ${activePort}` : `Power patching on plug ${activePowerPort}`}
@@ -1391,11 +1406,11 @@ export default function App() {
                           border: `2px solid ${isSelected ? "#ffffff" : isEdge ? "black" : "#334155"}`,
                           color: "white",
                         }}
-                        className="flex cursor-pointer flex-col items-center justify-center gap-[2px] p-1 text-[10px] leading-tight [text-shadow:0_0_2px_black]"
+                        className="flex cursor-pointer flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                       >
-                        <div>Row {cell.y + 1} / Col {cell.x + 1}</div>
-                        {cell.assignedPort ? <div className="whitespace-nowrap">{`Signal P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`Power Plug ${cell.assignedPowerPort}`}</div> : null}
+                        <div>{`↓ ${cell.y + 1} → ${cell.x + 1}`}</div>
+                        {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
                       </div>
                     );
                   })}
