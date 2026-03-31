@@ -571,7 +571,7 @@ export default function App() {
         { code: "12224", name: "MG9 LED Panel", required: totalPanelsWithSpare, stock: stock.panels ?? 0, net: (stock.panels ?? 0) - totalPanelsWithSpare, method: `${totalPanels} + ${sparePanels} spare` },
         { code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` },
         { code: "12257", name: "MG9 Floor / Hanging Bar", required: cols, stock: stock.hangingBar ?? 0, net: (stock.hangingBar ?? 0) - cols, method: `1 per column` },
-        { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3Î¦ Power Distro" : "63A 3Î¦ Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
+        { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3-phase Power Distro" : "63A 3-phase Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
         { code: "12254", name: "15m PowerCON Cable", required: circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio), stock: stock.powerCable15m ?? 0, net: (stock.powerCable15m ?? 0) - (circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)), method: `${circuitsUsedMax} + ${Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)} spare` },
         { code: "12263", name: "15m Signal Cable", required: signalPortsUsed + Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio), stock: stock.signalCable15m ?? 0, net: (stock.signalCable15m ?? 0) - (signalPortsUsed + Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio)), method: `${signalPortsUsed} + ${Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio)} spare` },
         { code: "12264", name: "MG9 Reinforcement Plate", required: Math.ceil(totalPanels * 0.86), stock: stock.reinforcementPlate ?? 0, net: (stock.reinforcementPlate ?? 0) - Math.ceil(totalPanels * 0.86), method: `sheet-style factor` },
@@ -583,7 +583,7 @@ export default function App() {
       { code: "12223", name: "MT Mesh Panel", required: totalPanelsWithSpare, stock: stock.panels ?? 0, net: (stock.panels ?? 0) - totalPanelsWithSpare, method: `${totalPanels} + ${sparePanels} spare` },
       { code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` },
       { code: "12262", name: "MT Floor / Hanging Bar", required: cols, stock: stock.hangingBar ?? 0, net: (stock.hangingBar ?? 0) - cols, method: `1 per column` },
-      { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3Î¦ Power Distro" : "63A 3Î¦ Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
+      { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3-phase Power Distro" : "63A 3-phase Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
     ];
   }, [panel, panelType, totalPanelsWithSpare, totalPanels, sparePanels, boxCount, cols, powerDistro, powerPortsUsed, distro.portCount, circuitsUsedMax, signalPortsUsed]);
 
@@ -640,7 +640,7 @@ export default function App() {
 
     const drawArrowHead = (x1: number, y1: number, x2: number, y2: number, color: string) => {
       const angle = Math.atan2(y2 - y1, x2 - x1);
-      const size = 8;
+      const size = 12;
       ctx.fillStyle = color;
       ctx.beginPath();
       ctx.moveTo(x2, y2);
@@ -678,6 +678,7 @@ export default function App() {
       const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
       ctx.strokeStyle = color;
       ctx.lineWidth = 4;
+      ctx.lineCap = "round";
       stat.path.forEach((cell, idx) => {
         if (idx === 0) return;
         const prev = stat.path[idx - 1];
@@ -701,6 +702,7 @@ export default function App() {
       if (path.length < 2) return;
       ctx.strokeStyle = POWER_COLOR;
       ctx.lineWidth = 4;
+      ctx.lineCap = "round";
       path.forEach((cell, idx) => {
         if (idx === 0) return;
         const prev = path[idx - 1];
@@ -1286,16 +1288,16 @@ export default function App() {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
-                  <div>Panels: {cols} Ã— {rows} = {totalPanels}</div>
-                  <div>Size: {wallWidthM}m Ã— {wallHeightM}m</div>
-                  <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} mÂ²</div>
-                  <div>Resolution: {wallPixelW} Ã— {wallPixelH}</div>
+                  <div>Panels: {cols} × {rows} = {totalPanels}</div>
+                  <div>Size: {wallWidthM}m × {wallHeightM}m</div>
+                  <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
+                  <div>Resolution: {wallPixelW} × {wallPixelH}</div>
                   <div>Aspect: {aspectRatio}</div>
                   <div>Ratio: {ratioLabel}</div>
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">{panel.name} Guts</div>
-                  <div>Panel size: {panel.w}m Ã— {panel.h}m</div>
+                  <div>Panel size: {panel.w}m × {panel.h}m</div>
                   <div>Pixels per panel: {formatNumber(panelPixels)}</div>
                   <div>Weight per panel: {panel.weight} kg</div>
                   <div>Max power: {powerSpec.maxW} W / {powerSpec.maxA} A</div>
@@ -1329,7 +1331,7 @@ export default function App() {
                   <div className="mb-2 font-bold">Best Standard Output</div>
                   {bestResolution ? (
                     <>
-                      <div>{bestResolution[0]} Ã— {bestResolution[1]}</div>
+                      <div>{bestResolution[0]} × {bestResolution[1]}</div>
                       <div>Wall uses {formatNumber(((wallPixelW * wallPixelH) / (bestResolution[0] * bestResolution[1])) * 100, 1)}%</div>
                       <div>Spare output: {formatNumber(100 - ((wallPixelW * wallPixelH) / (bestResolution[0] * bestResolution[1])) * 100, 1)}%</div>
                     </>
@@ -1344,22 +1346,22 @@ export default function App() {
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includeFlyBar} onChange={() => setIncludeFlyBar(!includeFlyBar)} />
-                  <span>Fly Bar ({panel.defaults.flyBarWeight}kg per column) â†’ {flyBarWeight.toFixed(1)} kg</span>
+                  <span>Fly Bar ({panel.defaults.flyBarWeight}kg per column) → {flyBarWeight.toFixed(1)} kg</span>
                 </label>
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includeSling} onChange={() => setIncludeSling(!includeSling)} />
-                  <span>Sling &amp; Shackle ({panel.defaults.slingWeight}kg per column) â†’ {slingWeight.toFixed(1)} kg</span>
+                  <span>Sling &amp; Shackle ({panel.defaults.slingWeight}kg per column) → {slingWeight.toFixed(1)} kg</span>
                 </label>
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includePowerCable} onChange={() => setIncludePowerCable(!includePowerCable)} />
-                  <span>Power cables (3kg per outlet used) â†’ {powerCableWeight.toFixed(1)} kg</span>
+                  <span>Power cables (3kg per outlet used) → {powerCableWeight.toFixed(1)} kg</span>
                 </label>
 
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={includeSignalCable} onChange={() => setIncludeSignalCable(!includeSignalCable)} />
-                  <span>Signal cables (1kg per signal port used) â†’ {signalCableWeight.toFixed(1)} kg</span>
+                  <span>Signal cables (1kg per signal port used) → {signalCableWeight.toFixed(1)} kg</span>
                 </label>
 
                 <div className="flex items-center gap-2">
@@ -1470,9 +1472,9 @@ export default function App() {
                         }}
                         className="flex cursor-pointer flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                       >
-                        <div>{`â†“ ${cell.y + 1} â†’ ${cell.x + 1}`}</div>
-                        {cell.assignedPort ? <div className="whitespace-nowrap">{`ðŸ”Œ P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`âš¡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                        <div>{`↓ ${cell.y + 1} → ${cell.x + 1}`}</div>
+                        {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
                       </div>
                     );
                   })}
