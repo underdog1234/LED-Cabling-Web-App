@@ -640,13 +640,20 @@ export default function App() {
 
     const drawArrowHead = (x1: number, y1: number, x2: number, y2: number, color: string) => {
       const angle = Math.atan2(y2 - y1, x2 - x1);
-      const size = 12;
+      const size = 16;
+      const baseX1 = x2 - size * Math.cos(angle - Math.PI / 6);
+      const baseY1 = y2 - size * Math.sin(angle - Math.PI / 6);
+      const baseX2 = x2 - size * Math.cos(angle + Math.PI / 6);
+      const baseY2 = y2 - size * Math.sin(angle + Math.PI / 6);
+      ctx.strokeStyle = "#020617";
+      ctx.lineWidth = 2;
       ctx.fillStyle = color;
       ctx.beginPath();
       ctx.moveTo(x2, y2);
-      ctx.lineTo(x2 - size * Math.cos(angle - Math.PI / 6), y2 - size * Math.sin(angle - Math.PI / 6));
-      ctx.lineTo(x2 - size * Math.cos(angle + Math.PI / 6), y2 - size * Math.sin(angle + Math.PI / 6));
+      ctx.lineTo(baseX1, baseY1);
+      ctx.lineTo(baseX2, baseY2);
       ctx.closePath();
+      ctx.stroke();
       ctx.fill();
     };
 
