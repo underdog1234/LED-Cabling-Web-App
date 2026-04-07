@@ -275,13 +275,18 @@ const getPortPanelCount = (grid: Cell[][], portField: "assignedPort" | "assigned
 const getSnakeOrder = (cols: number, rows: number, snakeDirection: string) => {
   const ordered: Array<{ x: number; y: number }> = [];
 
-  if (snakeDirection === "LR" || snakeDirection === "RL") {
-    for (let y = 0; y < rows; y += 1) {
+  if (snakeDirection === "LR" || snakeDirection === "RL" || snakeDirection === "LRB" || snakeDirection === "RLB") {
+    const startFromBottom = snakeDirection === "LRB" || snakeDirection === "RLB";
+    const horizontalDirection = snakeDirection === "RL" || snakeDirection === "RLB" ? "RL" : "LR";
+    const yIndexes = [...Array(rows).keys()];
+    if (startFromBottom) yIndexes.reverse();
+
+    yIndexes.forEach((y, rowIndex) => {
       let row = [...Array(cols).keys()];
-      if (snakeDirection === "RL") row.reverse();
-      if (y % 2 === 1) row.reverse();
+      if (horizontalDirection === "RL") row.reverse();
+      if (rowIndex % 2 === 1) row.reverse();
       row.forEach((x) => ordered.push({ x, y }));
-    }
+    });
   } else {
     for (let x = 0; x < cols; x += 1) {
       let col = [...Array(rows).keys()];
@@ -293,6 +298,13 @@ const getSnakeOrder = (cols: number, rows: number, snakeDirection: string) => {
 
   return ordered;
 };
+
+const flipX = (x: number, cols: number) => cols - 1 - x;
+
+const getDisplayCell = (cell: Cell, cols: number, isFlippedView: boolean): Cell => ({
+  ...cell,
+  x: isFlippedView ? flipX(cell.x, cols) : cell.x,
+});
 
 const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0) => {
   const center = CELL_SIZE / 2;
@@ -328,7 +340,7 @@ const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0) => {
 function UtilBar({ percent }: { percent: number }) {
   const color = getStatusColor(percent);
   return (
-    <div className="h-2 w-full rounded bg-black/30">
+    <div className="h-2 w-full rounded border border-white/30 bg-black/30">
       <div className="h-2 rounded" style={{ width: `${Math.min(percent, 100)}%`, background: color }} />
     </div>
   );
@@ -359,6 +371,7 @@ export default function App() {
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
   const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
   const [snakeDirection, setSnakeDirection] = useState("LR");
+  const [isFlippedView, setIsFlippedView] = useState(false);
 
   const panel = PANEL_TYPES[panelType];
   const powerSpec = panel.power;
@@ -542,6 +555,7 @@ export default function App() {
   const totalPowerAvgA = totalPanels * powerSpec.avgA;
   const unassignedPowerPanels = grid.flat().filter((cell) => !cell.assignedPowerPort).length;
   const selectedPanel = selectedCell ? grid[selectedCell.y]?.[selectedCell.x] ?? null : null;
+  const selectedDisplayCell = selectedPanel ? getDisplayCell(selectedPanel, cols, isFlippedView) : null;
 
   const sparePanels = Math.ceil(totalPanels * panel.defaults.spareRatio);
   const totalPanelsWithSpare = totalPanels + sparePanels;
@@ -621,7 +635,7 @@ export default function App() {
     return nextY + 10;
   };
 
-  const buildLayoutCanvas = () => {
+  const buildLayoutCanvas = (flipped = false, viewLabel = "Front View") => {
     const scale = 2;
     const canvas = document.createElement("canvas");
     canvas.width = (svgW + 96) * scale;
@@ -632,6 +646,10 @@ export default function App() {
 
     ctx.fillStyle = "#0f172a";
     ctx.fillRect(0, 0, svgW + 96, svgH + 96);
+    ctx.fillStyle = "#e2e8f0";
+    ctx.font = "bold 18px Arial";
+    ctx.textAlign = "left";
+    ctx.fillText(viewLabel, 20, 24);
 
     const offsetX = 56;
     const offsetY = 40;
@@ -661,7 +679,8 @@ export default function App() {
     ctx.font = "16px Arial";
     ctx.textAlign = "center";
     for (let i = 0; i < cols; i += 1) {
-      ctx.fillText(String(i + 1), i * (CELL_SIZE + GRID_GAP) + CELL_SIZE / 2, -10);
+      const displayIndex = flipped ? cols - i : i + 1;
+      ctx.fillText(String(displayIndex), i * (CELL_SIZE + GRID_GAP) + CELL_SIZE / 2, -10);
     }
 
     ctx.textAlign = "left";
@@ -670,7 +689,8 @@ export default function App() {
     }
 
     grid.flat().forEach((cell) => {
-      const x = cell.x * (CELL_SIZE + GRID_GAP);
+      const displayCell = getDisplayCell(cell, cols, flipped);
+      const x = displayCell.x * (CELL_SIZE + GRID_GAP);
       const y = cell.y * (CELL_SIZE + GRID_GAP);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
       ctx.fillStyle = fill;
@@ -688,12 +708,13 @@ export default function App() {
       ctx.lineCap = "round";
       stat.path.forEach((cell, idx) => {
         if (idx === 0) return;
-        const prev = stat.path[idx - 1];
-        let { x1, y1, x2, y2 } = getLineEndpoints(prev, cell, 0);
-        if (cell.y !== prev.y) {
+        const prev = getDisplayCell(stat.path[idx - 1], cols, flipped);
+        const current = getDisplayCell(cell, cols, flipped);
+        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0);
+        if (current.y !== prev.y) {
           const sideOffset = GRID_GAP * 0.5;
-          x1 -= sideOffset;
-          x2 -= sideOffset;
+          x1 += flipped ? sideOffset : -sideOffset;
+          x2 += flipped ? sideOffset : -sideOffset;
         }
         ctx.beginPath();
         ctx.moveTo(x1, y1);
@@ -712,12 +733,13 @@ export default function App() {
       ctx.lineCap = "round";
       path.forEach((cell, idx) => {
         if (idx === 0) return;
-        const prev = path[idx - 1];
-        let { x1, y1, x2, y2 } = getLineEndpoints(prev, cell, 4);
-        if (cell.y !== prev.y) {
+        const prev = getDisplayCell(path[idx - 1], cols, flipped);
+        const current = getDisplayCell(cell, cols, flipped);
+        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4);
+        if (current.y !== prev.y) {
           const sideOffset = GRID_GAP * 0.5;
-          x1 += sideOffset;
-          x2 += sideOffset;
+          x1 += flipped ? -sideOffset : sideOffset;
+          x2 += flipped ? -sideOffset : sideOffset;
         }
         ctx.beginPath();
         ctx.moveTo(x1, y1);
@@ -728,12 +750,13 @@ export default function App() {
     });
 
     grid.flat().forEach((cell) => {
-      const x = cell.x * (CELL_SIZE + GRID_GAP);
+      const displayCell = getDisplayCell(cell, cols, flipped);
+      const x = displayCell.x * (CELL_SIZE + GRID_GAP);
       const y = cell.y * (CELL_SIZE + GRID_GAP);
       ctx.fillStyle = "#ffffff";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
-      ctx.fillText(`↓ ${cell.y + 1} → ${cell.x + 1}`, x + CELL_SIZE / 2, y + 18);
+      ctx.fillText(`↓ ${cell.y + 1} → ${displayCell.x + 1}`, x + CELL_SIZE / 2, y + 18);
       if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + CELL_SIZE / 2, y + 34);
       if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + CELL_SIZE / 2, y + 50);
     });
@@ -886,23 +909,37 @@ export default function App() {
     y = addPdfLine(pdf, "Panels incl. spare", String(totalPanelsWithSpare), y);
     y = addPdfLine(pdf, "Boxes", `${boxCount} (box spare panels ${boxSparePanels})`, y);
 
-    const layoutCanvas = buildLayoutCanvas();
+    const frontLayoutCanvas = buildLayoutCanvas(false, "Front View");
+    const backLayoutCanvas = buildLayoutCanvas(true, "Back View (Flipped)");
     pdf.addPage("a4", "landscape");
     const pageWidth = pdf.internal.pageSize.getWidth();
     const pageHeight = pdf.internal.pageSize.getHeight();
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
-    pdf.text(`${safeProjectName} - Panel Layout`, 10, 12);
+    pdf.text(`${safeProjectName} - Panel Layout - Front View`, 10, 12);
     const usableWidth = pageWidth - 20;
     const usableHeight = pageHeight - 22;
-    const layoutRatio = layoutCanvas.width / layoutCanvas.height;
+    const layoutRatio = frontLayoutCanvas.width / frontLayoutCanvas.height;
     let drawWidth = usableWidth;
     let drawHeight = drawWidth / layoutRatio;
     if (drawHeight > usableHeight) {
       drawHeight = usableHeight;
       drawWidth = drawHeight * layoutRatio;
     }
-    pdf.addImage(layoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
+    pdf.addImage(frontLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
+
+    pdf.addPage("a4", "landscape");
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(18);
+    pdf.text(`${safeProjectName} - Panel Layout - Back View (Flipped)`, 10, 12);
+    const backLayoutRatio = backLayoutCanvas.width / backLayoutCanvas.height;
+    let backDrawWidth = usableWidth;
+    let backDrawHeight = backDrawWidth / backLayoutRatio;
+    if (backDrawHeight > usableHeight) {
+      backDrawHeight = usableHeight;
+      backDrawWidth = backDrawHeight * backLayoutRatio;
+    }
+    pdf.addImage(backLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - backDrawWidth) / 2, 16 + (usableHeight - backDrawHeight) / 2, backDrawWidth, backDrawHeight);
     pdf.save(`${fileSafeProjectName}-${panelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
@@ -1129,6 +1166,9 @@ export default function App() {
     setSelectedCell(null);
   };
 
+  const toDisplayX = (x: number) => (isFlippedView ? flipX(x, cols) : x);
+  const fromDisplayX = (displayX: number) => (isFlippedView ? flipX(displayX, cols) : displayX);
+
   const svgW = cols * CELL_SIZE + (cols - 1) * GRID_GAP;
   const svgH = rows * CELL_SIZE + (rows - 1) * GRID_GAP;
 
@@ -1277,6 +1317,8 @@ export default function App() {
                 <select className="rounded bg-white p-2 text-black" value={snakeDirection} onChange={(e) => setSnakeDirection(e.target.value)}>
                   <option value="LR">Left to Right</option>
                   <option value="RL">Right to Left</option>
+                  <option value="LRB">Left to Right from the Bottom</option>
+                  <option value="RLB">Right to Left from the Bottom</option>
                   <option value="TB">Top to Bottom</option>
                   <option value="BT">Bottom to Top</option>
                 </select>
@@ -1396,13 +1438,23 @@ export default function App() {
 
         <Card className="border-slate-700 bg-slate-800 print-card">
           <CardHeader>
-            <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
+              <div className="flex items-center gap-2 no-print">
+                <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${isFlippedView ? "border-amber-300 bg-amber-100 text-slate-950" : "border-sky-300 bg-sky-100 text-slate-950"}`}>
+                  {isFlippedView ? "Back View (Flipped)" : "Front View"}
+                </div>
+                <Button variant="outline" className="text-sm" onClick={() => setIsFlippedView((prev) => !prev)}>
+                  {isFlippedView ? "Show Front View" : "Flip View"}
+                </Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent>
-            <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8">
+            <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8 select-none">
               <div className="relative" style={{ width: svgW, height: svgH }}>
                 <div className="absolute left-0 top-[-20px] grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateColumns: `repeat(${cols}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
-                  {Array.from({ length: cols }).map((_, index) => <div key={`col-${index}`} className="text-center">{index + 1}</div>)}
+                  {Array.from({ length: cols }).map((_, index) => <div key={`col-${index}`} className="text-center">{isFlippedView ? cols - index : index + 1}</div>)}
                 </div>
 
                 <div className="absolute left-[-30px] top-0 grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateRows: `repeat(${rows}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
@@ -1422,13 +1474,14 @@ export default function App() {
 
                     return stat.path.map((cell, idx) => {
                       if (idx === 0) return null;
-                      const prev = stat.path[idx - 1];
-                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, cell, 0);
+                      const prev = getDisplayCell(stat.path[idx - 1], cols, isFlippedView);
+                      const current = getDisplayCell(cell, cols, isFlippedView);
+                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0);
 
-                      if (cell.y !== prev.y) {
+                      if (current.y !== prev.y) {
                         const sideOffset = GRID_GAP * 0.5;
-                        x1 -= sideOffset;
-                        x2 -= sideOffset;
+                        x1 += isFlippedView ? sideOffset : -sideOffset;
+                        x2 += isFlippedView ? sideOffset : -sideOffset;
                       }
 
                       return <line key={`sig-${portId}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} style={{ color }} strokeWidth="4" markerEnd="url(#arrow)" />;
@@ -1442,13 +1495,14 @@ export default function App() {
 
                     return path.map((cell, idx) => {
                       if (idx === 0) return null;
-                      const prev = path[idx - 1];
-                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, cell, 4);
+                      const prev = getDisplayCell(path[idx - 1], cols, isFlippedView);
+                      const current = getDisplayCell(cell, cols, isFlippedView);
+                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4);
 
-                      if (cell.y !== prev.y) {
+                      if (current.y !== prev.y) {
                         const sideOffset = GRID_GAP * 0.5;
-                        x1 += sideOffset;
-                        x2 += sideOffset;
+                        x1 += isFlippedView ? -sideOffset : sideOffset;
+                        x2 += isFlippedView ? -sideOffset : sideOffset;
                       }
 
                       return <line key={`pow-${port.id}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={POWER_COLOR} style={{ color: POWER_COLOR }} strokeWidth="4" markerEnd="url(#arrow)" />;
@@ -1458,17 +1512,19 @@ export default function App() {
 
                 <div className="absolute inset-0 z-10 grid" style={{ gridTemplateColumns: `repeat(${cols}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
                   {grid.flat().map((cell) => {
-                    const key = `${cell.x}-${cell.y}`;
+                    const displayX = toDisplayX(cell.x);
+                    const key = `${displayX}-${cell.y}`;
+                    const originalKey = `${cell.x}-${cell.y}`;
                     const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
-                    const isEdge = signalStat?.firstKey === key || signalStat?.lastKey === key;
+                    const isEdge = signalStat?.firstKey === originalKey || signalStat?.lastKey === originalKey;
                     const isSelected = selectedCell?.x === cell.x && selectedCell?.y === cell.y;
                     const displayColor = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
 
                     return (
                       <div
                         key={key}
-                        onMouseDown={() => startDrag(cell.x, cell.y)}
-                        onMouseEnter={() => continueDrag(cell.x, cell.y)}
+                        onMouseDown={() => startDrag(fromDisplayX(displayX), cell.y)}
+                        onMouseEnter={() => continueDrag(fromDisplayX(displayX), cell.y)}
                         onClick={() => setSelectedCell({ x: cell.x, y: cell.y })}
                         style={{
                           width: CELL_SIZE,
@@ -1476,10 +1532,12 @@ export default function App() {
                           background: displayColor,
                           border: `2px solid ${isSelected ? "#ffffff" : isEdge ? "black" : "#334155"}`,
                           color: "white",
+                          gridColumnStart: displayX + 1,
+                          gridRowStart: cell.y + 1,
                         }}
-                        className="flex cursor-pointer flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
+                        className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                       >
-                        <div>{`↓ ${cell.y + 1} → ${cell.x + 1}`}</div>
+                        <div>{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
                         {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
                         {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
                       </div>
@@ -1491,7 +1549,7 @@ export default function App() {
 
             {selectedPanel ? (
               <div className="mt-4 rounded bg-slate-900 p-3 text-white [text-shadow:0_0_2px_black] print-card no-print">
-                <div className="mb-2">Panel ({selectedCell!.x + 1}, {selectedCell!.y + 1})</div>
+                <div className="mb-2">Panel ({selectedDisplayCell!.x + 1}, {selectedDisplayCell!.y + 1})</div>
                 <div className="mb-2 grid gap-2 text-xs md:grid-cols-2">
                   <div>
                     <div>Size: {panel.w}m x {panel.h}m</div>
@@ -1541,7 +1599,7 @@ export default function App() {
                     <span>{`S${port.id}`}</span>
                     <span>{`${stat.panels}`}</span>
                   </div>
-                  <div className="mt-2 h-2 bg-black/30">
+                  <div className="mt-2 h-2 rounded border border-white/30 bg-black/30">
                     <div style={{ width: `${loadPercent}%`, background: port.color, height: "100%" }} />
                   </div>
                 </div>
@@ -1577,7 +1635,7 @@ export default function App() {
                     </div>
                     <div className="mt-1 text-[11px]">{`Phase ${port.phase.replace("P", "")}`}</div>
                     <div className="mt-1 text-[11px]">{`${formatNumber(stat.maxWatts, 0)} W / ${formatNumber(stat.maxAmps, 2)} A`}</div>
-                    <div className="mt-2 h-2 bg-black/30">
+                    <div className="mt-2 h-2 rounded border border-white/30 bg-black/30">
                       <div style={{ width: `${barWidth}%`, background: indicator, height: "100%" }} />
                     </div>
                   </div>
@@ -1599,7 +1657,7 @@ export default function App() {
                       </div>
                       <div className="mt-2 text-xs">{formatNumber(stat.maxWatts, 0)} W / {formatNumber(stat.maxAmps, 2)} A</div>
                       <div className="text-[11px]">Avg {formatNumber(stat.avgWatts, 0)} W / {formatNumber(stat.avgAmps, 2)} A</div>
-                      <div className="mt-2 h-2 bg-black/30">
+                      <div className="mt-2 h-2 rounded border border-white/30 bg-black/30">
                         <div style={{ width: `${barWidth}%`, background: indicator, height: "100%" }} />
                       </div>
                       <div className="mt-1 text-[11px]">Safe phase limit: {formatNumber(distro.safePhaseWatts, 0)} W</div>
