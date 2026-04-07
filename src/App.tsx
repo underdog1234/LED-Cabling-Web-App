@@ -35,6 +35,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
+const APP_VERSION = "0.7.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -104,6 +105,30 @@ const POWER_DISTROS = {
   "63A": { id: "63A", label: "63A distro (18 ports)", portCount: 18, safePhaseWatts: 14500 },
 } as const;
 
+const DEPLOYMENT_TYPES = {
+  FLOWN: "Flown",
+  GROUND: "Ground",
+  NO_SUPPORT: "No Support",
+  FLOOR: "Floor",
+} as const;
+
+const STOCK_CATALOG = {
+  signalJoiner: { code: "12280", name: "SEETRONIC SE8FF-05 F/M - F/M Joiner", stock: 10 },
+  signalJoinerCable: { code: "12312", name: "SEETRONIC F/M - F/M Cable", stock: 11 },
+  modularFrameScrew: { code: "12253", name: "YES TECH Modular Frame Installation Screw", stock: 384 },
+  modularFrameUCoupler: { code: "12255", name: "YES TECH Modular Frame To Panel U-Coupler", stock: 100 },
+  danceFloorRampCorner: { code: "12266", name: "YES TECH Modular Frame Dance Floor Ramp Corner", stock: 4 },
+  danceFloorRamp: { code: "12267", name: "YES TECH Modular Frame Dance Floor Ramp", stock: 96 },
+  modularFrame950: { code: "12268", name: "YES TECH Modular Frame 950mm x 500mm", stock: 96 },
+  modularFrame860: { code: "12269", name: "YES TECH Modular Frame 860mm x 500mm (Side Piece)", stock: 3 },
+  bottomBeam1m: { code: "12270", name: "YES TECH Modular Frame Bottom Beam 1m", stock: 8 },
+  connectingJoint: { code: "12273", name: "YES TECH Modular Frame Connecting Joint", stock: 192 },
+  danceFloorFeet: { code: "12276", name: "YES TECH Modular Frame Feet for Dance Floor Mode", stock: 384 },
+  floorReinforcementBar: { code: "12274", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 384 },
+  floorTaperPin: { code: "12275", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 1536 },
+  temperedGlass: { code: "12272", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 384 },
+} as const;
+
 const PORT_COLORS = [
   "#d946ef",
   "#2563eb",
@@ -129,6 +154,16 @@ const PORT_COLORS = [
 
 type PanelTypeKey = keyof typeof PANEL_TYPES;
 type PowerDistroKey = keyof typeof POWER_DISTROS;
+type DeploymentType = (typeof DEPLOYMENT_TYPES)[keyof typeof DEPLOYMENT_TYPES];
+
+type StockRow = {
+  code: string;
+  name: string;
+  required: number;
+  stock: number;
+  net: number;
+  method: string;
+};
 
 type Cell = {
   x: number;
@@ -163,6 +198,8 @@ type OpenJsonPayload = {
   projectName?: string;
   panelType?: PanelTypeKey;
   powerDistro?: PowerDistroKey;
+  backupSignalLoop?: boolean;
+  deploymentType?: DeploymentType | "";
   wall?: {
     cols?: number;
     rows?: number;
@@ -216,8 +253,8 @@ const formatNumber = (value: number, digits = 0) =>
   });
 
 const getStatusColor = (percent: number) => {
-  if (percent >= 90) return "#ef4444";
-  if (percent >= 70) return "#f59e0b";
+  if (percent > 100) return "#ef4444";
+  if (percent >= 80) return "#f59e0b";
   return "#22c55e";
 };
 
@@ -306,6 +343,19 @@ const getDisplayCell = (cell: Cell, cols: number, isFlippedView: boolean): Cell 
   x: isFlippedView ? flipX(cell.x, cols) : cell.x,
 });
 
+const makeStockRow = (
+  item: { code: string; name: string; stock: number },
+  required: number,
+  method: string,
+): StockRow => ({
+  code: item.code,
+  name: item.name,
+  required,
+  stock: item.stock,
+  net: item.stock - required,
+  method,
+});
+
 const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0) => {
   const center = CELL_SIZE / 2;
   const panelSpan = CELL_SIZE + GRID_GAP;
@@ -371,7 +421,9 @@ export default function App() {
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
   const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
   const [snakeDirection, setSnakeDirection] = useState("LR");
-  const [isFlippedView, setIsFlippedView] = useState(false);
+  const [isFlippedView, setIsFlippedView] = useState(true);
+  const [backupSignalLoop, setBackupSignalLoop] = useState(true);
+  const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
 
   const panel = PANEL_TYPES[panelType];
   const powerSpec = panel.power;
@@ -578,28 +630,106 @@ export default function App() {
     return valid.sort((a, b) => a[0] * a[1] - b[0] * b[1])[0];
   }, [wallPixelW, wallPixelH]);
 
+  const signalCableBaseRequired = signalPortsUsed;
+  const signalCableWithBackupRequired = backupSignalLoop ? signalCableBaseRequired * 2 : signalCableBaseRequired;
+  const signalCableSpare = Math.ceil(signalCableWithBackupRequired * panel.defaults.signalSpareRatio);
+  const signalCableTotalRequired = signalCableWithBackupRequired + signalCableSpare;
+  const powerCableTotalRequired = circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
+  const distroRequired = Math.max(1, Math.ceil(powerPortsUsed / distro.portCount));
+
+  const deploymentWarning = useMemo(() => {
+    if ((deploymentType === DEPLOYMENT_TYPES.GROUND || deploymentType === DEPLOYMENT_TYPES.FLOOR) && panelType !== "MG9") {
+      return `${deploymentType} deployment hardware is currently available for MG9 only.`;
+    }
+    if (deploymentType === DEPLOYMENT_TYPES.FLOOR && ((wallWidthM % 1 !== 0) || (wallHeightM % 1 !== 0))) {
+      return "Floor deployment uses full 1m frame sections only. This wall size is not an exact ground-frame build.";
+    }
+    return "";
+  }, [deploymentType, panelType, wallWidthM, wallHeightM]);
+
   const stockRows = useMemo(() => {
     const stock = panel.stock as Record<string, number>;
+    const rowsOut: StockRow[] = [];
+    const pushBaseRow = (code: string, name: string, required: number, stockQty: number, method: string) => {
+      rowsOut.push({ code, name, required, stock: stockQty, net: stockQty - required, method });
+    };
+
     if (panelType === "MG9") {
-      return [
-        { code: "12224", name: "MG9 LED Panel", required: totalPanelsWithSpare, stock: stock.panels ?? 0, net: (stock.panels ?? 0) - totalPanelsWithSpare, method: `${totalPanels} + ${sparePanels} spare` },
-        { code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` },
-        { code: "12257", name: "MG9 Floor / Hanging Bar", required: cols, stock: stock.hangingBar ?? 0, net: (stock.hangingBar ?? 0) - cols, method: `1 per column` },
-        { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3-phase Power Distro" : "63A 3-phase Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
-        { code: "12254", name: "15m PowerCON Cable", required: circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio), stock: stock.powerCable15m ?? 0, net: (stock.powerCable15m ?? 0) - (circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)), method: `${circuitsUsedMax} + ${Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)} spare` },
-        { code: "12263", name: "15m Signal Cable", required: signalPortsUsed + Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio), stock: stock.signalCable15m ?? 0, net: (stock.signalCable15m ?? 0) - (signalPortsUsed + Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio)), method: `${signalPortsUsed} + ${Math.ceil(signalPortsUsed * panel.defaults.signalSpareRatio)} spare` },
-        { code: "12264", name: "MG9 Reinforcement Plate", required: Math.ceil(totalPanels * 0.86), stock: stock.reinforcementPlate ?? 0, net: (stock.reinforcementPlate ?? 0) - Math.ceil(totalPanels * 0.86), method: `sheet-style factor` },
-        { code: "12265", name: "MG9 Reinforcement Screw", required: Math.ceil(totalPanels * 3.42), stock: stock.reinforcementScrew ?? 0, net: (stock.reinforcementScrew ?? 0) - Math.ceil(totalPanels * 3.42), method: `sheet-style factor` },
-      ];
+      pushBaseRow("12224", "MG9 LED Panel", totalPanelsWithSpare, stock.panels ?? 0, `${totalPanels} + ${sparePanels} spare`);
+    } else {
+      pushBaseRow("12223", "MT Mesh Panel", totalPanelsWithSpare, stock.panels ?? 0, `${totalPanels} + ${sparePanels} spare`);
     }
 
-    return [
-      { code: "12223", name: "MT Mesh Panel", required: totalPanelsWithSpare, stock: stock.panels ?? 0, net: (stock.panels ?? 0) - totalPanelsWithSpare, method: `${totalPanels} + ${sparePanels} spare` },
-      { code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` },
-      { code: "12262", name: "MT Floor / Hanging Bar", required: cols, stock: stock.hangingBar ?? 0, net: (stock.hangingBar ?? 0) - cols, method: `1 per column` },
-      { code: powerDistro === "32A" ? "12245" : "12246", name: powerDistro === "32A" ? "32A 3-phase Power Distro" : "63A 3-phase Power Distro", required: Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0, net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - Math.max(1, Math.ceil(powerPortsUsed / distro.portCount)), method: `selected distro` },
-    ];
-  }, [panel, panelType, totalPanelsWithSpare, totalPanels, sparePanels, boxCount, cols, powerDistro, powerPortsUsed, distro.portCount, circuitsUsedMax, signalPortsUsed]);
+    rowsOut.push({ code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` });
+
+    if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
+      rowsOut.push({
+        code: panelType === "MG9" ? "12257" : "12262",
+        name: panelType === "MG9" ? "MG9 Floor / Hanging Bar" : "MT Floor / Hanging Bar",
+        required: cols,
+        stock: stock.hangingBar ?? 0,
+        net: (stock.hangingBar ?? 0) - cols,
+        method: "1 per column",
+      });
+    }
+
+    rowsOut.push({
+      code: powerDistro === "32A" ? "12245" : "12246",
+      name: powerDistro === "32A" ? "32A 3-phase Power Distro" : "63A 3-phase Power Distro",
+      required: distroRequired,
+      stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0,
+      net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - distroRequired,
+      method: "selected distro",
+    });
+
+    pushBaseRow("12254", "15m PowerCON Cable", powerCableTotalRequired, stock.powerCable15m ?? 0, `${circuitsUsedMax} + ${Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)} spare`);
+    pushBaseRow("12263", "15m Signal Cable", signalCableTotalRequired, stock.signalCable15m ?? 0, `${signalCableWithBackupRequired}${backupSignalLoop ? ` (${signalCableBaseRequired} x 2 backup loop)` : ""} + ${signalCableSpare} spare`);
+
+    if (backupSignalLoop) {
+      const joinerRequired = signalPortsUsed;
+      const joinerOverflow = Math.max(0, joinerRequired - STOCK_CATALOG.signalJoiner.stock);
+      rowsOut.push(makeStockRow(STOCK_CATALOG.signalJoiner, joinerRequired, "1 per signal port for backup loop"));
+      if (joinerOverflow > 0) {
+        rowsOut.push(makeStockRow(STOCK_CATALOG.signalJoinerCable, joinerOverflow, `joiner stock exhausted, overflow ${joinerOverflow}`));
+      } else {
+        rowsOut.push(makeStockRow(STOCK_CATALOG.signalJoinerCable, 0, `fallback only if ${STOCK_CATALOG.signalJoiner.name} stock is exhausted`));
+      }
+    }
+
+    if (panelType === "MG9") {
+      pushBaseRow("12264", "MG9 Reinforcement Plate", Math.ceil(totalPanels * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor");
+      pushBaseRow("12265", "MG9 Reinforcement Screw", Math.ceil(totalPanels * 3.42), stock.reinforcementScrew ?? 0, "sheet-style factor");
+    }
+
+    if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.GROUND) {
+      const widthUnits = Math.floor(wallWidthM);
+      const heightUnits = Math.floor(wallHeightM);
+      const verticalSupports = widthUnits + 1;
+      const mainFrames = verticalSupports * heightUnits;
+      const sidePieces = Math.max(verticalSupports - 1, 0) * (heightUnits + 1);
+      const verticalJoins = verticalSupports * Math.max(heightUnits - 1, 0);
+      const frameJoins = sidePieces + verticalJoins + widthUnits;
+      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrame950, mainFrames, `${verticalSupports} verticals x ${heightUnits} high`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrame860, sidePieces, `${Math.max(verticalSupports - 1, 0)} spans x ${heightUnits + 1} side pieces`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.bottomBeam1m, widthUnits, `${widthUnits} full 1m bottom beams`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameScrew, frameJoins * 2, `2 per frame join across ${frameJoins} joins`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameUCoupler, verticalSupports * 2, `2 per vertical frame, ${verticalSupports} verticals`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.connectingJoint, verticalJoins * 2, `2 per vertical join across ${verticalJoins} joins`));
+    }
+
+    if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.FLOOR) {
+      const feet = Math.ceil(totalPanels / 2);
+      const perimeterSegments = cols * 2 + rows * 2;
+      rowsOut.push(makeStockRow(STOCK_CATALOG.danceFloorFeet, feet, "1 per 2 panels"));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.temperedGlass, totalPanels, "1 per panel"));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.floorReinforcementBar, feet, "1 per foot"));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.floorTaperPin, feet * 4, "4 per foot"));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.danceFloorRamp, perimeterSegments, `${perimeterSegments} external 500mm edge segments`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.danceFloorRampCorner, 4, "1 per corner"));
+    }
+
+    return rowsOut;
+  }, [backupSignalLoop, boxCount, circuitsUsedMax, cols, deploymentType, distroRequired, panel, panelType, powerCableTotalRequired, powerDistro, rows, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, wallHeightM, wallWidthM, powerPortsUsed, distro.portCount]);
 
   const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
   const safeProjectName = projectName.trim() || "Untitled Project";
@@ -771,6 +901,8 @@ export default function App() {
       projectName: safeProjectName,
       panelType,
       powerDistro,
+      backupSignalLoop,
+      deploymentType,
       wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
       patching: { grid, signalPortsUsed, powerPortsUsed },
       stockRows,
@@ -810,6 +942,8 @@ export default function App() {
         if (data.projectName) setProjectName(data.projectName);
         if (data.panelType && PANEL_TYPES[data.panelType]) setPanelType(data.panelType);
         if (data.powerDistro && POWER_DISTROS[data.powerDistro]) setPowerDistro(data.powerDistro);
+        setBackupSignalLoop(data.backupSignalLoop ?? true);
+        setDeploymentType(data.deploymentType ?? "");
 
         setCols(nextCols);
         setRows(nextRows);
@@ -908,38 +1042,41 @@ export default function App() {
     y = addPdfLine(pdf, "Spare panels", String(sparePanels), y);
     y = addPdfLine(pdf, "Panels incl. spare", String(totalPanelsWithSpare), y);
     y = addPdfLine(pdf, "Boxes", `${boxCount} (box spare panels ${boxSparePanels})`, y);
+    y = addPdfLine(pdf, "Backup signal loop", backupSignalLoop ? "Yes" : "No", y);
+    y = addPdfLine(pdf, "Deployment type", deploymentType || "Not selected", y);
+    if (deploymentWarning) y = addPdfLine(pdf, "Deployment warning", deploymentWarning, y);
 
+    const backLayoutCanvas = buildLayoutCanvas(true, "Back View");
     const frontLayoutCanvas = buildLayoutCanvas(false, "Front View");
-    const backLayoutCanvas = buildLayoutCanvas(true, "Back View (Flipped)");
     pdf.addPage("a4", "landscape");
     const pageWidth = pdf.internal.pageSize.getWidth();
     const pageHeight = pdf.internal.pageSize.getHeight();
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
-    pdf.text(`${safeProjectName} - Panel Layout - Front View`, 10, 12);
+    pdf.text(`${safeProjectName} - Panel Layout - Back View`, 10, 12);
     const usableWidth = pageWidth - 20;
     const usableHeight = pageHeight - 22;
-    const layoutRatio = frontLayoutCanvas.width / frontLayoutCanvas.height;
+    const layoutRatio = backLayoutCanvas.width / backLayoutCanvas.height;
     let drawWidth = usableWidth;
     let drawHeight = drawWidth / layoutRatio;
     if (drawHeight > usableHeight) {
       drawHeight = usableHeight;
       drawWidth = drawHeight * layoutRatio;
     }
-    pdf.addImage(frontLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
+    pdf.addImage(backLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
 
     pdf.addPage("a4", "landscape");
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
-    pdf.text(`${safeProjectName} - Panel Layout - Back View (Flipped)`, 10, 12);
-    const backLayoutRatio = backLayoutCanvas.width / backLayoutCanvas.height;
+    pdf.text(`${safeProjectName} - Panel Layout - Front View`, 10, 12);
+    const backLayoutRatio = frontLayoutCanvas.width / frontLayoutCanvas.height;
     let backDrawWidth = usableWidth;
     let backDrawHeight = backDrawWidth / backLayoutRatio;
     if (backDrawHeight > usableHeight) {
       backDrawHeight = usableHeight;
       backDrawWidth = backDrawHeight * backLayoutRatio;
     }
-    pdf.addImage(backLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - backDrawWidth) / 2, 16 + (usableHeight - backDrawHeight) / 2, backDrawWidth, backDrawHeight);
+    pdf.addImage(frontLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - backDrawWidth) / 2, 16 + (usableHeight - backDrawHeight) / 2, backDrawWidth, backDrawHeight);
     pdf.save(`${fileSafeProjectName}-${panelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
@@ -1189,7 +1326,10 @@ export default function App() {
         <div className="flex flex-wrap items-center justify-between gap-3 no-print">
           <div>
             <div className="text-sm uppercase tracking-[0.2em] text-sky-300">LED cabling planner</div>
-            <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
+            <div className="flex items-center gap-3">
+              <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
+              <span className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200">v{APP_VERSION}</span>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button className="border-cyan-400 bg-cyan-600 hover:bg-cyan-500" onClick={generatePdf}>
@@ -1390,34 +1530,59 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="border-t border-slate-700 pt-3 space-y-2 no-print">
-                <div className="font-bold">Additional Weights</div>
+              <div className="grid gap-4 border-t border-slate-700 pt-3 no-print lg:grid-cols-2">
+                <div className="space-y-2">
+                  <div className="font-bold">Additional Weights</div>
 
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={includeFlyBar} onChange={() => setIncludeFlyBar(!includeFlyBar)} />
-                  <span>Fly Bar ({panel.defaults.flyBarWeight}kg per column) → {flyBarWeight.toFixed(1)} kg</span>
-                </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={includeFlyBar} onChange={() => setIncludeFlyBar(!includeFlyBar)} />
+                    <span>Fly Bar ({panel.defaults.flyBarWeight}kg per column) → {flyBarWeight.toFixed(1)} kg</span>
+                  </label>
 
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={includeSling} onChange={() => setIncludeSling(!includeSling)} />
-                  <span>Sling &amp; Shackle ({panel.defaults.slingWeight}kg per column) → {slingWeight.toFixed(1)} kg</span>
-                </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={includeSling} onChange={() => setIncludeSling(!includeSling)} />
+                    <span>Sling &amp; Shackle ({panel.defaults.slingWeight}kg per column) → {slingWeight.toFixed(1)} kg</span>
+                  </label>
 
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={includePowerCable} onChange={() => setIncludePowerCable(!includePowerCable)} />
-                  <span>Power cables (3kg per outlet used) → {powerCableWeight.toFixed(1)} kg</span>
-                </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={includePowerCable} onChange={() => setIncludePowerCable(!includePowerCable)} />
+                    <span>Power cables (3kg per outlet used) → {powerCableWeight.toFixed(1)} kg</span>
+                  </label>
 
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={includeSignalCable} onChange={() => setIncludeSignalCable(!includeSignalCable)} />
-                  <span>Signal cables (1kg per signal port used) → {signalCableWeight.toFixed(1)} kg</span>
-                </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={includeSignalCable} onChange={() => setIncludeSignalCable(!includeSignalCable)} />
+                    <span>Signal cables (1kg per signal port used) → {signalCableWeight.toFixed(1)} kg</span>
+                  </label>
 
-                <div className="flex items-center gap-2">
-                  <input type="checkbox" checked={includeCustomWeight} onChange={() => setIncludeCustomWeight(!includeCustomWeight)} />
-                  <span>Custom Weight</span>
-                  <input type="number" className="w-24 rounded bg-white p-1 text-black" value={customWeight} onChange={(e) => setCustomWeight(Number(e.target.value))} />
-                  <span>kg</span>
+                  <div className="flex items-center gap-2">
+                    <input type="checkbox" checked={includeCustomWeight} onChange={() => setIncludeCustomWeight(!includeCustomWeight)} />
+                    <span>Custom Weight</span>
+                    <input type="number" className="w-24 rounded bg-white p-1 text-black" value={customWeight} onChange={(e) => setCustomWeight(Number(e.target.value))} />
+                    <span>kg</span>
+                  </div>
+                </div>
+
+                <div className="space-y-3 rounded border border-slate-700 bg-slate-900 p-3">
+                  <div className="font-bold">LED Wall Deployment Settings</div>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={backupSignalLoop} onChange={() => setBackupSignalLoop((prev) => !prev)} />
+                    <span>Do backup signal loop</span>
+                  </label>
+                  <div className="space-y-1">
+                    <div className="text-xs text-slate-300">Type of deployment</div>
+                    <select className="w-full rounded bg-white p-2 text-black" value={deploymentType} onChange={(e) => setDeploymentType(e.target.value as DeploymentType | "")}>
+                      <option value="">Select deployment type</option>
+                      <option value={DEPLOYMENT_TYPES.FLOWN}>{DEPLOYMENT_TYPES.FLOWN}</option>
+                      <option value={DEPLOYMENT_TYPES.GROUND}>{DEPLOYMENT_TYPES.GROUND}</option>
+                      <option value={DEPLOYMENT_TYPES.NO_SUPPORT}>{DEPLOYMENT_TYPES.NO_SUPPORT}</option>
+                      <option value={DEPLOYMENT_TYPES.FLOOR}>{DEPLOYMENT_TYPES.FLOOR}</option>
+                    </select>
+                  </div>
+                  {deploymentWarning ? (
+                    <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200">
+                      {deploymentWarning}
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -1442,10 +1607,10 @@ export default function App() {
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
               <div className="flex items-center gap-2 no-print">
                 <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${isFlippedView ? "border-amber-300 bg-amber-100 text-slate-950" : "border-sky-300 bg-sky-100 text-slate-950"}`}>
-                  {isFlippedView ? "Back View (Flipped)" : "Front View"}
+                  {isFlippedView ? "Current: Back View | Alt: Front View" : "Current: Front View | Alt: Back View"}
                 </div>
                 <Button variant="outline" className="text-sm" onClick={() => setIsFlippedView((prev) => !prev)}>
-                  {isFlippedView ? "Show Front View" : "Flip View"}
+                  {isFlippedView ? "Show Front View" : "Show Back View"}
                 </Button>
               </div>
             </div>
@@ -1584,7 +1749,8 @@ export default function App() {
           <CardContent className="grid grid-cols-2 gap-2 md:grid-cols-5 xl:grid-cols-10">
             {signalPorts.map((port) => {
               const stat = signalPortStats[port.id];
-              const loadPercent = safePanelsPerSignalPort > 0 ? Math.min(100, (stat.panels / safePanelsPerSignalPort) * 100) : 0;
+              const loadPercent = safePanelsPerSignalPort > 0 ? (stat.panels / safePanelsPerSignalPort) * 100 : 0;
+              const indicator = getStatusColor(loadPercent);
               return (
                 <div
                   key={port.id}
@@ -1600,7 +1766,7 @@ export default function App() {
                     <span>{`${stat.panels}`}</span>
                   </div>
                   <div className="mt-2 h-2 rounded border border-white/30 bg-black/30">
-                    <div style={{ width: `${loadPercent}%`, background: port.color, height: "100%" }} />
+                    <div style={{ width: `${Math.min(loadPercent, 100)}%`, background: indicator, height: "100%" }} />
                   </div>
                 </div>
               );
