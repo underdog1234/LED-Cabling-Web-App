@@ -35,7 +35,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.7.0";
+const APP_VERSION = "0.7.1";
 
 const PANEL_TYPES = {
   MG9: {
