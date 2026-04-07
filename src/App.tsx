@@ -199,6 +199,7 @@ type OpenJsonPayload = {
   panelType?: PanelTypeKey;
   powerDistro?: PowerDistroKey;
   backupSignalLoop?: boolean;
+  includeReinforcementPlate?: boolean;
   deploymentType?: DeploymentType | "";
   wall?: {
     cols?: number;
@@ -423,6 +424,7 @@ export default function App() {
   const [snakeDirection, setSnakeDirection] = useState("LR");
   const [isFlippedView, setIsFlippedView] = useState(true);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
+  const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
   const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
 
   const panel = PANEL_TYPES[panelType];
@@ -696,7 +698,7 @@ export default function App() {
       }
     }
 
-    if (panelType === "MG9") {
+    if (panelType === "MG9" && includeReinforcementPlate) {
       pushBaseRow("12264", "MG9 Reinforcement Plate", Math.ceil(totalPanels * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor");
       pushBaseRow("12265", "MG9 Reinforcement Screw", Math.ceil(totalPanels * 3.42), stock.reinforcementScrew ?? 0, "sheet-style factor");
     }
@@ -729,7 +731,7 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [backupSignalLoop, boxCount, circuitsUsedMax, cols, deploymentType, distroRequired, panel, panelType, powerCableTotalRequired, powerDistro, rows, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, wallHeightM, wallWidthM, powerPortsUsed, distro.portCount]);
+  }, [backupSignalLoop, boxCount, circuitsUsedMax, cols, deploymentType, distroRequired, includeReinforcementPlate, panel, panelType, powerCableTotalRequired, powerDistro, rows, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, wallHeightM, wallWidthM, powerPortsUsed, distro.portCount]);
 
   const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
   const safeProjectName = projectName.trim() || "Untitled Project";
@@ -902,6 +904,7 @@ export default function App() {
       panelType,
       powerDistro,
       backupSignalLoop,
+      includeReinforcementPlate,
       deploymentType,
       wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
       patching: { grid, signalPortsUsed, powerPortsUsed },
@@ -943,6 +946,7 @@ export default function App() {
         if (data.panelType && PANEL_TYPES[data.panelType]) setPanelType(data.panelType);
         if (data.powerDistro && POWER_DISTROS[data.powerDistro]) setPowerDistro(data.powerDistro);
         setBackupSignalLoop(data.backupSignalLoop ?? true);
+        setIncludeReinforcementPlate(data.includeReinforcementPlate ?? false);
         setDeploymentType(data.deploymentType ?? "");
 
         setCols(nextCols);
@@ -1043,6 +1047,7 @@ export default function App() {
     y = addPdfLine(pdf, "Panels incl. spare", String(totalPanelsWithSpare), y);
     y = addPdfLine(pdf, "Boxes", `${boxCount} (box spare panels ${boxSparePanels})`, y);
     y = addPdfLine(pdf, "Backup signal loop", backupSignalLoop ? "Yes" : "No", y);
+    y = addPdfLine(pdf, "Reinforcement plate", includeReinforcementPlate ? "Yes" : "No", y);
     y = addPdfLine(pdf, "Deployment type", deploymentType || "Not selected", y);
     if (deploymentWarning) y = addPdfLine(pdf, "Deployment warning", deploymentWarning, y);
 
@@ -1567,6 +1572,10 @@ export default function App() {
                   <label className="flex items-center gap-2">
                     <input type="checkbox" checked={backupSignalLoop} onChange={() => setBackupSignalLoop((prev) => !prev)} />
                     <span>Do backup signal loop</span>
+                  </label>
+                  <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={includeReinforcementPlate} onChange={() => setIncludeReinforcementPlate((prev) => !prev)} />
+                    <span>Reinforcement Plate</span>
                   </label>
                   <div className="space-y-1">
                     <div className="text-xs text-slate-300">Type of deployment</div>
