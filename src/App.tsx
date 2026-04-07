@@ -422,7 +422,7 @@ export default function App() {
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
   const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
   const [snakeDirection, setSnakeDirection] = useState("LR");
-  const [isFlippedView, setIsFlippedView] = useState(true);
+  const [isFlippedView, setIsFlippedView] = useState(false);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
   const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
   const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
@@ -767,7 +767,7 @@ export default function App() {
     return nextY + 10;
   };
 
-  const buildLayoutCanvas = (flipped = false, viewLabel = "Front View") => {
+  const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
     const scale = 2;
     const canvas = document.createElement("canvas");
     canvas.width = (svgW + 96) * scale;
@@ -968,7 +968,56 @@ export default function App() {
   try {
     const jsPDF = (await import("jspdf")).default;
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const printedAt = new Date().toLocaleString();
     let y = 18;
+
+    const addPdfFooters = () => {
+      const totalPages = pdf.getNumberOfPages();
+      for (let pageNo = 1; pageNo <= totalPages; pageNo += 1) {
+        pdf.setPage(pageNo);
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const pageHeight = pdf.internal.pageSize.getHeight();
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9);
+        pdf.setTextColor(71, 85, 105);
+        pdf.text(`Printed ${printedAt}`, 14, pageHeight - 8);
+        pdf.text(`Page ${pageNo} of ${totalPages}`, pageWidth - 14, pageHeight - 8, { align: "right" });
+        pdf.setTextColor(0, 0, 0);
+      }
+    };
+
+    const drawLayoutPage = (canvas: HTMLCanvasElement, viewLabel: string) => {
+      pdf.addPage("a4", "landscape");
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(18);
+      pdf.text(`${safeProjectName} - Panel Layout - ${viewLabel}`, 10, 12);
+
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(10);
+      pdf.text(`Project name: ${safeProjectName}`, 10, 20);
+      pdf.text(`Panel type: ${panel.name}`, 10, 26);
+      pdf.text(`Power distro: ${distro.label}`, 10, 32);
+      pdf.text(`Panels: ${cols} x ${rows} = ${totalPanels}`, 10, 38);
+
+      pdf.text(`Size: ${wallWidthM}m x ${wallHeightM}m`, 105, 20);
+      pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
+      pdf.text(`Resolution: ${wallPixelW} x ${wallPixelH}`, 105, 32);
+      pdf.text(`Aspect ratio: ${aspectRatio}`, 105, 38);
+      pdf.text(`Reduced ratio: ${ratioLabel}`, 105, 44);
+
+      const usableWidth = pageWidth - 20;
+      const usableHeight = pageHeight - 58;
+      const layoutRatio = canvas.width / canvas.height;
+      let drawWidth = usableWidth;
+      let drawHeight = drawWidth / layoutRatio;
+      if (drawHeight > usableHeight) {
+        drawHeight = usableHeight;
+        drawWidth = drawHeight * layoutRatio;
+      }
+      pdf.addImage(canvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 50 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
+    };
 
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
@@ -976,7 +1025,7 @@ export default function App() {
     y += 8;
     pdf.setFont("helvetica", "normal");
     pdf.setFontSize(10);
-    pdf.text(`Generated ${new Date().toLocaleString()}`, 14, y);
+    pdf.text(`Generated ${printedAt}`, 14, y);
     y += 10;
     pdf.setFontSize(11);
 
@@ -1051,37 +1100,11 @@ export default function App() {
     y = addPdfLine(pdf, "Deployment type", deploymentType || "Not selected", y);
     if (deploymentWarning) y = addPdfLine(pdf, "Deployment warning", deploymentWarning, y);
 
-    const backLayoutCanvas = buildLayoutCanvas(true, "Back View");
-    const frontLayoutCanvas = buildLayoutCanvas(false, "Front View");
-    pdf.addPage("a4", "landscape");
-    const pageWidth = pdf.internal.pageSize.getWidth();
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(18);
-    pdf.text(`${safeProjectName} - Panel Layout - Back View`, 10, 12);
-    const usableWidth = pageWidth - 20;
-    const usableHeight = pageHeight - 22;
-    const layoutRatio = backLayoutCanvas.width / backLayoutCanvas.height;
-    let drawWidth = usableWidth;
-    let drawHeight = drawWidth / layoutRatio;
-    if (drawHeight > usableHeight) {
-      drawHeight = usableHeight;
-      drawWidth = drawHeight * layoutRatio;
-    }
-    pdf.addImage(backLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 16 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
-
-    pdf.addPage("a4", "landscape");
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(18);
-    pdf.text(`${safeProjectName} - Panel Layout - Front View`, 10, 12);
-    const backLayoutRatio = frontLayoutCanvas.width / frontLayoutCanvas.height;
-    let backDrawWidth = usableWidth;
-    let backDrawHeight = backDrawWidth / backLayoutRatio;
-    if (backDrawHeight > usableHeight) {
-      backDrawHeight = usableHeight;
-      backDrawWidth = backDrawHeight * backLayoutRatio;
-    }
-    pdf.addImage(frontLayoutCanvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - backDrawWidth) / 2, 16 + (usableHeight - backDrawHeight) / 2, backDrawWidth, backDrawHeight);
+    const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
+    const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
+    drawLayoutPage(backLayoutCanvas, "Back View");
+    drawLayoutPage(frontLayoutCanvas, "Front View");
+    addPdfFooters();
     pdf.save(`${fileSafeProjectName}-${panelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
@@ -1616,10 +1639,10 @@ export default function App() {
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
               <div className="flex items-center gap-2 no-print">
                 <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${isFlippedView ? "border-amber-300 bg-amber-100 text-slate-950" : "border-sky-300 bg-sky-100 text-slate-950"}`}>
-                  {isFlippedView ? "Current: Back View | Alt: Front View" : "Current: Front View | Alt: Back View"}
+                  {isFlippedView ? "Current: Front View" : "Current: Back View"}
                 </div>
                 <Button variant="outline" className="text-sm" onClick={() => setIsFlippedView((prev) => !prev)}>
-                  {isFlippedView ? "Show Front View" : "Show Back View"}
+                  {isFlippedView ? "Show Back View" : "Show Front View"}
                 </Button>
               </div>
             </div>
