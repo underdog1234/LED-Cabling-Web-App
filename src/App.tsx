@@ -1042,9 +1042,10 @@ const exportJson = () => {
   const generatePdf = async () => {
   try {
     const jsPDF = (await import("jspdf")).default;
-    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
     const printedAt = new Date().toLocaleString();
-    let y = 18;
+    const usedSignalPorts = signalPorts.filter((port) => signalPortStats[port.id].panels > 0);
+    const usedPowerPorts = powerPorts.filter((port) => powerPortStats[port.id].panels > 0);
 
     const addPdfFooters = () => {
       const totalPages = pdf.getNumberOfPages();
@@ -1055,10 +1056,29 @@ const exportJson = () => {
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(9);
         pdf.setTextColor(71, 85, 105);
-        pdf.text(`Printed ${printedAt}`, 14, pageHeight - 8);
-        pdf.text(`Page ${pageNo} of ${totalPages}`, pageWidth - 14, pageHeight - 8, { align: "right" });
+        pdf.text(`Printed ${printedAt}`, 10, pageHeight - 6);
+        pdf.text(`Page ${pageNo} of ${totalPages}`, pageWidth - 10, pageHeight - 6, { align: "right" });
         pdf.setTextColor(0, 0, 0);
       }
+    };
+
+    const drawInfoBox = (title: string, lines: string[], x: number, y: number, w: number, h: number) => {
+      pdf.setDrawColor(148, 163, 184);
+      pdf.setFillColor(248, 250, 252);
+      pdf.roundedRect(x, y, w, h, 2, 2, "FD");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(11);
+      pdf.text(title, x + 3, y + 6);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      let lineY = y + 12;
+      lines.forEach((line) => {
+        const wrapped = pdf.splitTextToSize(String(line), w - 6);
+        wrapped.forEach((entry: string) => {
+          if (lineY <= y + h - 3) pdf.text(entry, x + 3, lineY);
+          lineY += 4.2;
+        });
+      });
     };
 
     const drawLayoutPage = (canvas: HTMLCanvasElement, viewLabel: string) => {
@@ -1096,84 +1116,73 @@ const exportJson = () => {
 
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
-    pdf.text(safeProjectName, 14, y);
-    y += 8;
+    pdf.text(safeProjectName, 10, 12);
     pdf.setFont("helvetica", "normal");
     pdf.setFontSize(10);
-    pdf.text(`Generated ${printedAt}`, 14, y);
-    y += 10;
-    pdf.setFontSize(11);
+    pdf.text(`Printed ${printedAt}`, 10, 18);
 
-    y = addPdfSectionTitle(pdf, "Wall", y);
-    y = addPdfLine(pdf, "Panel type", panel.name, y);
-    y = addPdfLine(pdf, "Power distro", distro.label, y);
-    y = addPdfLine(pdf, "Panels", `${cols} x ${rows} = ${totalPanels}`, y);
-    y = addPdfLine(pdf, "Size", `${wallWidthM}m x ${wallHeightM}m`, y);
-    y = addPdfLine(pdf, "Resolution", `${wallPixelW} x ${wallPixelH}`, y);
-    y = addPdfLine(pdf, "Aspect ratio", aspectRatio, y);
-    y = addPdfLine(pdf, "Reduced ratio", ratioLabel, y);
+    drawInfoBox("Wall", [
+      `Panel type: ${panel.name}`,
+      `Power distro: ${distro.label}`,
+      `Panels: ${cols} x ${rows} = ${totalPanels}`,
+      `Size: ${wallWidthM}m x ${wallHeightM}m`,
+      `Resolution: ${wallPixelW} x ${wallPixelH}`,
+      `Aspect ratio: ${aspectRatio}`,
+      `Reduced ratio: ${ratioLabel}`,
+    ], 10, 24, 66, 48);
 
-    y = addPdfSectionTitle(pdf, "Power", y);
-    y = addPdfLine(pdf, "Max draw", `${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A`, y);
-    y = addPdfLine(pdf, "Average draw", `${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A`, y);
-    y = addPdfLine(pdf, "Circuits used", String(circuitsUsedMax), y);
-    y = addPdfLine(pdf, "Per outlet", `${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`, y);
-    y = addPdfLine(pdf, "Outlet limit", `${safePanelsPerPowerOutlet} panels per outlet`, y);
-    y = addPdfLine(pdf, "Signal ports used", String(signalPortsUsed), y);
-    y = addPdfLine(pdf, "Power ports used", String(powerPortsUsed), y);
-    y = addPdfLine(pdf, "Unassigned power panels", String(unassignedPowerPanels), y);
+    drawInfoBox("Power", [
+      `Max draw: ${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A`,
+      `Average draw: ${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A`,
+      `Circuits used: ${circuitsUsedMax}`,
+      `Per outlet: ${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`,
+      `Outlet limit: ${safePanelsPerPowerOutlet} panels`,
+      `Unassigned power panels: ${unassignedPowerPanels}`,
+    ], 80, 24, 66, 48);
 
-    y = addPdfSectionTitle(pdf, "Weight + Output", y);
-    y = addPdfLine(pdf, "Total weight", `${totalWeight.toFixed(1)} kg`, y);
-    y = addPdfLine(pdf, "VX1000 use", `${formatNumber(vx1000Percent, 1)}%`, y);
-    y = addPdfLine(pdf, "VX2000 use", `${formatNumber(vx2000Percent, 1)}%`, y);
-    y = addPdfLine(pdf, "Best standard output", bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list", y);
-    y = addPdfLine(pdf, "Signal port limit", `${safePanelsPerSignalPort} panels / ${formatNumber(signalPortPixels)} pixels`, y);
+    drawInfoBox("Weight + Output", [
+      `Total weight: ${totalWeight.toFixed(1)} kg`,
+      `VX1000 use: ${formatNumber(vx1000Percent, 1)}%`,
+      `VX2000 use: ${formatNumber(vx2000Percent, 1)}%`,
+      `Best output: ${bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list"}`,
+      `Signal limit: ${safePanelsPerSignalPort} panels / ${formatNumber(signalPortPixels)} px`,
+    ], 150, 24, 66, 48);
 
-    y = addPdfSectionTitle(pdf, "Phase Load", y);
-    Object.entries(phaseStats).forEach(([phase, stat]) => {
-      y = addPdfLine(pdf, `Phase ${phase.replace("P", "")}`, `${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A, avg ${formatNumber(stat.avgWatts)} W / ${formatNumber(stat.avgAmps, 2)} A, ${formatNumber(stat.utilisation, 1)}%`, y);
-    });
+    drawInfoBox("Deployment + Stock", [
+      `Spare panels: ${sparePanels}`,
+      `Panels incl. spare: ${totalPanelsWithSpare}`,
+      `Boxes: ${boxCount} (${boxSparePanels} spare in boxes)`,
+      `Backup signal loop: ${backupSignalLoop ? "Yes" : "No"}`,
+      `Reinforcement plate: ${includeReinforcementPlate ? "Yes" : "No"}`,
+      `Deployment type: ${deploymentType || "Not selected"}`,
+      ...(deploymentWarning ? [`Warning: ${deploymentWarning}`] : []),
+    ], 220, 24, 66, 48);
 
-    y = addPdfSectionTitle(pdf, "Signal Port Detail", y);
-    signalPorts.forEach((port) => {
-      const stat = signalPortStats[port.id];
-      y = addPdfLine(pdf, port.name, `${stat.panels} panels assigned${stat.firstKey ? `, start ${stat.firstKey}` : ""}${stat.lastKey ? `, end ${stat.lastKey}` : ""}`, y);
-    });
+    drawInfoBox("Phase Load", Object.entries(phaseStats).map(([phase, stat]) =>
+      `Phase ${phase.replace("P", "")}: ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A (${formatNumber(stat.utilisation, 1)}%)`
+    ), 10, 78, 92, 44);
 
-    y = addPdfSectionTitle(pdf, "Power Output Detail", y);
-    powerPorts.forEach((port) => {
-      const stat = powerPortStats[port.id];
-      y = addPdfLine(pdf, port.name, `${stat.panels} panels, phase ${port.phase.replace("P", "")}, ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A, manual ${stat.manualPanels}`, y);
-    });
+    drawInfoBox("Signal Ports In Use", usedSignalPorts.length
+      ? usedSignalPorts.map((port) => {
+          const stat = signalPortStats[port.id];
+          return `${port.name}: ${stat.panels} panels${stat.firstKey ? `, ${stat.firstKey} -> ${stat.lastKey}` : ""}`;
+        })
+      : ["No signal ports in use"], 106, 78, 88, 44);
 
-    y = addPdfSectionTitle(pdf, "Stock Summary", y);
-    stockRows.forEach((row) => {
-      y = addPdfLine(pdf, `${row.code} ${row.name}`, `Required ${row.required}, Stock ${row.stock}, Net ${row.net}, ${row.method}`, y);
-    });
+    drawInfoBox("Power Outputs In Use", usedPowerPorts.length
+      ? usedPowerPorts.map((port) => {
+          const stat = powerPortStats[port.id];
+          return `${port.name}: ${stat.panels} panels, ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A`;
+        })
+      : ["No power outputs in use"], 198, 78, 88, 44);
 
-    y = addPdfSectionTitle(pdf, "Shortfalls", y);
-    if (shortfallRows.length) {
-      shortfallRows.forEach((row) => {
-        y = addPdfLine(pdf, row.name, `Short by ${Math.abs(row.net)}. Required ${row.required}, stock ${row.stock}.`, y);
-      });
-    } else {
-      y = addPdfLine(pdf, "Status", "No stock shortfalls detected.", y);
-    }
+    drawInfoBox("Stock Summary", stockRows.slice(0, 10).map((row) =>
+      `${row.code}: req ${row.required}, net ${row.net} ${row.net < 0 ? "(short)" : ""}`
+    ), 10, 128, 184, 56);
 
-    y = addPdfSectionTitle(pdf, "Additional Details", y);
-    y = addPdfLine(pdf, "Fly bar included", includeFlyBar ? `${flyBarWeight.toFixed(1)} kg` : "No", y);
-    y = addPdfLine(pdf, "Sling included", includeSling ? `${slingWeight.toFixed(1)} kg` : "No", y);
-    y = addPdfLine(pdf, "Power cable included", includePowerCable ? `${powerCableWeight.toFixed(1)} kg` : "No", y);
-    y = addPdfLine(pdf, "Signal cable included", includeSignalCable ? `${signalCableWeight.toFixed(1)} kg` : "No", y);
-    y = addPdfLine(pdf, "Custom weight", includeCustomWeight ? `${customWeight} kg` : "No", y);
-    y = addPdfLine(pdf, "Spare panels", String(sparePanels), y);
-    y = addPdfLine(pdf, "Panels incl. spare", String(totalPanelsWithSpare), y);
-    y = addPdfLine(pdf, "Boxes", `${boxCount} (box spare panels ${boxSparePanels})`, y);
-    y = addPdfLine(pdf, "Backup signal loop", backupSignalLoop ? "Yes" : "No", y);
-    y = addPdfLine(pdf, "Reinforcement plate", includeReinforcementPlate ? "Yes" : "No", y);
-    y = addPdfLine(pdf, "Deployment type", deploymentType || "Not selected", y);
-    if (deploymentWarning) y = addPdfLine(pdf, "Deployment warning", deploymentWarning, y);
+    drawInfoBox("Shortfalls", shortfallRows.length
+      ? shortfallRows.map((row) => `${row.code}: short by ${Math.abs(row.net)}`)
+      : ["No stock shortfalls detected"], 198, 128, 88, 56);
 
     const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
     const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
