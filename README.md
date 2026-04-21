@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.7.1`
+Version `0.8.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -14,7 +14,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
 
-## Recent Changes In v0.7.1
+## Recent Changes In v0.8.0
 
 - Back view is now the default panel-layout view
 - Panel layout clearly shows the current and alternate view
@@ -27,6 +27,12 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Backup signal loop now adds `SEETRONIC SE8FF-05 F/M - F/M Joiner` per signal port with fallback to `SEETRONIC F/M - F/M Cable`
 - Added MG9 ground and floor deployment stock calculations
 - Settings export/import now includes deployment type and backup signal loop
+- Added `Loop together` auto-snake preset
+- Updated signal-port colors to match the NovaStar Unico look more closely
+- Added stock CSV export and simplified stock table columns
+- Added `12317 LED Prod Case` to every project stock list
+- Added orange power-run start outlines on panel layout views
+- Removed the dark background from panel-layout PDF exports
 
 ## Local Development
 

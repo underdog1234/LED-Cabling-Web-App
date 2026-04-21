@@ -35,7 +35,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.7.1";
+const APP_VERSION = "0.8.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -113,6 +113,7 @@ const DEPLOYMENT_TYPES = {
 } as const;
 
 const STOCK_CATALOG = {
+  prodCase: { code: "12317", name: "LED Prod Case", stock: 1 },
   signalJoiner: { code: "12280", name: "SEETRONIC SE8FF-05 F/M - F/M Joiner", stock: 10 },
   signalJoinerCable: { code: "12312", name: "SEETRONIC F/M - F/M Cable", stock: 11 },
   modularFrameScrew: { code: "12253", name: "YES TECH Modular Frame Installation Screw", stock: 384 },
@@ -130,26 +131,26 @@ const STOCK_CATALOG = {
 } as const;
 
 const PORT_COLORS = [
-  "#d946ef",
-  "#2563eb",
-  "#dc2626",
-  "#0891b2",
-  "#7c3aed",
-  "#ea580c",
-  "#be123c",
-  "#0f766e",
-  "#4338ca",
-  "#b45309",
-  "#1d4ed8",
-  "#9d174d",
-  "#0369a1",
-  "#6d28d9",
-  "#c2410c",
-  "#1f2937",
-  "#0f766e",
-  "#4f46e5",
-  "#b91c1c",
-  "#7e22ce",
+  "#48d7d2",
+  "#c3e0ff",
+  "#d58cff",
+  "#69c84c",
+  "#4968f0",
+  "#fff230",
+  "#ffb24a",
+  "#ff8c89",
+  "#71f08d",
+  "#7f84ff",
+  "#ffd6d8",
+  "#d7eaff",
+  "#e8c7ff",
+  "#a9ece7",
+  "#ffc98c",
+  "#fff7b8",
+  "#c4ebb0",
+  "#ff5bc6",
+  "#944fff",
+  "#27f0a4",
 ];
 
 type PanelTypeKey = keyof typeof PANEL_TYPES;
@@ -335,6 +336,33 @@ const getSnakeOrder = (cols: number, rows: number, snakeDirection: string) => {
   }
 
   return ordered;
+};
+
+const getLoopTogetherSegments = (cols: number, rows: number) => {
+  const segments: Array<Array<{ x: number; y: number }>> = [];
+  const leftCount = Math.floor(cols / 2);
+  const rightStart = leftCount;
+
+  for (let pairStart = 0; pairStart < rows; pairStart += 2) {
+    const topY = pairStart;
+    const bottomY = pairStart + 1 < rows ? pairStart + 1 : null;
+
+    const leftSegment: Array<{ x: number; y: number }> = [];
+    for (let x = leftCount - 1; x >= 0; x -= 1) leftSegment.push({ x, y: topY });
+    if (bottomY !== null) {
+      for (let x = 0; x < leftCount; x += 1) leftSegment.push({ x, y: bottomY });
+    }
+    if (leftSegment.length) segments.push(leftSegment);
+
+    const rightSegment: Array<{ x: number; y: number }> = [];
+    for (let x = rightStart; x < cols; x += 1) rightSegment.push({ x, y: topY });
+    if (bottomY !== null) {
+      for (let x = cols - 1; x >= rightStart; x -= 1) rightSegment.push({ x, y: bottomY });
+    }
+    if (rightSegment.length) segments.push(rightSegment);
+  }
+
+  return segments;
 };
 
 const flipX = (x: number, cols: number) => cols - 1 - x;
@@ -567,6 +595,16 @@ export default function App() {
 
   const powerPortsUsed = useMemo(() => Object.values(powerPortStats).filter((stat) => stat.panels > 0).length, [powerPortStats]);
   const signalPortsUsed = useMemo(() => Object.values(signalPortStats).filter((stat) => stat.panels > 0).length, [signalPortStats]);
+  const powerStartKeys = useMemo(
+    () =>
+      new Set(
+        Object.values(powerPortStats)
+          .map((stat) => stat.path[0])
+          .filter(Boolean)
+          .map((cell) => `${cell!.x}-${cell!.y}`),
+      ),
+    [powerPortStats],
+  );
 
   const flyBarWeight = cols * panel.defaults.flyBarWeight;
   const slingWeight = cols * panel.defaults.slingWeight;
@@ -662,6 +700,7 @@ export default function App() {
       pushBaseRow("12223", "MT Mesh Panel", totalPanelsWithSpare, stock.panels ?? 0, `${totalPanels} + ${sparePanels} spare`);
     }
 
+    rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
     rowsOut.push({ code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` });
 
     if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
@@ -705,18 +744,20 @@ export default function App() {
 
     if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.GROUND) {
       const widthUnits = Math.floor(wallWidthM);
-      const heightUnits = Math.floor(wallHeightM);
-      const verticalSupports = widthUnits + 1;
-      const mainFrames = verticalSupports * heightUnits;
-      const sidePieces = Math.max(verticalSupports - 1, 0) * (heightUnits + 1);
-      const verticalJoins = verticalSupports * Math.max(heightUnits - 1, 0);
-      const frameJoins = sidePieces + verticalJoins + widthUnits;
-      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrame950, mainFrames, `${verticalSupports} verticals x ${heightUnits} high`));
-      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrame860, sidePieces, `${Math.max(verticalSupports - 1, 0)} spans x ${heightUnits + 1} side pieces`));
+      const verticalSupports = Math.ceil(cols / 2);
+      const verticalFrameHeightCount = Math.ceil(rows / 3);
+      const backBraces = verticalSupports;
+      const horizontalFramePieces = Math.max(verticalSupports - 1, 0) * (verticalFrameHeightCount + 1);
+      const verticalFrames = verticalSupports * verticalFrameHeightCount;
+      const modularFrameCount = verticalFrames + backBraces + horizontalFramePieces;
+      const verticalJoinCount = verticalSupports * Math.max(verticalFrameHeightCount - 1, 0);
+      const verticalScrewCount = verticalSupports * Math.max(verticalFrameHeightCount, 0) * 2;
+      const horizontalScrewCount = horizontalFramePieces * 4;
+      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrame950, modularFrameCount, `${verticalFrames} vertical + ${backBraces} back brace + ${horizontalFramePieces} horizontal`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.bottomBeam1m, widthUnits, `${widthUnits} full 1m bottom beams`));
-      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameScrew, frameJoins * 2, `2 per frame join across ${frameJoins} joins`));
-      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameUCoupler, verticalSupports * 2, `2 per vertical frame, ${verticalSupports} verticals`));
-      rowsOut.push(makeStockRow(STOCK_CATALOG.connectingJoint, verticalJoins * 2, `2 per vertical join across ${verticalJoins} joins`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameScrew, verticalScrewCount + horizontalScrewCount, `${verticalScrewCount} vertical/back brace + ${horizontalScrewCount} horizontal screws`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameUCoupler, verticalFrames * 2, `2 per vertical frame across ${verticalFrames} frames`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.connectingJoint, verticalJoinCount * 2, `2 per vertical join across ${verticalJoinCount} joins`));
     }
 
     if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.FLOOR) {
@@ -776,9 +817,9 @@ export default function App() {
     if (!ctx) throw new Error("Canvas context unavailable");
     ctx.scale(scale, scale);
 
-    ctx.fillStyle = "#0f172a";
+    ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, svgW + 96, svgH + 96);
-    ctx.fillStyle = "#e2e8f0";
+    ctx.fillStyle = "#0f172a";
     ctx.font = "bold 18px Arial";
     ctx.textAlign = "left";
     ctx.fillText(viewLabel, 20, 24);
@@ -807,7 +848,7 @@ export default function App() {
       ctx.fill();
     };
 
-    ctx.fillStyle = "#e2e8f0";
+    ctx.fillStyle = "#0f172a";
     ctx.font = "16px Arial";
     ctx.textAlign = "center";
     for (let i = 0; i < cols; i += 1) {
@@ -827,9 +868,14 @@ export default function App() {
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
       ctx.fillStyle = fill;
       ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
-      ctx.strokeStyle = "#e2e8f0";
+      ctx.strokeStyle = "#0f172a";
       ctx.lineWidth = 2;
       ctx.strokeRect(x, y, CELL_SIZE, CELL_SIZE);
+      if (powerStartKeys.has(`${cell.x}-${cell.y}`)) {
+        ctx.strokeStyle = POWER_COLOR;
+        ctx.lineWidth = 4;
+        ctx.strokeRect(x + 2, y + 2, CELL_SIZE - 4, CELL_SIZE - 4);
+      }
     });
 
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
@@ -897,7 +943,7 @@ export default function App() {
     return canvas;
   };
 
-  const exportJson = () => {
+const exportJson = () => {
   try {
     const payload = {
       projectName: safeProjectName,
@@ -928,6 +974,24 @@ export default function App() {
     alert("Settings download failed - check console");
   }
 };
+
+  const exportStockCsv = () => {
+    try {
+      const lines = ["Code,Required", ...stockRows.map((row) => `${row.code},${row.required}`)];
+      const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `${fileSafeProjectName}-${panelType}-${cols}x${rows}-stock.csv`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      console.error("Stock CSV download failed", err);
+      alert("Stock CSV download failed - check console");
+    }
+  };
 
 
   const openJson = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1251,7 +1315,8 @@ export default function App() {
   };
 
   const snakePatch = () => {
-    const ordered = getSnakeOrder(cols, rows, snakeDirection);
+    const ordered = snakeDirection === "LOOP_TOGETHER" ? [] : getSnakeOrder(cols, rows, snakeDirection);
+    const loopTogetherSegments = snakeDirection === "LOOP_TOGETHER" ? getLoopTogetherSegments(cols, rows) : [];
 
     setGrid((prev) => {
       const next = cloneGrid(prev);
@@ -1264,18 +1329,39 @@ export default function App() {
           }
         }
 
-        let port = 1;
-        let seq = 1;
-        ordered.forEach(({ x, y }) => {
-          if (port > SIGNAL_PORT_COUNT) return;
-          next[y][x].assignedPort = port;
-          next[y][x].sequence = seq;
-          seq += 1;
-          if (seq > safePanelsPerSignalPort) {
-            port += 1;
-            seq = 1;
-          }
-        });
+        if (snakeDirection === "LOOP_TOGETHER") {
+          let port = 1;
+          let seq = 1;
+          loopTogetherSegments.forEach((segment) => {
+            segment.forEach(({ x, y }) => {
+              if (port > SIGNAL_PORT_COUNT) return;
+              next[y][x].assignedPort = port;
+              next[y][x].sequence = seq;
+              seq += 1;
+              if (seq > safePanelsPerSignalPort) {
+                port += 1;
+                seq = 1;
+              }
+            });
+            if (seq !== 1) {
+              port += 1;
+              seq = 1;
+            }
+          });
+        } else {
+          let port = 1;
+          let seq = 1;
+          ordered.forEach(({ x, y }) => {
+            if (port > SIGNAL_PORT_COUNT) return;
+            next[y][x].assignedPort = port;
+            next[y][x].sequence = seq;
+            seq += 1;
+            if (seq > safePanelsPerSignalPort) {
+              port += 1;
+              seq = 1;
+            }
+          });
+        }
       }
 
       if (patchMode === "power") {
@@ -1489,6 +1575,7 @@ export default function App() {
                   <option value="RLB">Right to Left from the Bottom</option>
                   <option value="TB">Top to Bottom</option>
                   <option value="BT">Bottom to Top</option>
+                  <option value="LOOP_TOGETHER">Loop together</option>
                 </select>
                 <Button className="border-violet-400 bg-violet-600 hover:bg-violet-500" onClick={snakePatch}><Wand2 className="mr-2 h-4 w-4" />Auto Snake</Button>
                 <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSignalCabling}>Clear Signal</Button>
@@ -1715,6 +1802,7 @@ export default function App() {
                     const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
                     const isEdge = signalStat?.firstKey === originalKey || signalStat?.lastKey === originalKey;
                     const isSelected = selectedCell?.x === cell.x && selectedCell?.y === cell.y;
+                    const isPowerStart = powerStartKeys.has(originalKey);
                     const displayColor = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
 
                     return (
@@ -1728,6 +1816,7 @@ export default function App() {
                           height: CELL_SIZE,
                           background: displayColor,
                           border: `2px solid ${isSelected ? "#ffffff" : isEdge ? "black" : "#334155"}`,
+                          boxShadow: isPowerStart ? `0 0 0 3px ${POWER_COLOR}` : "none",
                           color: "white",
                           gridColumnStart: displayX + 1,
                           gridRowStart: cell.y + 1,
@@ -1875,7 +1964,12 @@ export default function App() {
 
         <Card className="border-slate-700 bg-slate-800 print-card">
           <CardHeader>
-            <CardTitle className="text-white [text-shadow:0_0_2px_black]">Stock Calculations</CardTitle>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <CardTitle className="text-white [text-shadow:0_0_2px_black]">Stock Calculations</CardTitle>
+              <Button variant="outline" className="no-print" onClick={exportStockCsv}>
+                <Download className="mr-2 h-4 w-4" />Download CSV
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
             <div className="grid gap-3 md:grid-cols-4">
@@ -1903,22 +1997,16 @@ export default function App() {
                 <thead className="bg-slate-900">
                   <tr>
                     <th className="px-3 py-2">Code</th>
-                    <th className="px-3 py-2">Item</th>
                     <th className="px-3 py-2 text-right">Required</th>
-                    <th className="px-3 py-2 text-right">Stock</th>
-                    <th className="px-3 py-2 text-right">Net</th>
-                    <th className="px-3 py-2">Method</th>
+                    <th className="px-3 py-2">Item</th>
                   </tr>
                 </thead>
                 <tbody>
                   {stockRows.map((row) => (
                     <tr key={`${row.code}-${row.name}`} className="border-t border-slate-700">
                       <td className="px-3 py-2">{row.code}</td>
-                      <td className="px-3 py-2">{row.name}</td>
                       <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
-                      <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
-                      <td className={`px-3 py-2 text-right ${row.net < 0 ? "text-red-300" : "text-emerald-300"}`}>{formatNumber(row.net)}</td>
-                      <td className="px-3 py-2 text-xs text-slate-300">{row.method}</td>
+                      <td className="px-3 py-2">{row.name}</td>
                     </tr>
                   ))}
                 </tbody>
