@@ -132,17 +132,16 @@ const STOCK_CATALOG = {
 
 const PORT_COLORS = [
   "#48d7d2",
-  "#c3e0ff",
   "#d58cff",
-  "#69c84c",
+  "#69d54c",
   "#4968f0",
   "#fff230",
-  "#ffb24a",
-  "#ff8c89",
+  "#f6a548",
+  "#ef8c8f",
   "#71f08d",
   "#7f84ff",
   "#ffd6d8",
-  "#d7eaff",
+  "#cfe6ff",
   "#e8c7ff",
   "#a9ece7",
   "#ffc98c",
@@ -151,6 +150,7 @@ const PORT_COLORS = [
   "#ff5bc6",
   "#944fff",
   "#27f0a4",
+  "#f35c64",
 ];
 
 type PanelTypeKey = keyof typeof PANEL_TYPES;
@@ -311,7 +311,7 @@ const getPowerPortLoadWatts = (
 const getPortPanelCount = (grid: Cell[][], portField: "assignedPort" | "assignedPowerPort", portId: number) =>
   grid.flat().filter((cell) => cell[portField] === portId).length;
 
-const getSnakeOrder = (cols: number, rows: number, snakeDirection: string) => {
+const getSnakeOrder = (cols: number, rows: number, snakeDirection: string, snakeAlternates = true) => {
   const ordered: Array<{ x: number; y: number }> = [];
 
   if (snakeDirection === "LR" || snakeDirection === "RL" || snakeDirection === "LRB" || snakeDirection === "RLB") {
@@ -323,14 +323,14 @@ const getSnakeOrder = (cols: number, rows: number, snakeDirection: string) => {
     yIndexes.forEach((y, rowIndex) => {
       let row = [...Array(cols).keys()];
       if (horizontalDirection === "RL") row.reverse();
-      if (rowIndex % 2 === 1) row.reverse();
+      if (snakeAlternates && rowIndex % 2 === 1) row.reverse();
       row.forEach((x) => ordered.push({ x, y }));
     });
   } else {
     for (let x = 0; x < cols; x += 1) {
       let col = [...Array(rows).keys()];
       if (snakeDirection === "BT") col.reverse();
-      if (x % 2 === 1) col.reverse();
+      if (snakeAlternates && x % 2 === 1) col.reverse();
       col.forEach((y) => ordered.push({ x, y }));
     }
   }
@@ -363,6 +363,16 @@ const getLoopTogetherSegments = (cols: number, rows: number) => {
   }
 
   return segments;
+};
+
+const getVerticalStartOrder = (cols: number, rows: number) => {
+  const ordered: Array<{ x: number; y: number }> = [];
+  for (let x = 0; x < cols; x += 1) {
+    for (let y = 0; y < rows; y += 1) {
+      ordered.push({ x, y });
+    }
+  }
+  return ordered;
 };
 
 const flipX = (x: number, cols: number) => cols - 1 - x;
@@ -450,6 +460,7 @@ export default function App() {
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
   const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
   const [snakeDirection, setSnakeDirection] = useState("LR");
+  const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
   const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
@@ -931,7 +942,7 @@ export default function App() {
       const displayCell = getDisplayCell(cell, cols, flipped);
       const x = displayCell.x * (CELL_SIZE + GRID_GAP);
       const y = cell.y * (CELL_SIZE + GRID_GAP);
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = "#020617";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
       ctx.fillText(`↓ ${cell.y + 1} → ${displayCell.x + 1}`, x + CELL_SIZE / 2, y + 18);
@@ -1315,8 +1326,10 @@ const exportJson = () => {
   };
 
   const snakePatch = () => {
-    const ordered = snakeDirection === "LOOP_TOGETHER" ? [] : getSnakeOrder(cols, rows, snakeDirection);
+    const ordered = snakeDirection === "LOOP_TOGETHER" ? [] : getSnakeOrder(cols, rows, snakeDirection, snakeAlternates);
     const loopTogetherSegments = snakeDirection === "LOOP_TOGETHER" ? getLoopTogetherSegments(cols, rows) : [];
+    const useVerticalLoopTogether = snakeDirection === "LOOP_TOGETHER" && Math.max(cols, rows) > 23;
+    const loopTogetherVertical = useVerticalLoopTogether ? getVerticalStartOrder(cols, rows) : [];
 
     setGrid((prev) => {
       const next = cloneGrid(prev);
@@ -1332,22 +1345,28 @@ const exportJson = () => {
         if (snakeDirection === "LOOP_TOGETHER") {
           let port = 1;
           let seq = 1;
-          loopTogetherSegments.forEach((segment) => {
-            segment.forEach(({ x, y }) => {
-              if (port > SIGNAL_PORT_COUNT) return;
-              next[y][x].assignedPort = port;
-              next[y][x].sequence = seq;
-              seq += 1;
-              if (seq > safePanelsPerSignalPort) {
+          const applyCell = ({ x, y }: { x: number; y: number }) => {
+            if (port > SIGNAL_PORT_COUNT) return;
+            next[y][x].assignedPort = port;
+            next[y][x].sequence = seq;
+            seq += 1;
+            if (seq > safePanelsPerSignalPort) {
+              port += 1;
+              seq = 1;
+            }
+          };
+
+          if (useVerticalLoopTogether) {
+            loopTogetherVertical.forEach(applyCell);
+          } else {
+            loopTogetherSegments.forEach((segment) => {
+              segment.forEach(applyCell);
+              if (seq !== 1) {
                 port += 1;
                 seq = 1;
               }
             });
-            if (seq !== 1) {
-              port += 1;
-              seq = 1;
-            }
-          });
+          }
         } else {
           let port = 1;
           let seq = 1;
@@ -1577,6 +1596,10 @@ const exportJson = () => {
                   <option value="BT">Bottom to Top</option>
                   <option value="LOOP_TOGETHER">Loop together</option>
                 </select>
+                <label className="flex items-center gap-2 rounded border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white">
+                  <input type="checkbox" checked={snakeAlternates} onChange={() => setSnakeAlternates((prev) => !prev)} />
+                  <span>Snake / alternate direction</span>
+                </label>
                 <Button className="border-violet-400 bg-violet-600 hover:bg-violet-500" onClick={snakePatch}><Wand2 className="mr-2 h-4 w-4" />Auto Snake</Button>
                 <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSignalCabling}>Clear Signal</Button>
                 <Button className="border-orange-400 bg-orange-600 hover:bg-orange-500" onClick={clearPowerAssignments}>Clear Power</Button>
@@ -1817,7 +1840,7 @@ const exportJson = () => {
                           background: displayColor,
                           border: `2px solid ${isSelected ? "#ffffff" : isEdge ? "black" : "#334155"}`,
                           boxShadow: isPowerStart ? `0 0 0 3px ${POWER_COLOR}` : "none",
-                          color: "white",
+                          color: "#020617",
                           gridColumnStart: displayX + 1,
                           gridRowStart: cell.y + 1,
                         }}
@@ -1993,20 +2016,22 @@ const exportJson = () => {
             </div>
 
             <div className="overflow-x-auto rounded border border-slate-700">
-              <table className="min-w-full text-left text-sm">
+              <table className="min-w-full table-fixed text-left text-sm">
                 <thead className="bg-slate-900">
                   <tr>
-                    <th className="px-3 py-2">Code</th>
-                    <th className="px-3 py-2 text-right">Required</th>
+                    <th className="w-24 px-3 py-2">Code</th>
+                    <th className="w-28 px-3 py-2 text-right">Required</th>
                     <th className="px-3 py-2">Item</th>
+                    <th className="w-28 px-3 py-2 text-right">Net Stock</th>
                   </tr>
                 </thead>
                 <tbody>
                   {stockRows.map((row) => (
-                    <tr key={`${row.code}-${row.name}`} className="border-t border-slate-700">
-                      <td className="px-3 py-2">{row.code}</td>
+                    <tr key={`${row.code}-${row.name}`} className={`border-t border-slate-700 ${row.net < 0 ? "bg-red-500/10" : ""}`}>
+                      <td className={`px-3 py-2 whitespace-nowrap ${row.net < 0 ? "text-red-200" : ""}`}>{row.code}</td>
                       <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
-                      <td className="px-3 py-2">{row.name}</td>
+                      <td className="px-3 py-2 truncate">{row.name}</td>
+                      <td className={`px-3 py-2 text-right font-semibold ${row.net < 0 ? "text-red-300" : "text-emerald-300"}`}>{formatNumber(row.net)}</td>
                     </tr>
                   ))}
                 </tbody>
