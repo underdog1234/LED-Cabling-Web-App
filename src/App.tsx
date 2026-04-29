@@ -35,7 +35,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.8.0";
+const APP_VERSION = "0.9.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -174,6 +174,7 @@ type Cell = {
   assignedPowerPort: number | null;
   powerSequence: number | null;
   powerManual: boolean;
+  isRemoved: boolean;
 };
 
 type SignalPortStat = {
@@ -243,10 +244,30 @@ const makeGrid = (w: number, h: number): Cell[][] =>
       assignedPowerPort: null,
       powerSequence: null,
       powerManual: false,
+      isRemoved: false,
     })),
   );
 
 const cloneGrid = (grid: Cell[][]): Cell[][] => grid.map((row) => row.map((cell) => ({ ...cell })));
+
+const normalizeGrid = (grid: Cell[][], cols: number, rows: number): Cell[][] =>
+  Array.from({ length: rows }, (_, y) =>
+    Array.from({ length: cols }, (_, x) => {
+      const cell = grid?.[y]?.[x];
+      return {
+        x,
+        y,
+        assignedPort: cell?.assignedPort ?? null,
+        sequence: cell?.sequence ?? null,
+        assignedPowerPort: cell?.assignedPowerPort ?? null,
+        powerSequence: cell?.powerSequence ?? null,
+        powerManual: cell?.powerManual ?? false,
+        isRemoved: cell?.isRemoved ?? false,
+      };
+    }),
+  );
+
+const isActiveCell = (cell: Cell | null | undefined) => Boolean(cell && !cell.isRemoved);
 
 const formatNumber = (value: number, digits = 0) =>
   Number(value || 0).toLocaleString(undefined, {
@@ -263,7 +284,13 @@ const getStatusColor = (percent: number) => {
 const clampActivePort = (value: number, max: number) => Math.min(Math.max(value, 1), max);
 
 const clearSignalOnGrid = (grid: Cell[][]) =>
-  grid.map((row) => row.map((cell) => ({ ...cell, assignedPort: null, sequence: null })));
+  grid.map((row) =>
+    row.map((cell) => ({
+      ...cell,
+      assignedPort: null,
+      sequence: null,
+    })),
+  );
 
 const clearPowerOnGrid = (grid: Cell[][]) =>
   grid.map((row) =>
@@ -284,6 +311,7 @@ const getNextSequence = (
   let max = 0;
   for (const row of grid) {
     for (const cell of row) {
+      if (!isActiveCell(cell)) continue;
       if (cell[portField] === portId && (cell[sequenceField] ?? 0) > max) {
         max = cell[sequenceField] ?? 0;
       }
@@ -301,6 +329,7 @@ const getPowerPortLoadWatts = (
   let watts = 0;
   for (const row of grid) {
     for (const cell of row) {
+      if (!isActiveCell(cell)) continue;
       if (excludeCell && cell.x === excludeCell.x && cell.y === excludeCell.y) continue;
       if (cell.assignedPowerPort === portId) watts += panelPowerMaxW;
     }
@@ -309,7 +338,7 @@ const getPowerPortLoadWatts = (
 };
 
 const getPortPanelCount = (grid: Cell[][], portField: "assignedPort" | "assignedPowerPort", portId: number) =>
-  grid.flat().filter((cell) => cell[portField] === portId).length;
+  grid.flat().filter((cell) => isActiveCell(cell) && cell[portField] === portId).length;
 
 const getSnakeOrder = (cols: number, rows: number, snakeDirection: string, snakeAlternates = true) => {
   const ordered: Array<{ x: number; y: number }> = [];
@@ -474,6 +503,9 @@ export default function App() {
   const [panelsPerPowerOutlet, setPanelsPerPowerOutlet] = useState(panel.defaults.powerPanelsPerOutlet);
   const [panelsPerSignalPort, setPanelsPerSignalPort] = useState(panel.defaults.signalPanelsPerPort);
 
+  const selectedPanel = selectedCell ? grid[selectedCell.y]?.[selectedCell.x] ?? null : null;
+  const selectedDisplayCell = selectedPanel ? getDisplayCell(selectedPanel, cols, isFlippedView) : null;
+
   useEffect(() => {
     setPanelsPerPowerOutlet((prev) => {
       const defaultVal = PANEL_TYPES[panelType].defaults.powerPanelsPerOutlet;
@@ -529,7 +561,20 @@ export default function App() {
   const wallHeightM = rows * panel.h;
   const wallPixelW = cols * panel.pixW;
   const wallPixelH = rows * panel.pixH;
-  const totalPanels = rows * cols;
+  const activeCells = useMemo(() => grid.flat().filter((cell) => !cell.isRemoved), [grid]);
+  const totalPanels = activeCells.length;
+  const activeColumns = useMemo(
+    () => Array.from({ length: cols }, (_, x) => x).filter((x) => activeCells.some((cell) => cell.x === x)),
+    [activeCells, cols],
+  );
+  const activeRows = useMemo(
+    () => Array.from({ length: rows }, (_, y) => y).filter((y) => activeCells.some((cell) => cell.y === y)),
+    [activeCells, rows],
+  );
+  const activeColsCount = activeColumns.length;
+  const activeRowsCount = activeRows.length;
+  const activeWallWidthM = activeColsCount * panel.w;
+  const activeWallHeightM = activeRowsCount * panel.h;
   const panelOnlyWeight = totalPanels * panel.weight;
   const decimalRatio = wallPixelH === 0 ? 0 : wallPixelW / wallPixelH;
   const aspectRatio = wallPixelH === 0 ? "0.00" : `${decimalRatio.toFixed(3)}:1`;
@@ -546,6 +591,7 @@ export default function App() {
 
     for (const row of grid) {
       for (const cell of row) {
+        if (!isActiveCell(cell)) continue;
         if (!cell.assignedPort || !stats[cell.assignedPort]) continue;
         stats[cell.assignedPort].panels += 1;
         stats[cell.assignedPort].path.push(cell);
@@ -584,6 +630,7 @@ export default function App() {
 
     for (const row of grid) {
       for (const cell of row) {
+        if (!isActiveCell(cell)) continue;
         if (!cell.assignedPowerPort || !stats[cell.assignedPowerPort]) continue;
         const stat = stats[cell.assignedPowerPort];
         stat.panels += 1;
@@ -617,8 +664,8 @@ export default function App() {
     [powerPortStats],
   );
 
-  const flyBarWeight = cols * panel.defaults.flyBarWeight;
-  const slingWeight = cols * panel.defaults.slingWeight;
+  const flyBarWeight = activeColsCount * panel.defaults.flyBarWeight;
+  const slingWeight = activeColsCount * panel.defaults.slingWeight;
   const powerCableWeight = powerPortsUsed * 3;
   const signalCableWeight = signalPortsUsed * 1;
   const additionalWeight =
@@ -656,9 +703,7 @@ export default function App() {
   const totalPowerMaxA = totalPanels * powerSpec.maxA;
   const totalPowerAvgW = totalPanels * powerSpec.avgW;
   const totalPowerAvgA = totalPanels * powerSpec.avgA;
-  const unassignedPowerPanels = grid.flat().filter((cell) => !cell.assignedPowerPort).length;
-  const selectedPanel = selectedCell ? grid[selectedCell.y]?.[selectedCell.x] ?? null : null;
-  const selectedDisplayCell = selectedPanel ? getDisplayCell(selectedPanel, cols, isFlippedView) : null;
+  const unassignedPowerPanels = activeCells.filter((cell) => !cell.assignedPowerPort).length;
 
   const sparePanels = Math.ceil(totalPanels * panel.defaults.spareRatio);
   const totalPanelsWithSpare = totalPanels + sparePanels;
@@ -692,11 +737,11 @@ export default function App() {
     if ((deploymentType === DEPLOYMENT_TYPES.GROUND || deploymentType === DEPLOYMENT_TYPES.FLOOR) && panelType !== "MG9") {
       return `${deploymentType} deployment hardware is currently available for MG9 only.`;
     }
-    if (deploymentType === DEPLOYMENT_TYPES.FLOOR && ((wallWidthM % 1 !== 0) || (wallHeightM % 1 !== 0))) {
+    if (deploymentType === DEPLOYMENT_TYPES.FLOOR && ((activeWallWidthM % 1 !== 0) || (activeWallHeightM % 1 !== 0))) {
       return "Floor deployment uses full 1m frame sections only. This wall size is not an exact ground-frame build.";
     }
     return "";
-  }, [deploymentType, panelType, wallWidthM, wallHeightM]);
+  }, [activeWallHeightM, activeWallWidthM, deploymentType, panelType]);
 
   const stockRows = useMemo(() => {
     const stock = panel.stock as Record<string, number>;
@@ -718,10 +763,10 @@ export default function App() {
       rowsOut.push({
         code: panelType === "MG9" ? "12257" : "12262",
         name: panelType === "MG9" ? "MG9 Floor / Hanging Bar" : "MT Floor / Hanging Bar",
-        required: cols,
+        required: activeColsCount,
         stock: stock.hangingBar ?? 0,
-        net: (stock.hangingBar ?? 0) - cols,
-        method: "1 per column",
+        net: (stock.hangingBar ?? 0) - activeColsCount,
+        method: "1 per active column",
       });
     }
 
@@ -754,9 +799,9 @@ export default function App() {
     }
 
     if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.GROUND) {
-      const widthUnits = Math.floor(wallWidthM);
-      const verticalSupports = Math.ceil(cols / 2);
-      const verticalFrameHeightCount = Math.ceil(rows / 3);
+      const widthUnits = Math.floor(activeWallWidthM);
+      const verticalSupports = Math.ceil(activeColsCount / 2);
+      const verticalFrameHeightCount = Math.ceil(activeRowsCount / 3);
       const backBraces = verticalSupports;
       const horizontalFramePieces = Math.max(verticalSupports - 1, 0) * (verticalFrameHeightCount + 1);
       const verticalFrames = verticalSupports * verticalFrameHeightCount;
@@ -773,7 +818,7 @@ export default function App() {
 
     if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.FLOOR) {
       const feet = Math.ceil(totalPanels / 2);
-      const perimeterSegments = cols * 2 + rows * 2;
+      const perimeterSegments = activeColsCount * 2 + activeRowsCount * 2;
       rowsOut.push(makeStockRow(STOCK_CATALOG.danceFloorFeet, feet, "1 per 2 panels"));
       rowsOut.push(makeStockRow(STOCK_CATALOG.temperedGlass, totalPanels, "1 per panel"));
       rowsOut.push(makeStockRow(STOCK_CATALOG.floorReinforcementBar, feet, "1 per foot"));
@@ -783,41 +828,11 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [backupSignalLoop, boxCount, circuitsUsedMax, cols, deploymentType, distroRequired, includeReinforcementPlate, panel, panelType, powerCableTotalRequired, powerDistro, rows, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, wallHeightM, wallWidthM, powerPortsUsed, distro.portCount]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, boxCount, circuitsUsedMax, deploymentType, distroRequired, includeReinforcementPlate, panel, panelType, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, powerPortsUsed, distro.portCount]);
 
   const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
   const safeProjectName = projectName.trim() || "Untitled Project";
   const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
-
-  const ensurePdfSpace = (pdf: any, y: number, needed = 10) => {
-    const pageHeight = pdf.internal.pageSize.getHeight();
-    if (y + needed <= pageHeight - 12) return y;
-    pdf.addPage("a4", "portrait");
-    return 18;
-  };
-
-  const addPdfLine = (pdf: any, label: string, value: string, y: number) => {
-    const wrappedLabel = pdf.splitTextToSize(String(label), 52);
-    const wrappedValue = pdf.splitTextToSize(String(value), 118);
-    const lineCount = Math.max(wrappedLabel.length, wrappedValue.length);
-    const nextY = ensurePdfSpace(pdf, y, Math.max(8, lineCount * 5 + 2));
-    pdf.setFont("helvetica", "bold");
-    pdf.text(wrappedLabel, 14, nextY);
-    pdf.setFont("helvetica", "normal");
-    pdf.text(wrappedValue, 72, nextY);
-    return nextY + Math.max(6, lineCount * 5);
-  };
-
-  const addPdfSectionTitle = (pdf: any, title: string, y: number) => {
-    const nextY = ensurePdfSpace(pdf, y, 12);
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(14);
-    pdf.text(title, 14, nextY);
-    pdf.setDrawColor(203, 213, 225);
-    pdf.line(14, nextY + 2, 196, nextY + 2);
-    pdf.setFontSize(11);
-    return nextY + 10;
-  };
 
   const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
     const scale = 2;
@@ -873,6 +888,7 @@ export default function App() {
     }
 
     grid.flat().forEach((cell) => {
+      if (!isActiveCell(cell)) return;
       const displayCell = getDisplayCell(cell, cols, flipped);
       const x = displayCell.x * (CELL_SIZE + GRID_GAP);
       const y = cell.y * (CELL_SIZE + GRID_GAP);
@@ -939,6 +955,7 @@ export default function App() {
     });
 
     grid.flat().forEach((cell) => {
+      if (!isActiveCell(cell)) return;
       const displayCell = getDisplayCell(cell, cols, flipped);
       const x = displayCell.x * (CELL_SIZE + GRID_GAP);
       const y = cell.y * (CELL_SIZE + GRID_GAP);
@@ -1015,7 +1032,7 @@ const exportJson = () => {
         const data = JSON.parse(String(ev.target?.result || "{}")) as OpenJsonPayload;
         const nextCols = Math.max(1, Number(data.wall?.cols || cols));
         const nextRows = Math.max(1, Number(data.wall?.rows || rows));
-        const nextGrid = Array.isArray(data.patching?.grid) ? data.patching?.grid : makeGrid(nextCols, nextRows);
+        const nextGrid = Array.isArray(data.patching?.grid) ? normalizeGrid(data.patching?.grid, nextCols, nextRows) : makeGrid(nextCols, nextRows);
 
         if (data.projectName) setProjectName(data.projectName);
         if (data.panelType && PANEL_TYPES[data.panelType]) setPanelType(data.panelType);
@@ -1094,7 +1111,7 @@ const exportJson = () => {
       pdf.text(`Project name: ${safeProjectName}`, 10, 20);
       pdf.text(`Panel type: ${panel.name}`, 10, 26);
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
-      pdf.text(`Panels: ${cols} x ${rows} = ${totalPanels}`, 10, 38);
+      pdf.text(`Panels: ${cols} x ${rows} grid, ${totalPanels} active`, 10, 38);
 
       pdf.text(`Size: ${wallWidthM}m x ${wallHeightM}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
@@ -1124,7 +1141,7 @@ const exportJson = () => {
     drawInfoBox("Wall", [
       `Panel type: ${panel.name}`,
       `Power distro: ${distro.label}`,
-      `Panels: ${cols} x ${rows} = ${totalPanels}`,
+      `Panels: ${cols} x ${rows} grid, ${totalPanels} active`,
       `Size: ${wallWidthM}m x ${wallHeightM}m`,
       `Resolution: ${wallPixelW} x ${wallPixelH}`,
       `Aspect ratio: ${aspectRatio}`,
@@ -1146,6 +1163,7 @@ const exportJson = () => {
       `VX2000 use: ${formatNumber(vx2000Percent, 1)}%`,
       `Best output: ${bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list"}`,
       `Signal limit: ${safePanelsPerSignalPort} panels / ${formatNumber(signalPortPixels)} px`,
+      `Active support span: ${activeColsCount} cols x ${activeRowsCount} rows`,
     ], 150, 24, 66, 48);
 
     drawInfoBox("Deployment + Stock", [
@@ -1216,6 +1234,7 @@ const exportJson = () => {
     setGrid((prev) => {
       const current = prev[y]?.[x];
       if (!current) return prev;
+      if (!isActiveCell(current)) return prev;
 
       const currentCount = getPortPanelCount(prev, "assignedPort", activePort);
       const isAlreadySamePort = current.assignedPort === activePort;
@@ -1239,6 +1258,7 @@ const exportJson = () => {
     setGrid((prev) => {
       const current = prev[y]?.[x];
       if (!current) return prev;
+      if (!isActiveCell(current)) return prev;
 
       const currentPanels = getPortPanelCount(prev, "assignedPowerPort", activePowerPort);
       const isAlreadySamePort = current.assignedPowerPort === activePowerPort;
@@ -1260,6 +1280,8 @@ const exportJson = () => {
   };
 
   const startDrag = (x: number, y: number) => {
+    const target = grid[y]?.[x];
+    if (!isActiveCell(target)) return;
     setSelectedCell(null);
     setDragVisited(new Set());
     setIsDragging(true);
@@ -1269,6 +1291,8 @@ const exportJson = () => {
 
   const continueDrag = (x: number, y: number) => {
     if (!isDragging) return;
+    const target = grid[y]?.[x];
+    if (!isActiveCell(target)) return;
     if (patchMode === "signal") assignSignalCell(x, y);
     else assignPowerCell(x, y);
   };
@@ -1282,6 +1306,7 @@ const exportJson = () => {
       const next = cloneGrid(prev);
       const target = next[selectedCell.y]?.[selectedCell.x];
       if (!target) return prev;
+      if (!isActiveCell(target)) return prev;
 
       if (nextPort === null) {
         target.assignedPort = null;
@@ -1310,6 +1335,7 @@ const exportJson = () => {
       const next = cloneGrid(prev);
       const target = next[selectedCell.y]?.[selectedCell.x];
       if (!target) return prev;
+      if (!isActiveCell(target)) return prev;
 
       if (nextPort === null) {
         target.assignedPowerPort = null;
@@ -1356,6 +1382,7 @@ const exportJson = () => {
           let seq = 1;
           const applyCell = ({ x, y }: { x: number; y: number }) => {
             if (port > SIGNAL_PORT_COUNT) return;
+            if (!isActiveCell(next[y]?.[x])) return;
             next[y][x].assignedPort = port;
             next[y][x].sequence = seq;
             seq += 1;
@@ -1381,6 +1408,7 @@ const exportJson = () => {
           let seq = 1;
           ordered.forEach(({ x, y }) => {
             if (port > SIGNAL_PORT_COUNT) return;
+            if (!isActiveCell(next[y]?.[x])) return;
             next[y][x].assignedPort = port;
             next[y][x].sequence = seq;
             seq += 1;
@@ -1403,6 +1431,7 @@ const exportJson = () => {
 
         let portIndex = 0;
         ordered.forEach(({ x, y }) => {
+          if (!isActiveCell(next[y]?.[x])) return;
           while (portIndex < powerPorts.length) {
             const port = powerPorts[portIndex];
             const currentLoad = getPowerPortLoadWatts(next, port.id, powerSpec.maxW);
@@ -1443,6 +1472,53 @@ const exportJson = () => {
   const clearPowerAssignments = () => {
     setGrid((prev) => clearPowerOnGrid(prev));
     setSelectedCell(null);
+  };
+
+  const clearSelectedPanelPatching = () => {
+    if (!selectedCell) return;
+    setGrid((prev) => {
+      const next = cloneGrid(prev);
+      const target = next[selectedCell.y]?.[selectedCell.x];
+      if (!target || !isActiveCell(target)) return prev;
+      target.assignedPort = null;
+      target.sequence = null;
+      target.assignedPowerPort = null;
+      target.powerSequence = null;
+      target.powerManual = false;
+      return next;
+    });
+  };
+
+  const deleteSelectedPanel = () => {
+    if (!selectedCell) return;
+    setGrid((prev) => {
+      const next = cloneGrid(prev);
+      const target = next[selectedCell.y]?.[selectedCell.x];
+      if (!target || target.isRemoved) return prev;
+      target.assignedPort = null;
+      target.sequence = null;
+      target.assignedPowerPort = null;
+      target.powerSequence = null;
+      target.powerManual = false;
+      target.isRemoved = true;
+      return next;
+    });
+  };
+
+  const restoreSelectedPanel = () => {
+    if (!selectedCell) return;
+    setGrid((prev) => {
+      const next = cloneGrid(prev);
+      const target = next[selectedCell.y]?.[selectedCell.x];
+      if (!target || !target.isRemoved) return prev;
+      target.isRemoved = false;
+      target.assignedPort = null;
+      target.sequence = null;
+      target.assignedPowerPort = null;
+      target.powerSequence = null;
+      target.powerManual = false;
+      return next;
+    });
   };
 
   const toDisplayX = (x: number) => (isFlippedView ? flipX(x, cols) : x);
@@ -1624,7 +1700,7 @@ const exportJson = () => {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
-                  <div>Panels: {cols} × {rows} = {totalPanels}</div>
+                  <div>Panels: {cols} × {rows} grid, {totalPanels} active panels</div>
                   <div>Size: {wallWidthM}m × {wallHeightM}m</div>
                   <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
                   <div>Resolution: {wallPixelW} × {wallPixelH}</div>
@@ -1662,6 +1738,7 @@ const exportJson = () => {
                   <div>Avg: {formatNumber(totalPowerAvgW, 0)} W / {formatNumber(totalPowerAvgA, 2)} A</div>
                   <div>Circuits used (max): {circuitsUsedMax}</div>
                   <div>Per outlet: {formatNumber(powerPerCircuitMaxW, 0)} W / {formatNumber(powerPerCircuitMaxA, 2)} A</div>
+                  <div>Active support span: {activeColsCount} cols × {activeRowsCount} rows</div>
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Best Standard Output</div>
@@ -1835,7 +1912,8 @@ const exportJson = () => {
                     const isEdge = signalStat?.firstKey === originalKey || signalStat?.lastKey === originalKey;
                     const isSelected = selectedCell?.x === cell.x && selectedCell?.y === cell.y;
                     const isPowerStart = powerStartKeys.has(originalKey);
-                    const displayColor = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+                    const isRemoved = cell.isRemoved;
+                    const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
 
                     return (
                       <div
@@ -1847,17 +1925,23 @@ const exportJson = () => {
                           width: CELL_SIZE,
                           height: CELL_SIZE,
                           background: displayColor,
-                          border: `2px solid ${isSelected ? "#ffffff" : isEdge ? "black" : "#334155"}`,
-                          boxShadow: isPowerStart ? `0 0 0 3px ${POWER_COLOR}` : "none",
-                          color: "#020617",
+                          border: `2px ${isRemoved ? "dashed" : "solid"} ${isSelected ? "#ffffff" : isRemoved ? "#64748b" : isEdge ? "black" : "#334155"}`,
+                          boxShadow: !isRemoved && isPowerStart ? `0 0 0 3px ${POWER_COLOR}` : "none",
+                          color: isRemoved ? "#94a3b8" : "#020617",
                           gridColumnStart: displayX + 1,
                           gridRowStart: cell.y + 1,
                         }}
                         className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                       >
-                        <div>{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
-                        {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                        {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                        {isRemoved ? (
+                          <div className="text-center text-[10px] font-bold uppercase tracking-wide">Removed</div>
+                        ) : (
+                          <>
+                            <div>{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
+                            {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                            {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                          </>
+                        )}
                       </div>
                     );
                   })}
@@ -1867,28 +1951,40 @@ const exportJson = () => {
 
             {selectedPanel ? (
               <div className="mt-4 rounded bg-slate-900 p-3 text-white [text-shadow:0_0_2px_black] print-card no-print">
-                <div className="mb-2">Panel ({selectedDisplayCell!.x + 1}, {selectedDisplayCell!.y + 1})</div>
+                <div className="mb-2">{selectedPanel.isRemoved ? "Removed Panel Position" : "Panel"} ({selectedDisplayCell!.x + 1}, {selectedDisplayCell!.y + 1})</div>
                 <div className="mb-2 grid gap-2 text-xs md:grid-cols-2">
                   <div>
                     <div>Size: {panel.w}m x {panel.h}m</div>
                     <div>Pixels: {panel.pixW} x {panel.pixH}</div>
-                    <div>Weight: {panel.weight} kg</div>
+                    <div>Weight: {selectedPanel.isRemoved ? "Removed" : `${panel.weight} kg`}</div>
                   </div>
                   <div>
                     <div>Max power: {powerSpec.maxW} W / {powerSpec.maxA.toFixed(2)} A</div>
                     <div>Average power: {powerSpec.avgW} W / {powerSpec.avgA.toFixed(2)} A</div>
                   </div>
                 </div>
-                <div className="grid gap-2 md:grid-cols-2">
-                  <select className="rounded bg-white p-2 text-black" onChange={(e) => applyManualSignalPatch(e.target.value)} value={selectedPanel.assignedPort ?? ""}>
-                    <option value="">Unpatch signal</option>
-                    {signalPorts.map((port) => <option key={port.id} value={port.id}>{port.name}</option>)}
-                  </select>
-                  <select className="rounded bg-white p-2 text-black" onChange={(e) => applyManualPowerPatch(e.target.value)} value={selectedPanel.assignedPowerPort ?? ""}>
-                    <option value="">Unpatch power</option>
-                    {powerPorts.map((port) => <option key={port.id} value={port.id}>{port.name}</option>)}
-                  </select>
-                </div>
+                {!selectedPanel.isRemoved ? (
+                  <>
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <select className="rounded bg-white p-2 text-black" onChange={(e) => applyManualSignalPatch(e.target.value)} value={selectedPanel.assignedPort ?? ""}>
+                        <option value="">Unpatch signal</option>
+                        {signalPorts.map((port) => <option key={port.id} value={port.id}>{port.name}</option>)}
+                      </select>
+                      <select className="rounded bg-white p-2 text-black" onChange={(e) => applyManualPowerPatch(e.target.value)} value={selectedPanel.assignedPowerPort ?? ""}>
+                        <option value="">Unpatch power</option>
+                        {powerPorts.map((port) => <option key={port.id} value={port.id}>{port.name}</option>)}
+                      </select>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSelectedPanelPatching}>Clear Power And Signal Patching</Button>
+                      <Button className="border-slate-400 bg-slate-700 hover:bg-slate-600" onClick={deleteSelectedPanel}>Delete Panel</Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={restoreSelectedPanel}>Restore Panel</Button>
+                  </div>
+                )}
               </div>
             ) : null}
           </CardContent>

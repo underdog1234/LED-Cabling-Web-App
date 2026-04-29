@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.8.0`
+Version `0.9.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -14,7 +14,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
 
-## Recent Changes In v0.8.0
+## Recent Changes In v0.9.0
 
 - Back view is now the default panel-layout view
 - Panel layout clearly shows the current and alternate view
@@ -33,6 +33,9 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Added `12317 LED Prod Case` to every project stock list
 - Added orange power-run start outlines on panel layout views
 - Removed the dark background from panel-layout PDF exports
+- Added removable and restorable panels for non-grid wall shapes
+- Removed panels now skip patching, counts, stock, power, and support math
+- Added per-panel `Clear Power And Signal Patching`, `Delete Panel`, and `Restore Panel` actions
 
 ## Local Development
 
