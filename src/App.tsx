@@ -1,6 +1,7 @@
 ﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ImageDown } from "lucide-react";
+import { HelpCircle, Redo2, Undo2 } from "lucide-react";
 
 // Simple local UI components (replacing shadcn)
 const Button = ({ children, className = "", variant = "solid", type = "button", ...props }: any) => (
@@ -17,8 +18,8 @@ const Button = ({ children, className = "", variant = "solid", type = "button", 
   </button>
 );
 
-const Card = ({ children, className = "" }: any) => (
-  <div className={`rounded border p-3 ${className}`}>{children}</div>
+const Card = ({ children, className = "", ...props }: any) => (
+  <div className={`rounded border p-3 ${className}`} {...props}>{children}</div>
 );
 
 const CardHeader = ({ children, className = "" }: any) => <div className={`mb-2 font-bold ${className}`}>{children}</div>;
@@ -30,13 +31,13 @@ const Input = ({ className = "", ...props }: any) => (
 );
 
 const SIGNAL_PORT_COUNT = 20;
-const CELL_SIZE = 64;
+const CELL_SIZE = 78;
 const GRID_GAP = 8;
 const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.10.0";
+const APP_VERSION = "0.10.1";
 
 const PANEL_TYPES = {
   MG9: {
@@ -132,15 +133,15 @@ const STOCK_CATALOG = {
   mg12Triangle: { code: "12398", name: "Triangle Panel", stock: 20 },
   mg13Curved: { code: "12399", name: "1/4 Curved Panel", stock: 20 },
   mg9Corner: { code: "12225", name: "YES TECH MG9 P2.9 500mm x 500mm LED Corner Panel", stock: 80 },
-  cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 0 },
-  cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 0 },
+  cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 240 },
+  cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 160 },
 } as const;
 
 const PANEL_VARIANTS = {
   STANDARD: { id: "STANDARD", label: "Standard MG9", symbol: "", stockItem: null, shape: "rect" },
   TRIANGLE: { id: "TRIANGLE", label: "MG12 Triangle Panel", symbol: "△", stockItem: STOCK_CATALOG.mg12Triangle, shape: "triangle" },
   CURVED: { id: "CURVED", label: "MG13 1/4 Curved Panel", symbol: "◜", stockItem: STOCK_CATALOG.mg13Curved, shape: "curve" },
-  CORNER: { id: "CORNER", label: "MG9 LED Corner Panel", symbol: "┏", stockItem: STOCK_CATALOG.mg9Corner, shape: "corner" },
+  CORNER: { id: "CORNER", label: "MG9 LED Corner Panel", symbol: "Corner", stockItem: STOCK_CATALOG.mg9Corner, shape: "corner" },
 } as const;
 
 const PORT_COLORS = [
@@ -193,6 +194,12 @@ type Cell = {
   isRemoved: boolean;
   panelVariant: PanelVariantKey;
   rotation: number;
+};
+
+type LayoutSnapshot = {
+  grid: Cell[][];
+  cols: number;
+  rows: number;
 };
 
 type SignalPortStat = {
@@ -457,6 +464,14 @@ const getSelectedKeys = (selectedCells: Set<string>, selectedCell: { x: number; 
   return selectedCell ? new Set([`${selectedCell.x}-${selectedCell.y}`]) : new Set<string>();
 };
 
+const getPanelSymbol = (cell: Cell) => {
+  const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+  const parts = [];
+  if (variant.symbol) parts.push(variant.symbol);
+  if (cell.rotation) parts.push("🔄");
+  return parts.join(" ");
+};
+
 const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0) => {
   const center = CELL_SIZE / 2;
   const panelSpan = CELL_SIZE + GRID_GAP;
@@ -498,6 +513,7 @@ const drawPanelShape = (
   fill: string,
   stroke: string,
   lineWidth = 2,
+  options: { hatchStep?: number; curveStyle?: "test-pattern" } = {},
 ) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
   ctx.save();
@@ -510,7 +526,7 @@ const drawPanelShape = (
 
   if (variant.shape === "triangle") {
     ctx.beginPath();
-    ctx.moveTo(w / 2, 0);
+    ctx.moveTo(0, 0);
     ctx.lineTo(w, h);
     ctx.lineTo(0, h);
     ctx.closePath();
@@ -518,9 +534,16 @@ const drawPanelShape = (
     ctx.stroke();
   } else if (variant.shape === "curve") {
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(w, 0);
-    ctx.quadraticCurveTo(w, h, 0, h);
+    if (options.curveStyle === "test-pattern") {
+      ctx.moveTo(0, 0);
+      ctx.lineTo(w, 0);
+      ctx.quadraticCurveTo(w, h, 0, h);
+    } else {
+      ctx.moveTo(w, 0);
+      ctx.lineTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.quadraticCurveTo(0, 0, w, 0);
+    }
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
@@ -532,7 +555,10 @@ const drawPanelShape = (
   if (variant.shape === "corner") {
     ctx.strokeStyle = "rgba(2, 6, 23, 0.45)";
     ctx.lineWidth = 1;
-    for (let i = -h; i < w + h; i += 8) {
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.clip();
+    for (let i = -h; i < w + h; i += options.hatchStep ?? 10) {
       ctx.beginPath();
       ctx.moveTo(i, h);
       ctx.lineTo(i + h, 0);
@@ -542,11 +568,69 @@ const drawPanelShape = (
   ctx.restore();
 };
 
+const drawCanvasArrowHead = (
+  ctx: CanvasRenderingContext2D,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  color: string,
+  size = 16,
+) => {
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  const baseX1 = x2 - size * Math.cos(angle - Math.PI / 6);
+  const baseY1 = y2 - size * Math.sin(angle - Math.PI / 6);
+  const baseX2 = x2 - size * Math.cos(angle + Math.PI / 6);
+  const baseY2 = y2 - size * Math.sin(angle + Math.PI / 6);
+  ctx.save();
+  ctx.strokeStyle = "#020617";
+  ctx.lineWidth = 2;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(baseX1, baseY1);
+  ctx.lineTo(baseX2, baseY2);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.fill();
+  ctx.restore();
+};
+
 function UtilBar({ percent }: { percent: number }) {
   const color = getStatusColor(percent);
   return (
     <div className="h-2 w-full rounded border border-white/30 bg-black/30">
       <div className="h-2 rounded" style={{ width: `${Math.min(percent, 100)}%`, background: color }} />
+    </div>
+  );
+}
+
+function HelpModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onClose}>
+      <div className="max-w-2xl rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between gap-4">
+          <div className="text-lg font-bold">LED Planner Help</div>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </div>
+        <div className="grid gap-4 text-sm md:grid-cols-2">
+          <div className="space-y-2">
+            <div className="font-semibold text-sky-200">Workflow</div>
+            <div><b>Patching Mode</b>: click or drag panels to patch the selected signal port or power plug.</div>
+            <div><b>Select Mode</b>: drag a box around panels, then change type, rotate, clear, delete, or restore.</div>
+            <div>Click away from the signal/power patching cards to clear the active patch target.</div>
+          </div>
+          <div className="space-y-2">
+            <div className="font-semibold text-sky-200">Shortcuts</div>
+            <div><b>Ctrl+Z</b>: Undo</div>
+            <div><b>Ctrl+Y</b> or <b>Ctrl+Shift+Z</b>: Redo</div>
+            <div><b>Delete</b>: Delete selected panels</div>
+            <div><b>R</b>: Rotate selected panels</div>
+            <div><b>C</b>: Clear selected panel patching</div>
+            <div><b>Escape</b>: Clear selection or leave Select Mode</div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -579,6 +663,9 @@ export default function App() {
   const [panelSelectMode, setPanelSelectMode] = useState(false);
   const [isSelectingPanels, setIsSelectingPanels] = useState(false);
   const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
+  const [undoStack, setUndoStack] = useState<LayoutSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<LayoutSnapshot[]>([]);
+  const [showHelp, setShowHelp] = useState(false);
   const [snakeDirection, setSnakeDirection] = useState("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
@@ -595,9 +682,52 @@ export default function App() {
   const [panelsPerSignalPort, setPanelsPerSignalPort] = useState(panel.defaults.signalPanelsPerPort);
 
   const selectedPanel = selectedCell ? grid[selectedCell.y]?.[selectedCell.x] ?? null : null;
-  const selectedDisplayCell = selectedPanel ? getDisplayCell(selectedPanel, cols, isFlippedView) : null;
   const activeSelectedKeys = getSelectedKeys(selectedCells, selectedCell);
   const selectedCount = activeSelectedKeys.size;
+  const isPatchTargetActive = patchMode === "signal" ? activePort > 0 : activePowerPort > 0;
+
+  const captureLayout = (): LayoutSnapshot => ({ grid: cloneGrid(grid), cols, rows });
+  const restoreLayout = (snapshot: LayoutSnapshot) => {
+    setGrid(cloneGrid(snapshot.grid));
+    setCols(snapshot.cols);
+    setRows(snapshot.rows);
+    setDraftCols(String(snapshot.cols));
+    setDraftRows(String(snapshot.rows));
+    setSelectedCell(null);
+    setSelectedCells(new Set());
+    setDragVisited(new Set());
+    setIsDragging(false);
+    setIsSelectingPanels(false);
+  };
+  const pushUndoSnapshot = (snapshot = captureLayout()) => {
+    setUndoStack((prev) => [...prev.slice(-49), snapshot]);
+    setRedoStack([]);
+  };
+  const commitGridUpdate = (updater: (prev: Cell[][]) => Cell[][]) => {
+    const snapshot = captureLayout();
+    setGrid((prev) => updater(prev));
+    pushUndoSnapshot(snapshot);
+  };
+  const undoLayout = () => {
+    setUndoStack((prev) => {
+      if (!prev.length) return prev;
+      const next = [...prev];
+      const snapshot = next.pop()!;
+      setRedoStack((redoPrev) => [...redoPrev.slice(-49), captureLayout()]);
+      restoreLayout(snapshot);
+      return next;
+    });
+  };
+  const redoLayout = () => {
+    setRedoStack((prev) => {
+      if (!prev.length) return prev;
+      const next = [...prev];
+      const snapshot = next.pop()!;
+      setUndoStack((undoPrev) => [...undoPrev.slice(-49), captureLayout()]);
+      restoreLayout(snapshot);
+      return next;
+    });
+  };
 
   useEffect(() => {
     setPanelsPerPowerOutlet((prev) => {
@@ -641,9 +771,32 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const clearPatchTarget = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest("[data-patch-picker]") || target.closest("[data-panel-layout]")) return;
+      setActivePort(0);
+      setActivePowerPort(0);
+    };
+    window.addEventListener("click", clearPatchTarget);
+    return () => window.removeEventListener("click", clearPatchTarget);
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redoLayout();
+        else undoLayout();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redoLayout();
+        return;
+      }
       if (event.key === "Escape") {
         setSelectedCell(null);
         setSelectedCells(new Set());
@@ -1072,6 +1225,7 @@ export default function App() {
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
+        drawCanvasArrowHead(ctx, x1, y1, x2, y2, color);
       });
     });
 
@@ -1096,6 +1250,7 @@ export default function App() {
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
+        drawCanvasArrowHead(ctx, x1, y1, x2, y2, POWER_COLOR);
       });
     });
 
@@ -1110,8 +1265,7 @@ export default function App() {
       ctx.fillText(`↓ ${cell.y + 1} → ${displayCell.x + 1}`, x + CELL_SIZE / 2, y + 18);
       if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + CELL_SIZE / 2, y + 34);
       if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + CELL_SIZE / 2, y + 50);
-      const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
-      const variantSymbol = `${variant.symbol}${cell.rotation ? " 🔄" : ""}`.trim();
+      const variantSymbol = getPanelSymbol(cell);
       if (variantSymbol) ctx.fillText(variantSymbol, x + CELL_SIZE / 2, y + CELL_SIZE - 6);
     });
 
@@ -1169,13 +1323,14 @@ const exportJson = () => {
     }
   };
 
-  const exportTestPatternJpg = () => {
+  const exportTestPatternPng = () => {
     try {
       const canvas = document.createElement("canvas");
       canvas.width = Math.max(1, wallPixelW);
       canvas.height = Math.max(1, wallPixelH);
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context unavailable");
+      ctx.imageSmoothingEnabled = false;
 
       ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1186,7 +1341,7 @@ const exportJson = () => {
         const x = displayX * panel.pixW;
         const y = cell.y * panel.pixH;
         const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-        drawPanelShape(ctx, x, y, panel.pixW, panel.pixH, cell, fill, "#ffffff", 1);
+        drawPanelShape(ctx, x, y, panel.pixW, panel.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern" });
 
         ctx.fillStyle = "#020617";
         ctx.textAlign = "center";
@@ -1194,8 +1349,7 @@ const exportJson = () => {
         ctx.fillText(`↓ ${cell.y + 1} → ${displayX + 1}`, x + panel.pixW / 2, y + panel.pixH * 0.28);
         if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + panel.pixW / 2, y + panel.pixH * 0.5);
         if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + panel.pixW / 2, y + panel.pixH * 0.72);
-        const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
-        const variantSymbol = `${variant.symbol}${cell.rotation ? " 🔄" : ""}`.trim();
+        const variantSymbol = getPanelSymbol(cell);
         if (variantSymbol) {
           ctx.font = `bold ${Math.max(14, Math.floor(panel.pixH * 0.12))}px Arial`;
           ctx.fillText(variantSymbol, x + panel.pixW / 2, y + panel.pixH - 8);
@@ -1203,14 +1357,14 @@ const exportJson = () => {
       });
 
       const link = document.createElement("a");
-      link.href = canvas.toDataURL("image/jpeg", 0.92);
-      link.setAttribute("download", `${fileSafeProjectName}-${panelType}-${cols}x${rows}-front-test-pattern.jpg`);
+      link.href = canvas.toDataURL("image/png");
+      link.setAttribute("download", `${fileSafeProjectName}-${panelType}-${cols}x${rows}-front-test-pattern.png`);
       document.body.appendChild(link);
       link.click();
       link.remove();
     } catch (err) {
-      console.error("JPG test pattern failed", err);
-      alert("JPG test pattern failed - check console");
+      console.error("PNG test pattern failed", err);
+      alert("PNG test pattern failed - check console");
     }
   };
 
@@ -1241,6 +1395,8 @@ const exportJson = () => {
         setGrid(nextGrid);
         setSelectedCell(null);
         setSelectedCells(new Set());
+        setUndoStack([]);
+        setRedoStack([]);
       } catch {
         window.alert("Invalid JSON file");
       } finally {
@@ -1325,47 +1481,56 @@ const exportJson = () => {
       pdf.addImage(canvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 50 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
     };
 
-    const drawStockPage = () => {
-      pdf.addPage("a4", "landscape");
-      pdf.setFont("helvetica", "bold");
-      pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
-      let y = 22;
+    const drawStockTable = (startIndex: number, startY: number, maxY: number) => {
+      let y = startY;
       const drawHeader = () => {
         pdf.setFillColor(226, 232, 240);
         pdf.rect(10, y - 5, 274, 7, "F");
         pdf.setFont("helvetica", "bold");
-        pdf.setFontSize(9);
+        pdf.setFontSize(8);
         pdf.text("Code", 12, y);
-        pdf.text("Item", 36, y);
-        pdf.text("Required", 182, y, { align: "right" });
-        pdf.text("Spare", 206, y, { align: "right" });
-        pdf.text("Rounded", 234, y, { align: "right" });
-        pdf.text("Stock", 258, y, { align: "right" });
+        pdf.text("Item", 34, y);
+        pdf.text("Required", 174, y, { align: "right" });
+        pdf.text("Spare", 198, y, { align: "right" });
+        pdf.text("Rounded", 226, y, { align: "right" });
+        pdf.text("Stock", 252, y, { align: "right" });
         pdf.text("Net", 282, y, { align: "right" });
-        y += 7;
+        y += 6;
         pdf.setFont("helvetica", "normal");
       };
       drawHeader();
-      stockRows.forEach((row) => {
-        if (y > 190) {
-          pdf.addPage("a4", "landscape");
-          y = 18;
-          drawHeader();
-        }
+      for (let index = startIndex; index < stockRows.length; index += 1) {
+        const row = stockRows[index];
+        if (y > maxY) return index;
         if (row.net < 0) {
           pdf.setFillColor(254, 226, 226);
-          pdf.rect(10, y - 5, 274, 7, "F");
+          pdf.rect(10, y - 4.5, 274, 6.2, "F");
         }
         pdf.text(String(row.code), 12, y);
-        pdf.text(pdf.splitTextToSize(row.name, 118)[0], 36, y);
-        pdf.text(formatNumber(row.required), 182, y, { align: "right" });
-        pdf.text(formatNumber(row.spare ?? 0), 206, y, { align: "right" });
-        pdf.text(formatNumber(row.rounded ?? row.required), 234, y, { align: "right" });
-        pdf.text(formatNumber(row.stock), 258, y, { align: "right" });
+        pdf.text(pdf.splitTextToSize(row.name, 128)[0], 34, y);
+        pdf.text(formatNumber(row.required), 174, y, { align: "right" });
+        pdf.text(formatNumber(row.spare ?? 0), 198, y, { align: "right" });
+        pdf.text(formatNumber(row.rounded ?? row.required), 226, y, { align: "right" });
+        pdf.text(formatNumber(row.stock), 252, y, { align: "right" });
         pdf.text(formatNumber(row.net), 282, y, { align: "right" });
-        y += 7;
-      });
+        y += 6;
+      }
+      return stockRows.length;
+    };
+
+    const drawStockPage = (startIndex = 0) => {
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
+      let nextIndex = drawStockTable(startIndex, 22, 190);
+      while (nextIndex < stockRows.length) {
+        pdf.addPage("a4", "landscape");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(16);
+        pdf.text(`${safeProjectName} - Stock Summary continued`, 10, 12);
+        nextIndex = drawStockTable(nextIndex, 22, 190);
+      }
     };
 
     pdf.setFont("helvetica", "bold");
@@ -1431,17 +1596,14 @@ const exportJson = () => {
         })
       : ["No power outputs in use"], 198, 78, 88, 44);
 
-    drawInfoBox("Stock Summary", stockRows.slice(0, 8).map((row) =>
-      `${row.code} ${row.name}: req ${row.required}, spare ${row.spare ?? 0}, rounded ${row.rounded ?? row.required}, net ${row.net}${row.net < 0 ? " (short)" : ""}`
-    ), 10, 128, 184, 56);
-
-    drawInfoBox("Shortfalls", shortfallRows.length
-      ? shortfallRows.map((row) => `${row.code}: short by ${Math.abs(row.net)}`)
-      : ["No stock shortfalls detected"], 198, 128, 88, 56);
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(12);
+    pdf.text("Stock Summary", 10, 128);
+    const nextStockIndex = drawStockTable(0, 138, 190);
 
     const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
     const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
-    drawStockPage();
+    if (nextStockIndex < stockRows.length) drawStockPage(nextStockIndex);
     drawLayoutPage(backLayoutCanvas, "Back View");
     drawLayoutPage(frontLayoutCanvas, "Front View");
     addPdfFooters();
@@ -1457,6 +1619,7 @@ const exportJson = () => {
     const nextRows = Number.parseInt(draftRows, 10);
     if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows) || nextCols < 1 || nextRows < 1) return;
 
+    pushUndoSnapshot();
     setCols(nextCols);
     setRows(nextRows);
     setGrid(makeGrid(nextCols, nextRows));
@@ -1467,10 +1630,11 @@ const exportJson = () => {
   };
 
   const assignSignalCell = (x: number, y: number) => {
+    if (activePort < 1) return;
     const key = `${x}-${y}`;
     if (dragVisited.has(key)) return;
 
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const current = prev[y]?.[x];
       if (!current) return prev;
       if (!isActiveCell(current)) return prev;
@@ -1491,10 +1655,11 @@ const exportJson = () => {
   };
 
   const assignPowerCell = (x: number, y: number) => {
+    if (activePowerPort < 1) return;
     const key = `${x}-${y}`;
     if (dragVisited.has(key)) return;
 
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const current = prev[y]?.[x];
       if (!current) return prev;
       if (!isActiveCell(current)) return prev;
@@ -1530,8 +1695,6 @@ const exportJson = () => {
       return;
     }
     if (!isActiveCell(target)) return;
-    setSelectedCell({ x, y });
-    setSelectedCells(new Set([`${x}-${y}`]));
     setDragVisited(new Set());
     setIsDragging(true);
     if (patchMode === "signal") assignSignalCell(x, y);
@@ -1566,7 +1729,7 @@ const exportJson = () => {
     const nextPort = value === "" ? null : Number.parseInt(value, 10);
     if (nextPort !== null && (!Number.isFinite(nextPort) || nextPort < 1 || nextPort > SIGNAL_PORT_COUNT)) return;
 
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       const target = next[selectedCell.y]?.[selectedCell.x];
       if (!target) return prev;
@@ -1595,7 +1758,7 @@ const exportJson = () => {
     const nextPort = value === "" ? null : Number.parseInt(value, 10);
     if (nextPort !== null && (!Number.isFinite(nextPort) || nextPort < 1 || nextPort > powerPorts.length)) return;
 
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       const target = next[selectedCell.y]?.[selectedCell.x];
       if (!target) return prev;
@@ -1630,7 +1793,7 @@ const exportJson = () => {
     const useVerticalLoopTogether = snakeDirection === "LOOP_TOGETHER" && Math.max(cols, rows) > 23;
     const loopTogetherVertical = useVerticalLoopTogether ? getVerticalStartOrder(cols, rows) : [];
 
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
 
       if (patchMode === "signal") {
@@ -1728,7 +1891,7 @@ const exportJson = () => {
   };
 
   const clearSignalCabling = () => {
-    setGrid((prev) => clearSignalOnGrid(prev));
+    commitGridUpdate((prev) => clearSignalOnGrid(prev));
     setSelectedCell(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
@@ -1736,7 +1899,7 @@ const exportJson = () => {
   };
 
   const clearPowerAssignments = () => {
-    setGrid((prev) => clearPowerOnGrid(prev));
+    commitGridUpdate((prev) => clearPowerOnGrid(prev));
     setSelectedCell(null);
     setSelectedCells(new Set());
   };
@@ -1744,7 +1907,7 @@ const exportJson = () => {
   const clearSelectedPanelPatching = () => {
     const keys = getSelectedKeys(selectedCells, selectedCell);
     if (!keys.size) return;
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
         const [x, y] = key.split("-").map(Number);
@@ -1763,7 +1926,7 @@ const exportJson = () => {
   const deleteSelectedPanel = () => {
     const keys = getSelectedKeys(selectedCells, selectedCell);
     if (!keys.size) return;
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
         const [x, y] = key.split("-").map(Number);
@@ -1783,7 +1946,7 @@ const exportJson = () => {
   const restoreSelectedPanel = () => {
     const keys = getSelectedKeys(selectedCells, selectedCell);
     if (!keys.size) return;
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
         const [x, y] = key.split("-").map(Number);
@@ -1806,7 +1969,7 @@ const exportJson = () => {
     if (panelType !== "MG9") return;
     const keys = getSelectedKeys(selectedCells, selectedCell);
     if (!keys.size) return;
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
         const [x, y] = key.split("-").map(Number);
@@ -1821,7 +1984,7 @@ const exportJson = () => {
   const rotateSelectedPanels = () => {
     const keys = getSelectedKeys(selectedCells, selectedCell);
     if (!keys.size) return;
-    setGrid((prev) => {
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
         const [x, y] = key.split("-").map(Number);
@@ -1834,7 +1997,8 @@ const exportJson = () => {
   };
 
   const clearSelectedPortPatching = () => {
-    setGrid((prev) => {
+    if ((patchMode === "signal" && activePort < 1) || (patchMode === "power" && activePowerPort < 1)) return;
+    commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       next.forEach((row) =>
         row.forEach((cell) => {
@@ -1862,6 +2026,7 @@ const exportJson = () => {
 
   return (
     <div className="min-h-screen bg-[#0f172a] p-6 text-white print-container">
+      {showHelp ? <HelpModal onClose={() => setShowHelp(false)} /> : null}
       <style>{`
         @media print {
           @page { size: landscape; margin: 12mm; }
@@ -1879,15 +2044,25 @@ const exportJson = () => {
             <div className="text-sm uppercase tracking-[0.2em] text-sky-300">LED cabling planner</div>
             <div className="flex items-center gap-3">
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
-              <span className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200">v{APP_VERSION}</span>
+              <a
+                className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0101"
+                target="_blank"
+                rel="noreferrer"
+              >
+                v{APP_VERSION}
+              </a>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button className="border-cyan-400 bg-cyan-600 hover:bg-cyan-500" onClick={generatePdf}>
               <FileText className="mr-2 h-4 w-4" />Generate PDF
             </Button>
-            <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={exportTestPatternJpg}>
-              <ImageDown className="mr-2 h-4 w-4" />Download JPG Test Pattern
+            <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={exportTestPatternPng}>
+              <ImageDown className="mr-2 h-4 w-4" />Download PNG Test Pattern
+            </Button>
+            <Button variant="outline" onClick={() => setShowHelp(true)}>
+              <HelpCircle className="mr-2 h-4 w-4" />Help
             </Button>
             <Button variant="outline" onClick={exportJson}>
               <Download className="mr-2 h-4 w-4" />Download Settings
@@ -2004,7 +2179,7 @@ const exportJson = () => {
               <div className={`rounded-lg border px-4 py-3 text-sm font-medium [text-shadow:none] no-print ${
                 patchMode === "signal" ? "border-sky-300 bg-sky-100 text-slate-950" : "border-amber-300 bg-amber-100 text-slate-950"
               }`}>
-                Current mode: {patchMode === "signal" ? `Signal patching on port ${activePort}` : `Power patching on plug ${activePowerPort}`}
+                Current mode: {patchMode === "signal" ? (activePort > 0 ? `Signal patching on port ${activePort}` : "Signal patching - no port selected") : (activePowerPort > 0 ? `Power patching on plug ${activePowerPort}` : "Power patching - no plug selected")}
               </div>
 
               <div className="flex flex-wrap items-center gap-2 no-print">
@@ -2022,15 +2197,8 @@ const exportJson = () => {
                   <span>Snake / alternate direction</span>
                 </label>
                 <Button className="border-violet-400 bg-violet-600 hover:bg-violet-500" onClick={snakePatch}><Wand2 className="mr-2 h-4 w-4" />Auto Snake</Button>
-                <Button
-                  variant="outline"
-                  className={panelSelectMode ? "border-emerald-300 bg-emerald-200 font-semibold text-slate-950 hover:bg-emerald-100" : ""}
-                  onClick={() => setPanelSelectMode((prev) => !prev)}
-                >
-                  {panelSelectMode ? "Selecting Panels" : "Select Panels"}
-                </Button>
                 <Button className="border-fuchsia-400 bg-fuchsia-600 hover:bg-fuchsia-500" onClick={clearSelectedPortPatching}>
-                  Clear Selected {patchMode === "signal" ? `Port ${activePort}` : `Plug ${activePowerPort}`}
+                  Clear Selected {patchMode === "signal" ? (activePort > 0 ? `Port ${activePort}` : "Port") : (activePowerPort > 0 ? `Plug ${activePowerPort}` : "Plug")}
                 </Button>
                 <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSignalCabling}>Clear Signal</Button>
                 <Button className="border-orange-400 bg-orange-600 hover:bg-orange-500" onClick={clearPowerAssignments}>Clear Power</Button>
@@ -2175,7 +2343,7 @@ const exportJson = () => {
           </Card>
         </div>
 
-        <Card className="border-slate-700 bg-slate-800 print-card">
+        <Card className="border-slate-700 bg-slate-800 print-card" data-panel-layout>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
@@ -2190,6 +2358,40 @@ const exportJson = () => {
             </div>
           </CardHeader>
           <CardContent>
+            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 p-2 text-xs text-white [text-shadow:0_0_2px_black] no-print">
+              <Button
+                variant="outline"
+                className={panelSelectMode ? "border-emerald-300 bg-emerald-200 font-semibold text-slate-950 hover:bg-emerald-100" : "border-sky-300 bg-sky-700"}
+                onClick={() => {
+                  setPanelSelectMode((prev) => {
+                    if (prev) {
+                      setSelectedCell(null);
+                      setSelectedCells(new Set());
+                    }
+                    return !prev;
+                  });
+                }}
+              >
+                {panelSelectMode ? "Select Mode" : "Patching Mode"}
+              </Button>
+              <span className="text-slate-300">{selectedCount ? `${selectedCount} selected` : "No panels selected"}</span>
+              <select
+                className="rounded bg-white p-2 text-black disabled:opacity-60"
+                disabled={panelType !== "MG9" || selectedCount === 0}
+                value={selectedPanel?.panelVariant ?? "STANDARD"}
+                onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
+              >
+                {(Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).map((key) => (
+                  <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
+                ))}
+              </select>
+              <Button className="border-indigo-400 bg-indigo-600 hover:bg-indigo-500" onClick={rotateSelectedPanels} disabled={selectedCount === 0}>Rotate 🔄</Button>
+              <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Selected Patching</Button>
+              <Button className="border-slate-400 bg-slate-700 hover:bg-slate-600" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete Panel</Button>
+              <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore Panel</Button>
+              <Button variant="outline" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="mr-1 h-4 w-4" />Undo</Button>
+              <Button variant="outline" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="mr-1 h-4 w-4" />Redo</Button>
+            </div>
             <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8 select-none">
               <div className="relative" style={{ width: svgW, height: svgH }}>
                 <div className="absolute left-0 top-[-20px] grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateColumns: `repeat(${cols}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
@@ -2201,6 +2403,11 @@ const exportJson = () => {
                 </div>
 
                 <svg className="absolute inset-0 z-20 pointer-events-none" width={svgW} height={svgH}>
+                  <defs>
+                    <marker id="arrow" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto" markerUnits="strokeWidth">
+                      <polygon points="0 0, 4 2, 0 4" fill="context-stroke" stroke="black" strokeWidth="0.4" />
+                    </marker>
+                  </defs>
                   {Object.entries(signalPortStats).map(([portId, stat]) => {
                     if (!stat.path || stat.path.length < 2) return null;
                     const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
@@ -2217,7 +2424,7 @@ const exportJson = () => {
                         x2 += isFlippedView ? sideOffset : -sideOffset;
                       }
 
-                      return <line key={`sig-${portId}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} style={{ color }} strokeWidth="4" />;
+                      return <line key={`sig-${portId}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} style={{ color }} strokeWidth="4" markerEnd="url(#arrow)" />;
                     });
                   })}
 
@@ -2238,7 +2445,7 @@ const exportJson = () => {
                         x2 += isFlippedView ? -sideOffset : sideOffset;
                       }
 
-                      return <line key={`pow-${port.id}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={POWER_COLOR} style={{ color: POWER_COLOR }} strokeWidth="4" />;
+                      return <line key={`pow-${port.id}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={POWER_COLOR} style={{ color: POWER_COLOR }} strokeWidth="4" markerEnd="url(#arrow)" />;
                     });
                   })}
                 </svg>
@@ -2272,31 +2479,40 @@ const exportJson = () => {
                         onMouseEnter={() => continueDrag(fromDisplayX(displayX), cell.y)}
                         onClick={() => {
                           if (isSelectingPanels) return;
+                          if (!panelSelectMode) return;
                           setSelectedCell({ x: cell.x, y: cell.y });
                           setSelectedCells(new Set([originalKey]));
                         }}
                         style={{
                           width: CELL_SIZE,
                           height: CELL_SIZE,
-                          background: isRemoved ? "transparent" : hatch,
-                          border: `2px ${isRemoved ? "dashed" : "solid"} ${isSelected ? "#ffffff" : isRemoved ? "#64748b" : isEdge ? "black" : "#334155"}`,
+                          background: "transparent",
+                          border: `2px ${isRemoved ? "dashed" : "solid"} ${isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
                           boxShadow: "none",
                           color: isRemoved ? "#94a3b8" : "#020617",
                           gridColumnStart: displayX + 1,
                           gridRowStart: cell.y + 1,
-                          clipPath: isRemoved ? undefined : shapeClipPath,
-                          transform: isRemoved ? undefined : `rotate(${cell.rotation ?? 0}deg)`,
                         }}
-                        className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
+                        className="relative flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                       >
                         {isRemoved ? (
                           null
                         ) : (
                           <>
-                            <div>{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
-                            {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                            {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
-                            {variant.symbol || cell.rotation ? <div className="text-[12px]">{`${variant.symbol}${cell.rotation ? " 🔄" : ""}`}</div> : null}
+                            <div
+                              className="absolute inset-0"
+                              style={{
+                                background: hatch,
+                                border: `2px solid ${isEdge ? "black" : "#334155"}`,
+                                clipPath: shapeClipPath,
+                                transform: `rotate(${cell.rotation ?? 0}deg)`,
+                                transformOrigin: "center",
+                              }}
+                            />
+                            <div className="relative z-10">{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
+                            {cell.assignedPort ? <div className="relative z-10 whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                            {cell.assignedPowerPort ? <div className="relative z-10 whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                            {getPanelSymbol(cell) ? <div className="relative z-10 text-[11px]">{getPanelSymbol(cell)}</div> : null}
                           </>
                         )}
                       </div>
@@ -2306,66 +2522,10 @@ const exportJson = () => {
               </div>
             </div>
 
-            {selectedPanel ? (
-              <div className="mt-4 rounded bg-slate-900 p-3 text-white [text-shadow:0_0_2px_black] print-card no-print">
-                <div className="mb-2">
-                  {selectedCount > 1 ? `${selectedCount} selected panels` : `${selectedPanel.isRemoved ? "Removed Panel Position" : "Panel"} (${selectedDisplayCell!.x + 1}, ${selectedDisplayCell!.y + 1})`}
-                </div>
-                <div className="mb-2 grid gap-2 text-xs md:grid-cols-2">
-                  <div>
-                    <div>Size: {panel.w}m x {panel.h}m</div>
-                    <div>Pixels: {panel.pixW} x {panel.pixH}</div>
-                    <div>Weight: {selectedPanel.isRemoved ? "Removed" : `${panel.weight} kg`}</div>
-                    <div>Variant: {PANEL_VARIANTS[selectedPanel.panelVariant ?? "STANDARD"].label}</div>
-                    <div>Rotation: {selectedPanel.rotation ?? 0}°</div>
-                  </div>
-                  <div>
-                    <div>Max power: {powerSpec.maxW} W / {powerSpec.maxA.toFixed(2)} A</div>
-                    <div>Average power: {powerSpec.avgW} W / {powerSpec.avgA.toFixed(2)} A</div>
-                  </div>
-                </div>
-                {!selectedPanel.isRemoved ? (
-                  <>
-                    <div className="grid gap-2 md:grid-cols-2">
-                      <select className="rounded bg-white p-2 text-black" onChange={(e) => applyManualSignalPatch(e.target.value)} value={selectedPanel.assignedPort ?? ""}>
-                        <option value="">Unpatch signal</option>
-                        {signalPorts.map((port) => <option key={port.id} value={port.id}>{port.name}</option>)}
-                      </select>
-                      <select className="rounded bg-white p-2 text-black" onChange={(e) => applyManualPowerPatch(e.target.value)} value={selectedPanel.assignedPowerPort ?? ""}>
-                        <option value="">Unpatch power</option>
-                        {powerPorts.map((port) => <option key={port.id} value={port.id}>{port.name}</option>)}
-                      </select>
-                    </div>
-                    <div className="mt-3 grid gap-2 md:grid-cols-2">
-                      <select
-                        className="rounded bg-white p-2 text-black disabled:opacity-60"
-                        disabled={panelType !== "MG9"}
-                        value={selectedPanel.panelVariant ?? "STANDARD"}
-                        onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
-                      >
-                        {(Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).map((key) => (
-                          <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
-                        ))}
-                      </select>
-                      <Button className="border-indigo-400 bg-indigo-600 hover:bg-indigo-500" onClick={rotateSelectedPanels}>Rotate Panel 🔄</Button>
-                    </div>
-                    {panelType !== "MG9" ? <div className="mt-2 text-xs text-amber-200">Special panel variants are available for MG9 walls only.</div> : null}
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSelectedPanelPatching}>Clear Power And Signal Patching</Button>
-                      <Button className="border-slate-400 bg-slate-700 hover:bg-slate-600" onClick={deleteSelectedPanel}>Delete Panel</Button>
-                    </div>
-                  </>
-                ) : (
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={restoreSelectedPanel}>Restore Panel</Button>
-                  </div>
-                )}
-              </div>
-            ) : null}
           </CardContent>
         </Card>
 
-        <Card className="border-slate-700 bg-slate-800 print-card no-print">
+        <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Signal Patching</CardTitle>
             <div className="mt-1 text-xs text-slate-300">Manual assignment follows the current Panels per Signal Port maximum.</div>
@@ -2398,7 +2558,7 @@ const exportJson = () => {
           </CardContent>
         </Card>
 
-        <Card className="border-slate-700 bg-slate-800 print-card no-print">
+        <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Power Outputs</CardTitle>
             <div className="mt-1 text-xs text-slate-300">Manual assignment follows the current Panels per Power Outlet maximum.</div>
