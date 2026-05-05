@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.9.0`
+Version `0.10.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -13,6 +13,20 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a PDF report with portrait detail pages plus both layout views in landscape
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.10.0
+
+- Added MG9-compatible special panel variants: MG12 Triangle, MG13 1/4 Curved, and MG9 LED Corner Panel
+- Added persisted per-panel variant and rotation data in settings files
+- Added drag selection for editing multiple panels at once
+- Added multi-panel actions for changing panel type, rotating, clearing patching, deleting, and restoring panels
+- Added keyboard shortcuts: `Delete` removes selected panels, `R` rotates, `C` clears selected patching, and `Escape` clears selection
+- Removed the visible `Removed` label from deleted panels so holes stay visually blank
+- Added a selected-port clear action for clearing the active signal port or power plug
+- Backup signal loop now doubles the effective processor signal-port count while keeping the visible primary patch path readable
+- Added corner-panel stock logic for corner panels, flat connectors, and corner connectors
+- PDF Stock Summary now includes item names, item codes, required quantities, spare stock, rounded quantities, stock, and net stock
+- Added JPG test-pattern export using the front view, true wall pixel dimensions, existing panel labels, port colors, panel shapes, hatches, and a 1px white border
 
 ## Recent Changes In v0.9.0
 

@@ -1,5 +1,6 @@
 ﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ImageDown } from "lucide-react";
 
 // Simple local UI components (replacing shadcn)
 const Button = ({ children, className = "", variant = "solid", type = "button", ...props }: any) => (
@@ -35,7 +36,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.9.0";
+const APP_VERSION = "0.10.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -128,6 +129,18 @@ const STOCK_CATALOG = {
   floorReinforcementBar: { code: "12274", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 384 },
   floorTaperPin: { code: "12275", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 1536 },
   temperedGlass: { code: "12272", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 384 },
+  mg12Triangle: { code: "12398", name: "Triangle Panel", stock: 20 },
+  mg13Curved: { code: "12399", name: "1/4 Curved Panel", stock: 20 },
+  mg9Corner: { code: "12225", name: "YES TECH MG9 P2.9 500mm x 500mm LED Corner Panel", stock: 80 },
+  cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 0 },
+  cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 0 },
+} as const;
+
+const PANEL_VARIANTS = {
+  STANDARD: { id: "STANDARD", label: "Standard MG9", symbol: "", stockItem: null, shape: "rect" },
+  TRIANGLE: { id: "TRIANGLE", label: "MG12 Triangle Panel", symbol: "△", stockItem: STOCK_CATALOG.mg12Triangle, shape: "triangle" },
+  CURVED: { id: "CURVED", label: "MG13 1/4 Curved Panel", symbol: "◜", stockItem: STOCK_CATALOG.mg13Curved, shape: "curve" },
+  CORNER: { id: "CORNER", label: "MG9 LED Corner Panel", symbol: "┏", stockItem: STOCK_CATALOG.mg9Corner, shape: "corner" },
 } as const;
 
 const PORT_COLORS = [
@@ -154,6 +167,7 @@ const PORT_COLORS = [
 ];
 
 type PanelTypeKey = keyof typeof PANEL_TYPES;
+type PanelVariantKey = keyof typeof PANEL_VARIANTS;
 type PowerDistroKey = keyof typeof POWER_DISTROS;
 type DeploymentType = (typeof DEPLOYMENT_TYPES)[keyof typeof DEPLOYMENT_TYPES];
 
@@ -164,6 +178,8 @@ type StockRow = {
   stock: number;
   net: number;
   method: string;
+  spare?: number;
+  rounded?: number;
 };
 
 type Cell = {
@@ -175,6 +191,8 @@ type Cell = {
   powerSequence: number | null;
   powerManual: boolean;
   isRemoved: boolean;
+  panelVariant: PanelVariantKey;
+  rotation: number;
 };
 
 type SignalPortStat = {
@@ -245,6 +263,8 @@ const makeGrid = (w: number, h: number): Cell[][] =>
       powerSequence: null,
       powerManual: false,
       isRemoved: false,
+      panelVariant: "STANDARD",
+      rotation: 0,
     })),
   );
 
@@ -263,6 +283,8 @@ const normalizeGrid = (grid: Cell[][], cols: number, rows: number): Cell[][] =>
         powerSequence: cell?.powerSequence ?? null,
         powerManual: cell?.powerManual ?? false,
         isRemoved: cell?.isRemoved ?? false,
+        panelVariant: cell?.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
+        rotation: Number.isFinite(cell?.rotation) ? ((Number(cell?.rotation) % 360) + 360) % 360 : 0,
       };
     }),
   );
@@ -415,6 +437,8 @@ const makeStockRow = (
   item: { code: string; name: string; stock: number },
   required: number,
   method: string,
+  spare = 0,
+  rounded = required,
 ): StockRow => ({
   code: item.code,
   name: item.name,
@@ -422,7 +446,16 @@ const makeStockRow = (
   stock: item.stock,
   net: item.stock - required,
   method,
+  spare,
+  rounded,
 });
+
+const roundUpToBox = (value: number, boxSize = 10) => Math.ceil(Math.max(value, 0) / boxSize) * boxSize;
+
+const getSelectedKeys = (selectedCells: Set<string>, selectedCell: { x: number; y: number } | null) => {
+  if (selectedCells.size > 0) return selectedCells;
+  return selectedCell ? new Set([`${selectedCell.x}-${selectedCell.y}`]) : new Set<string>();
+};
 
 const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0) => {
   const center = CELL_SIZE / 2;
@@ -453,6 +486,60 @@ const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0) => {
   }
 
   return { x1, y1, x2, y2 };
+};
+
+const drawPanelShape = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  cell: Cell,
+  fill: string,
+  stroke: string,
+  lineWidth = 2,
+) => {
+  const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+  ctx.save();
+  ctx.translate(x + w / 2, y + h / 2);
+  ctx.rotate(((cell.rotation ?? 0) * Math.PI) / 180);
+  ctx.translate(-w / 2, -h / 2);
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lineWidth;
+
+  if (variant.shape === "triangle") {
+    ctx.beginPath();
+    ctx.moveTo(w / 2, 0);
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (variant.shape === "curve") {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(w, 0);
+    ctx.quadraticCurveTo(w, h, 0, h);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else {
+    ctx.fillRect(0, 0, w, h);
+    ctx.strokeRect(0, 0, w, h);
+  }
+
+  if (variant.shape === "corner") {
+    ctx.strokeStyle = "rgba(2, 6, 23, 0.45)";
+    ctx.lineWidth = 1;
+    for (let i = -h; i < w + h; i += 8) {
+      ctx.beginPath();
+      ctx.moveTo(i, h);
+      ctx.lineTo(i + h, 0);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
 };
 
 function UtilBar({ percent }: { percent: number }) {
@@ -488,6 +575,10 @@ export default function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
   const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
+  const [selectedCells, setSelectedCells] = useState<Set<string>>(() => new Set());
+  const [panelSelectMode, setPanelSelectMode] = useState(false);
+  const [isSelectingPanels, setIsSelectingPanels] = useState(false);
+  const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
   const [snakeDirection, setSnakeDirection] = useState("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
@@ -505,6 +596,8 @@ export default function App() {
 
   const selectedPanel = selectedCell ? grid[selectedCell.y]?.[selectedCell.x] ?? null : null;
   const selectedDisplayCell = selectedPanel ? getDisplayCell(selectedPanel, cols, isFlippedView) : null;
+  const activeSelectedKeys = getSelectedKeys(selectedCells, selectedCell);
+  const selectedCount = activeSelectedKeys.size;
 
   useEffect(() => {
     setPanelsPerPowerOutlet((prev) => {
@@ -539,11 +632,42 @@ export default function App() {
   useEffect(() => {
     const stop = () => {
       setIsDragging(false);
+      setIsSelectingPanels(false);
+      setSelectionStart(null);
       setDragVisited(new Set());
     };
     window.addEventListener("mouseup", stop);
     return () => window.removeEventListener("mouseup", stop);
   }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+      if (event.key === "Escape") {
+        setSelectedCell(null);
+        setSelectedCells(new Set());
+        setPanelSelectMode(false);
+        return;
+      }
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        deleteSelectedPanel();
+        return;
+      }
+      if (event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        rotateSelectedPanels();
+        return;
+      }
+      if (event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        clearSelectedPanelPatching();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
 
   const maxAllowedPowerPanels = 21;
   const safePanelsPerPowerOutlet = Math.min(Math.max(panelsPerPowerOutlet, 1), maxAllowedPowerPanels);
@@ -563,6 +687,13 @@ export default function App() {
   const wallPixelH = rows * panel.pixH;
   const activeCells = useMemo(() => grid.flat().filter((cell) => !cell.isRemoved), [grid]);
   const totalPanels = activeCells.length;
+  const panelVariantCounts = useMemo(() => {
+    const counts = Object.fromEntries(Object.keys(PANEL_VARIANTS).map((key) => [key, 0])) as Record<PanelVariantKey, number>;
+    activeCells.forEach((cell) => {
+      counts[cell.panelVariant ?? "STANDARD"] += 1;
+    });
+    return counts;
+  }, [activeCells]);
   const activeColumns = useMemo(
     () => Array.from({ length: cols }, (_, x) => x).filter((x) => activeCells.some((cell) => cell.x === x)),
     [activeCells, cols],
@@ -653,21 +784,11 @@ export default function App() {
 
   const powerPortsUsed = useMemo(() => Object.values(powerPortStats).filter((stat) => stat.panels > 0).length, [powerPortStats]);
   const signalPortsUsed = useMemo(() => Object.values(signalPortStats).filter((stat) => stat.panels > 0).length, [signalPortStats]);
-  const powerStartKeys = useMemo(
-    () =>
-      new Set(
-        Object.values(powerPortStats)
-          .map((stat) => stat.path[0])
-          .filter(Boolean)
-          .map((cell) => `${cell!.x}-${cell!.y}`),
-      ),
-    [powerPortStats],
-  );
-
+  const effectiveSignalPortsUsed = backupSignalLoop ? signalPortsUsed * 2 : signalPortsUsed;
   const flyBarWeight = activeColsCount * panel.defaults.flyBarWeight;
   const slingWeight = activeColsCount * panel.defaults.slingWeight;
   const powerCableWeight = powerPortsUsed * 3;
-  const signalCableWeight = signalPortsUsed * 1;
+  const signalCableWeight = effectiveSignalPortsUsed * 1;
   const additionalWeight =
     (includeFlyBar ? flyBarWeight : 0) +
     (includeSling ? slingWeight : 0) +
@@ -733,6 +854,31 @@ export default function App() {
   const powerCableTotalRequired = circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
   const distroRequired = Math.max(1, Math.ceil(powerPortsUsed / distro.portCount));
 
+  const cornerJoinStats = useMemo(() => {
+    let cornerToFlat = 0;
+    let cornerToCorner = 0;
+    const directions = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+
+    activeCells.forEach((cell) => {
+      if (cell.panelVariant !== "CORNER") return;
+      directions.forEach(([dx, dy]) => {
+        const neighbor = grid[cell.y + dy]?.[cell.x + dx];
+        if (!isActiveCell(neighbor)) return;
+        if (neighbor.panelVariant === "CORNER") {
+          if (neighbor.y > cell.y || (neighbor.y === cell.y && neighbor.x > cell.x)) cornerToCorner += 1;
+        }
+        else cornerToFlat += 1;
+      });
+    });
+
+    return { cornerToFlat, cornerToCorner };
+  }, [activeCells, grid]);
+
   const deploymentWarning = useMemo(() => {
     if ((deploymentType === DEPLOYMENT_TYPES.GROUND || deploymentType === DEPLOYMENT_TYPES.FLOOR) && panelType !== "MG9") {
       return `${deploymentType} deployment hardware is currently available for MG9 only.`;
@@ -751,7 +897,23 @@ export default function App() {
     };
 
     if (panelType === "MG9") {
-      pushBaseRow("12224", "MG9 LED Panel", totalPanelsWithSpare, stock.panels ?? 0, `${totalPanels} + ${sparePanels} spare`);
+      const standardCount = panelVariantCounts.STANDARD;
+      const standardSpare = Math.ceil(standardCount * panel.defaults.spareRatio);
+      const standardRounded = roundUpToBox(standardCount + standardSpare, panel.defaults.panelsPerBox);
+      pushBaseRow("12224", "MG9 LED Panel", standardRounded, stock.panels ?? 0, `${standardCount} + ${standardSpare} spare, rounded to box of ${panel.defaults.panelsPerBox}`);
+      rowsOut[rowsOut.length - 1].spare = standardSpare;
+      rowsOut[rowsOut.length - 1].rounded = standardRounded;
+
+      (Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).forEach((variantKey) => {
+        if (variantKey === "STANDARD") return;
+        const variant = PANEL_VARIANTS[variantKey];
+        const item = variant.stockItem;
+        const count = panelVariantCounts[variantKey];
+        if (!item || count <= 0) return;
+        const spare = Math.ceil(count * panel.defaults.spareRatio);
+        const rounded = roundUpToBox(count + spare, panel.defaults.panelsPerBox);
+        rowsOut.push(makeStockRow(item, rounded, `${count} selected + ${spare} spare, rounded to box of ${panel.defaults.panelsPerBox}`, spare, rounded));
+      });
     } else {
       pushBaseRow("12223", "MT Mesh Panel", totalPanelsWithSpare, stock.panels ?? 0, `${totalPanels} + ${sparePanels} spare`);
     }
@@ -780,7 +942,9 @@ export default function App() {
     });
 
     pushBaseRow("12254", "15m PowerCON Cable", powerCableTotalRequired, stock.powerCable15m ?? 0, `${circuitsUsedMax} + ${Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)} spare`);
+    rowsOut[rowsOut.length - 1].spare = Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
     pushBaseRow("12263", "15m Signal Cable", signalCableTotalRequired, stock.signalCable15m ?? 0, `${signalCableWithBackupRequired}${backupSignalLoop ? ` (${signalCableBaseRequired} x 2 backup loop)` : ""} + ${signalCableSpare} spare`);
+    rowsOut[rowsOut.length - 1].spare = signalCableSpare;
 
     if (backupSignalLoop) {
       const joinerRequired = signalPortsUsed;
@@ -790,6 +954,17 @@ export default function App() {
         rowsOut.push(makeStockRow(STOCK_CATALOG.signalJoinerCable, joinerOverflow, `joiner stock exhausted, overflow ${joinerOverflow}`));
       } else {
         rowsOut.push(makeStockRow(STOCK_CATALOG.signalJoinerCable, 0, `fallback only if ${STOCK_CATALOG.signalJoiner.name} stock is exhausted`));
+      }
+    }
+
+    if (panelType === "MG9") {
+      const flatConnectorRequired = cornerJoinStats.cornerToFlat * 3;
+      const cornerConnectorRequired = cornerJoinStats.cornerToCorner * 3;
+      if (flatConnectorRequired > 0) {
+        rowsOut.push(makeStockRow(STOCK_CATALOG.cornerFlatConnector, flatConnectorRequired, `3 per corner-to-flat join across ${cornerJoinStats.cornerToFlat} joins`));
+      }
+      if (cornerConnectorRequired > 0) {
+        rowsOut.push(makeStockRow(STOCK_CATALOG.cornerCornerConnector, cornerConnectorRequired, `3 per corner-to-corner join across ${cornerJoinStats.cornerToCorner} joins`));
       }
     }
 
@@ -828,7 +1003,7 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, boxCount, circuitsUsedMax, deploymentType, distroRequired, includeReinforcementPlate, panel, panelType, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, powerPortsUsed, distro.portCount]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, boxCount, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panel, panelType, panelVariantCounts, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, powerPortsUsed, distro.portCount]);
 
   const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
   const safeProjectName = projectName.trim() || "Untitled Project";
@@ -855,25 +1030,6 @@ export default function App() {
     ctx.save();
     ctx.translate(offsetX, offsetY);
 
-    const drawArrowHead = (x1: number, y1: number, x2: number, y2: number, color: string) => {
-      const angle = Math.atan2(y2 - y1, x2 - x1);
-      const size = 16;
-      const baseX1 = x2 - size * Math.cos(angle - Math.PI / 6);
-      const baseY1 = y2 - size * Math.sin(angle - Math.PI / 6);
-      const baseX2 = x2 - size * Math.cos(angle + Math.PI / 6);
-      const baseY2 = y2 - size * Math.sin(angle + Math.PI / 6);
-      ctx.strokeStyle = "#020617";
-      ctx.lineWidth = 2;
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.moveTo(x2, y2);
-      ctx.lineTo(baseX1, baseY1);
-      ctx.lineTo(baseX2, baseY2);
-      ctx.closePath();
-      ctx.stroke();
-      ctx.fill();
-    };
-
     ctx.fillStyle = "#0f172a";
     ctx.font = "16px Arial";
     ctx.textAlign = "center";
@@ -893,16 +1049,7 @@ export default function App() {
       const x = displayCell.x * (CELL_SIZE + GRID_GAP);
       const y = cell.y * (CELL_SIZE + GRID_GAP);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-      ctx.fillStyle = fill;
-      ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
-      ctx.strokeStyle = "#0f172a";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x, y, CELL_SIZE, CELL_SIZE);
-      if (powerStartKeys.has(`${cell.x}-${cell.y}`)) {
-        ctx.strokeStyle = POWER_COLOR;
-        ctx.lineWidth = 4;
-        ctx.strokeRect(x + 2, y + 2, CELL_SIZE - 4, CELL_SIZE - 4);
-      }
+      drawPanelShape(ctx, x, y, CELL_SIZE, CELL_SIZE, cell, fill, "#0f172a", 2);
     });
 
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
@@ -925,7 +1072,6 @@ export default function App() {
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
-        drawArrowHead(x1, y1, x2, y2, color);
       });
     });
 
@@ -950,7 +1096,6 @@ export default function App() {
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
         ctx.stroke();
-        drawArrowHead(x1, y1, x2, y2, POWER_COLOR);
       });
     });
 
@@ -965,6 +1110,9 @@ export default function App() {
       ctx.fillText(`↓ ${cell.y + 1} → ${displayCell.x + 1}`, x + CELL_SIZE / 2, y + 18);
       if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + CELL_SIZE / 2, y + 34);
       if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + CELL_SIZE / 2, y + 50);
+      const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+      const variantSymbol = `${variant.symbol}${cell.rotation ? " 🔄" : ""}`.trim();
+      if (variantSymbol) ctx.fillText(variantSymbol, x + CELL_SIZE / 2, y + CELL_SIZE - 6);
     });
 
     ctx.restore();
@@ -1021,6 +1169,51 @@ const exportJson = () => {
     }
   };
 
+  const exportTestPatternJpg = () => {
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, wallPixelW);
+      canvas.height = Math.max(1, wallPixelH);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas context unavailable");
+
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      grid.flat().forEach((cell) => {
+        if (!isActiveCell(cell)) return;
+        const displayX = flipX(cell.x, cols);
+        const x = displayX * panel.pixW;
+        const y = cell.y * panel.pixH;
+        const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+        drawPanelShape(ctx, x, y, panel.pixW, panel.pixH, cell, fill, "#ffffff", 1);
+
+        ctx.fillStyle = "#020617";
+        ctx.textAlign = "center";
+        ctx.font = `bold ${Math.max(12, Math.floor(panel.pixH * 0.085))}px Arial`;
+        ctx.fillText(`↓ ${cell.y + 1} → ${displayX + 1}`, x + panel.pixW / 2, y + panel.pixH * 0.28);
+        if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + panel.pixW / 2, y + panel.pixH * 0.5);
+        if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + panel.pixW / 2, y + panel.pixH * 0.72);
+        const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+        const variantSymbol = `${variant.symbol}${cell.rotation ? " 🔄" : ""}`.trim();
+        if (variantSymbol) {
+          ctx.font = `bold ${Math.max(14, Math.floor(panel.pixH * 0.12))}px Arial`;
+          ctx.fillText(variantSymbol, x + panel.pixW / 2, y + panel.pixH - 8);
+        }
+      });
+
+      const link = document.createElement("a");
+      link.href = canvas.toDataURL("image/jpeg", 0.92);
+      link.setAttribute("download", `${fileSafeProjectName}-${panelType}-${cols}x${rows}-front-test-pattern.jpg`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      console.error("JPG test pattern failed", err);
+      alert("JPG test pattern failed - check console");
+    }
+  };
+
 
   const openJson = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1047,6 +1240,7 @@ const exportJson = () => {
         setDraftRows(String(nextRows));
         setGrid(nextGrid);
         setSelectedCell(null);
+        setSelectedCells(new Set());
       } catch {
         window.alert("Invalid JSON file");
       } finally {
@@ -1131,6 +1325,49 @@ const exportJson = () => {
       pdf.addImage(canvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 50 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
     };
 
+    const drawStockPage = () => {
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
+      let y = 22;
+      const drawHeader = () => {
+        pdf.setFillColor(226, 232, 240);
+        pdf.rect(10, y - 5, 274, 7, "F");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(9);
+        pdf.text("Code", 12, y);
+        pdf.text("Item", 36, y);
+        pdf.text("Required", 182, y, { align: "right" });
+        pdf.text("Spare", 206, y, { align: "right" });
+        pdf.text("Rounded", 234, y, { align: "right" });
+        pdf.text("Stock", 258, y, { align: "right" });
+        pdf.text("Net", 282, y, { align: "right" });
+        y += 7;
+        pdf.setFont("helvetica", "normal");
+      };
+      drawHeader();
+      stockRows.forEach((row) => {
+        if (y > 190) {
+          pdf.addPage("a4", "landscape");
+          y = 18;
+          drawHeader();
+        }
+        if (row.net < 0) {
+          pdf.setFillColor(254, 226, 226);
+          pdf.rect(10, y - 5, 274, 7, "F");
+        }
+        pdf.text(String(row.code), 12, y);
+        pdf.text(pdf.splitTextToSize(row.name, 118)[0], 36, y);
+        pdf.text(formatNumber(row.required), 182, y, { align: "right" });
+        pdf.text(formatNumber(row.spare ?? 0), 206, y, { align: "right" });
+        pdf.text(formatNumber(row.rounded ?? row.required), 234, y, { align: "right" });
+        pdf.text(formatNumber(row.stock), 258, y, { align: "right" });
+        pdf.text(formatNumber(row.net), 282, y, { align: "right" });
+        y += 7;
+      });
+    };
+
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
     pdf.text(safeProjectName, 10, 12);
@@ -1170,7 +1407,7 @@ const exportJson = () => {
       `Spare panels: ${sparePanels}`,
       `Panels incl. spare: ${totalPanelsWithSpare}`,
       `Boxes: ${boxCount} (${boxSparePanels} spare in boxes)`,
-      `Backup signal loop: ${backupSignalLoop ? "Yes" : "No"}`,
+      `Backup signal loop: ${backupSignalLoop ? `Yes, effective signal ports ${effectiveSignalPortsUsed}` : "No"}`,
       `Reinforcement plate: ${includeReinforcementPlate ? "Yes" : "No"}`,
       `Deployment type: ${deploymentType || "Not selected"}`,
       ...(deploymentWarning ? [`Warning: ${deploymentWarning}`] : []),
@@ -1194,8 +1431,8 @@ const exportJson = () => {
         })
       : ["No power outputs in use"], 198, 78, 88, 44);
 
-    drawInfoBox("Stock Summary", stockRows.slice(0, 10).map((row) =>
-      `${row.code}: req ${row.required}, net ${row.net} ${row.net < 0 ? "(short)" : ""}`
+    drawInfoBox("Stock Summary", stockRows.slice(0, 8).map((row) =>
+      `${row.code} ${row.name}: req ${row.required}, spare ${row.spare ?? 0}, rounded ${row.rounded ?? row.required}, net ${row.net}${row.net < 0 ? " (short)" : ""}`
     ), 10, 128, 184, 56);
 
     drawInfoBox("Shortfalls", shortfallRows.length
@@ -1204,6 +1441,7 @@ const exportJson = () => {
 
     const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
     const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
+    drawStockPage();
     drawLayoutPage(backLayoutCanvas, "Back View");
     drawLayoutPage(frontLayoutCanvas, "Front View");
     addPdfFooters();
@@ -1223,6 +1461,7 @@ const exportJson = () => {
     setRows(nextRows);
     setGrid(makeGrid(nextCols, nextRows));
     setSelectedCell(null);
+    setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
   };
@@ -1281,8 +1520,18 @@ const exportJson = () => {
 
   const startDrag = (x: number, y: number) => {
     const target = grid[y]?.[x];
+    if (!target) return;
+    if (panelSelectMode) {
+      const key = `${x}-${y}`;
+      setSelectionStart({ x, y });
+      setIsSelectingPanels(true);
+      setSelectedCell({ x, y });
+      setSelectedCells(new Set([key]));
+      return;
+    }
     if (!isActiveCell(target)) return;
-    setSelectedCell(null);
+    setSelectedCell({ x, y });
+    setSelectedCells(new Set([`${x}-${y}`]));
     setDragVisited(new Set());
     setIsDragging(true);
     if (patchMode === "signal") assignSignalCell(x, y);
@@ -1290,6 +1539,21 @@ const exportJson = () => {
   };
 
   const continueDrag = (x: number, y: number) => {
+    if (panelSelectMode && isSelectingPanels && selectionStart) {
+      const minX = Math.min(selectionStart.x, x);
+      const maxX = Math.max(selectionStart.x, x);
+      const minY = Math.min(selectionStart.y, y);
+      const maxY = Math.max(selectionStart.y, y);
+      const next = new Set<string>();
+      for (let yy = minY; yy <= maxY; yy += 1) {
+        for (let xx = minX; xx <= maxX; xx += 1) {
+          if (grid[yy]?.[xx]) next.add(`${xx}-${yy}`);
+        }
+      }
+      setSelectedCells(next);
+      setSelectedCell({ x, y });
+      return;
+    }
     if (!isDragging) return;
     const target = grid[y]?.[x];
     if (!isActiveCell(target)) return;
@@ -1458,6 +1722,7 @@ const exportJson = () => {
     });
 
     setSelectedCell(null);
+    setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
   };
@@ -1465,6 +1730,7 @@ const exportJson = () => {
   const clearSignalCabling = () => {
     setGrid((prev) => clearSignalOnGrid(prev));
     setSelectedCell(null);
+    setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
   };
@@ -1472,51 +1738,118 @@ const exportJson = () => {
   const clearPowerAssignments = () => {
     setGrid((prev) => clearPowerOnGrid(prev));
     setSelectedCell(null);
+    setSelectedCells(new Set());
   };
 
   const clearSelectedPanelPatching = () => {
-    if (!selectedCell) return;
+    const keys = getSelectedKeys(selectedCells, selectedCell);
+    if (!keys.size) return;
     setGrid((prev) => {
       const next = cloneGrid(prev);
-      const target = next[selectedCell.y]?.[selectedCell.x];
-      if (!target || !isActiveCell(target)) return prev;
-      target.assignedPort = null;
-      target.sequence = null;
-      target.assignedPowerPort = null;
-      target.powerSequence = null;
-      target.powerManual = false;
+      keys.forEach((key) => {
+        const [x, y] = key.split("-").map(Number);
+        const target = next[y]?.[x];
+        if (!target || !isActiveCell(target)) return;
+        target.assignedPort = null;
+        target.sequence = null;
+        target.assignedPowerPort = null;
+        target.powerSequence = null;
+        target.powerManual = false;
+      });
       return next;
     });
   };
 
   const deleteSelectedPanel = () => {
-    if (!selectedCell) return;
+    const keys = getSelectedKeys(selectedCells, selectedCell);
+    if (!keys.size) return;
     setGrid((prev) => {
       const next = cloneGrid(prev);
-      const target = next[selectedCell.y]?.[selectedCell.x];
-      if (!target || target.isRemoved) return prev;
-      target.assignedPort = null;
-      target.sequence = null;
-      target.assignedPowerPort = null;
-      target.powerSequence = null;
-      target.powerManual = false;
-      target.isRemoved = true;
+      keys.forEach((key) => {
+        const [x, y] = key.split("-").map(Number);
+        const target = next[y]?.[x];
+        if (!target || target.isRemoved) return;
+        target.assignedPort = null;
+        target.sequence = null;
+        target.assignedPowerPort = null;
+        target.powerSequence = null;
+        target.powerManual = false;
+        target.isRemoved = true;
+      });
       return next;
     });
   };
 
   const restoreSelectedPanel = () => {
-    if (!selectedCell) return;
+    const keys = getSelectedKeys(selectedCells, selectedCell);
+    if (!keys.size) return;
     setGrid((prev) => {
       const next = cloneGrid(prev);
-      const target = next[selectedCell.y]?.[selectedCell.x];
-      if (!target || !target.isRemoved) return prev;
-      target.isRemoved = false;
-      target.assignedPort = null;
-      target.sequence = null;
-      target.assignedPowerPort = null;
-      target.powerSequence = null;
-      target.powerManual = false;
+      keys.forEach((key) => {
+        const [x, y] = key.split("-").map(Number);
+        const target = next[y]?.[x];
+        if (!target || !target.isRemoved) return;
+        target.isRemoved = false;
+        target.assignedPort = null;
+        target.sequence = null;
+        target.assignedPowerPort = null;
+        target.powerSequence = null;
+        target.powerManual = false;
+        target.panelVariant = "STANDARD";
+        target.rotation = 0;
+      });
+      return next;
+    });
+  };
+
+  const applySelectedPanelVariant = (variant: PanelVariantKey) => {
+    if (panelType !== "MG9") return;
+    const keys = getSelectedKeys(selectedCells, selectedCell);
+    if (!keys.size) return;
+    setGrid((prev) => {
+      const next = cloneGrid(prev);
+      keys.forEach((key) => {
+        const [x, y] = key.split("-").map(Number);
+        const target = next[y]?.[x];
+        if (!target || !isActiveCell(target)) return;
+        target.panelVariant = variant;
+      });
+      return next;
+    });
+  };
+
+  const rotateSelectedPanels = () => {
+    const keys = getSelectedKeys(selectedCells, selectedCell);
+    if (!keys.size) return;
+    setGrid((prev) => {
+      const next = cloneGrid(prev);
+      keys.forEach((key) => {
+        const [x, y] = key.split("-").map(Number);
+        const target = next[y]?.[x];
+        if (!target || !isActiveCell(target)) return;
+        target.rotation = ((target.rotation ?? 0) + 90) % 360;
+      });
+      return next;
+    });
+  };
+
+  const clearSelectedPortPatching = () => {
+    setGrid((prev) => {
+      const next = cloneGrid(prev);
+      next.forEach((row) =>
+        row.forEach((cell) => {
+          if (!isActiveCell(cell)) return;
+          if (patchMode === "signal" && cell.assignedPort === activePort) {
+            cell.assignedPort = null;
+            cell.sequence = null;
+          }
+          if (patchMode === "power" && cell.assignedPowerPort === activePowerPort) {
+            cell.assignedPowerPort = null;
+            cell.powerSequence = null;
+            cell.powerManual = false;
+          }
+        }),
+      );
       return next;
     });
   };
@@ -1552,6 +1885,9 @@ const exportJson = () => {
           <div className="flex flex-wrap items-center gap-2">
             <Button className="border-cyan-400 bg-cyan-600 hover:bg-cyan-500" onClick={generatePdf}>
               <FileText className="mr-2 h-4 w-4" />Generate PDF
+            </Button>
+            <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={exportTestPatternJpg}>
+              <ImageDown className="mr-2 h-4 w-4" />Download JPG Test Pattern
             </Button>
             <Button variant="outline" onClick={exportJson}>
               <Download className="mr-2 h-4 w-4" />Download Settings
@@ -1686,6 +2022,16 @@ const exportJson = () => {
                   <span>Snake / alternate direction</span>
                 </label>
                 <Button className="border-violet-400 bg-violet-600 hover:bg-violet-500" onClick={snakePatch}><Wand2 className="mr-2 h-4 w-4" />Auto Snake</Button>
+                <Button
+                  variant="outline"
+                  className={panelSelectMode ? "border-emerald-300 bg-emerald-200 font-semibold text-slate-950 hover:bg-emerald-100" : ""}
+                  onClick={() => setPanelSelectMode((prev) => !prev)}
+                >
+                  {panelSelectMode ? "Selecting Panels" : "Select Panels"}
+                </Button>
+                <Button className="border-fuchsia-400 bg-fuchsia-600 hover:bg-fuchsia-500" onClick={clearSelectedPortPatching}>
+                  Clear Selected {patchMode === "signal" ? `Port ${activePort}` : `Plug ${activePowerPort}`}
+                </Button>
                 <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSignalCabling}>Clear Signal</Button>
                 <Button className="border-orange-400 bg-orange-600 hover:bg-orange-500" onClick={clearPowerAssignments}>Clear Power</Button>
               </div>
@@ -1717,7 +2063,7 @@ const exportJson = () => {
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Signal + Output</div>
-                  <div>Ports used: {signalPortsUsed}</div>
+                  <div>Ports used: {effectiveSignalPortsUsed}{backupSignalLoop ? ` (${signalPortsUsed} main + ${signalPortsUsed} backup)` : ""}</div>
                   <div>Pixels per port: {formatNumber(panelPixels)}</div>
                   <div>Port capacity use: {formatNumber((wallPixelW * wallPixelH) / Math.max(signalPortsUsed, 1), 0)} px avg</div>
                   <div>VX1000 max use: {formatNumber(vx1000Percent, 1)}%</div>
@@ -1855,12 +2201,6 @@ const exportJson = () => {
                 </div>
 
                 <svg className="absolute inset-0 z-20 pointer-events-none" width={svgW} height={svgH}>
-                  <defs>
-                    <marker id="arrow" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto" markerUnits="strokeWidth">
-                      <polygon points="0 0, 4 2, 0 4" fill="context-stroke" stroke="black" strokeWidth="0.4" />
-                    </marker>
-                  </defs>
-
                   {Object.entries(signalPortStats).map(([portId, stat]) => {
                     if (!stat.path || stat.path.length < 2) return null;
                     const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
@@ -1877,7 +2217,7 @@ const exportJson = () => {
                         x2 += isFlippedView ? sideOffset : -sideOffset;
                       }
 
-                      return <line key={`sig-${portId}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} style={{ color }} strokeWidth="4" markerEnd="url(#arrow)" />;
+                      return <line key={`sig-${portId}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} style={{ color }} strokeWidth="4" />;
                     });
                   })}
 
@@ -1898,7 +2238,7 @@ const exportJson = () => {
                         x2 += isFlippedView ? -sideOffset : sideOffset;
                       }
 
-                      return <line key={`pow-${port.id}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={POWER_COLOR} style={{ color: POWER_COLOR }} strokeWidth="4" markerEnd="url(#arrow)" />;
+                      return <line key={`pow-${port.id}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={POWER_COLOR} style={{ color: POWER_COLOR }} strokeWidth="4" />;
                     });
                   })}
                 </svg>
@@ -1910,36 +2250,53 @@ const exportJson = () => {
                     const originalKey = `${cell.x}-${cell.y}`;
                     const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
                     const isEdge = signalStat?.firstKey === originalKey || signalStat?.lastKey === originalKey;
-                    const isSelected = selectedCell?.x === cell.x && selectedCell?.y === cell.y;
-                    const isPowerStart = powerStartKeys.has(originalKey);
+                    const isSelected = selectedCells.has(originalKey) || (selectedCell?.x === cell.x && selectedCell?.y === cell.y);
                     const isRemoved = cell.isRemoved;
                     const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+                    const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+                    const shapeClipPath =
+                      variant.shape === "triangle"
+                        ? "polygon(50% 0, 100% 100%, 0 100%)"
+                        : variant.shape === "curve"
+                          ? "polygon(0 0, 100% 0, 100% 70%, 72% 100%, 0 100%)"
+                          : undefined;
+                    const hatch =
+                      variant.shape === "corner"
+                        ? `repeating-linear-gradient(135deg, transparent 0 6px, rgba(15,23,42,0.35) 6px 8px), ${displayColor}`
+                        : displayColor;
 
                     return (
                       <div
                         key={key}
                         onMouseDown={() => startDrag(fromDisplayX(displayX), cell.y)}
                         onMouseEnter={() => continueDrag(fromDisplayX(displayX), cell.y)}
-                        onClick={() => setSelectedCell({ x: cell.x, y: cell.y })}
+                        onClick={() => {
+                          if (isSelectingPanels) return;
+                          setSelectedCell({ x: cell.x, y: cell.y });
+                          setSelectedCells(new Set([originalKey]));
+                        }}
                         style={{
                           width: CELL_SIZE,
                           height: CELL_SIZE,
-                          background: displayColor,
+                          background: isRemoved ? "transparent" : hatch,
                           border: `2px ${isRemoved ? "dashed" : "solid"} ${isSelected ? "#ffffff" : isRemoved ? "#64748b" : isEdge ? "black" : "#334155"}`,
-                          boxShadow: !isRemoved && isPowerStart ? `0 0 0 3px ${POWER_COLOR}` : "none",
+                          boxShadow: "none",
                           color: isRemoved ? "#94a3b8" : "#020617",
                           gridColumnStart: displayX + 1,
                           gridRowStart: cell.y + 1,
+                          clipPath: isRemoved ? undefined : shapeClipPath,
+                          transform: isRemoved ? undefined : `rotate(${cell.rotation ?? 0}deg)`,
                         }}
                         className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                       >
                         {isRemoved ? (
-                          <div className="text-center text-[10px] font-bold uppercase tracking-wide">Removed</div>
+                          null
                         ) : (
                           <>
                             <div>{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
                             {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
                             {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                            {variant.symbol || cell.rotation ? <div className="text-[12px]">{`${variant.symbol}${cell.rotation ? " 🔄" : ""}`}</div> : null}
                           </>
                         )}
                       </div>
@@ -1951,12 +2308,16 @@ const exportJson = () => {
 
             {selectedPanel ? (
               <div className="mt-4 rounded bg-slate-900 p-3 text-white [text-shadow:0_0_2px_black] print-card no-print">
-                <div className="mb-2">{selectedPanel.isRemoved ? "Removed Panel Position" : "Panel"} ({selectedDisplayCell!.x + 1}, {selectedDisplayCell!.y + 1})</div>
+                <div className="mb-2">
+                  {selectedCount > 1 ? `${selectedCount} selected panels` : `${selectedPanel.isRemoved ? "Removed Panel Position" : "Panel"} (${selectedDisplayCell!.x + 1}, ${selectedDisplayCell!.y + 1})`}
+                </div>
                 <div className="mb-2 grid gap-2 text-xs md:grid-cols-2">
                   <div>
                     <div>Size: {panel.w}m x {panel.h}m</div>
                     <div>Pixels: {panel.pixW} x {panel.pixH}</div>
                     <div>Weight: {selectedPanel.isRemoved ? "Removed" : `${panel.weight} kg`}</div>
+                    <div>Variant: {PANEL_VARIANTS[selectedPanel.panelVariant ?? "STANDARD"].label}</div>
+                    <div>Rotation: {selectedPanel.rotation ?? 0}°</div>
                   </div>
                   <div>
                     <div>Max power: {powerSpec.maxW} W / {powerSpec.maxA.toFixed(2)} A</div>
@@ -1975,6 +2336,20 @@ const exportJson = () => {
                         {powerPorts.map((port) => <option key={port.id} value={port.id}>{port.name}</option>)}
                       </select>
                     </div>
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      <select
+                        className="rounded bg-white p-2 text-black disabled:opacity-60"
+                        disabled={panelType !== "MG9"}
+                        value={selectedPanel.panelVariant ?? "STANDARD"}
+                        onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
+                      >
+                        {(Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).map((key) => (
+                          <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
+                        ))}
+                      </select>
+                      <Button className="border-indigo-400 bg-indigo-600 hover:bg-indigo-500" onClick={rotateSelectedPanels}>Rotate Panel 🔄</Button>
+                    </div>
+                    {panelType !== "MG9" ? <div className="mt-2 text-xs text-amber-200">Special panel variants are available for MG9 walls only.</div> : null}
                     <div className="mt-3 flex flex-wrap gap-2">
                       <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSelectedPanelPatching}>Clear Power And Signal Patching</Button>
                       <Button className="border-slate-400 bg-slate-700 hover:bg-slate-600" onClick={deleteSelectedPanel}>Delete Panel</Button>
