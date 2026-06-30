@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.10.1`
+Version `0.11.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -13,6 +13,13 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a PDF report with portrait detail pages plus both layout views in landscape
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.11.0
+
+- `MT` panels now render to their true 1m x 0.5m shape (2:1 wide rectangles) in the live panel layout instead of as squares
+- PDF layout pages now draw `MT` panels as the same wide rectangles, with patching and power arrows routed correctly between them
+- Cell width now scales from each panel profile's real-world width/height, so `MG9` stays square and `MT` is twice as wide as tall
+- Confirmed the PNG test pattern exports at the correct native pixel ratio (256 x 64 per `MT` panel)
 
 ## Recent Changes In v0.10.1
 

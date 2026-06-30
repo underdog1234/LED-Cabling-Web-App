@@ -37,7 +37,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.10.1";
+const APP_VERSION = "0.11.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -472,31 +472,33 @@ const getPanelSymbol = (cell: Cell) => {
   return parts.join(" ");
 };
 
-const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0) => {
-  const center = CELL_SIZE / 2;
-  const panelSpan = CELL_SIZE + GRID_GAP;
+const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0, cellW = CELL_SIZE, cellH = CELL_SIZE) => {
+  const centerX = cellW / 2;
+  const centerY = cellH / 2;
+  const spanX = cellW + GRID_GAP;
+  const spanY = cellH + GRID_GAP;
   const gapInset = GRID_GAP / 2;
 
-  let x1 = prev.x * panelSpan + center;
-  let y1 = prev.y * panelSpan + center + offsetY;
-  let x2 = cell.x * panelSpan + center;
-  let y2 = cell.y * panelSpan + center + offsetY;
+  let x1 = prev.x * spanX + centerX;
+  let y1 = prev.y * spanY + centerY + offsetY;
+  let x2 = cell.x * spanX + centerX;
+  let y2 = cell.y * spanY + centerY + offsetY;
 
   if (prev.y === cell.y) {
     if (cell.x > prev.x) {
-      x1 = prev.x * panelSpan + CELL_SIZE + gapInset * 0.3;
-      x2 = cell.x * panelSpan - gapInset * 0.3;
+      x1 = prev.x * spanX + cellW + gapInset * 0.3;
+      x2 = cell.x * spanX - gapInset * 0.3;
     } else {
-      x1 = prev.x * panelSpan - gapInset * 0.3;
-      x2 = cell.x * panelSpan + CELL_SIZE + gapInset * 0.3;
+      x1 = prev.x * spanX - gapInset * 0.3;
+      x2 = cell.x * spanX + cellW + gapInset * 0.3;
     }
   } else if (prev.x === cell.x) {
     if (cell.y > prev.y) {
-      y1 = prev.y * panelSpan + CELL_SIZE + gapInset * 0.3 + offsetY;
-      y2 = cell.y * panelSpan - gapInset * 0.3 + offsetY;
+      y1 = prev.y * spanY + cellH + gapInset * 0.3 + offsetY;
+      y2 = cell.y * spanY - gapInset * 0.3 + offsetY;
     } else {
-      y1 = prev.y * panelSpan - gapInset * 0.3 + offsetY;
-      y2 = cell.y * panelSpan + CELL_SIZE + gapInset * 0.3 + offsetY;
+      y1 = prev.y * spanY - gapInset * 0.3 + offsetY;
+      y2 = cell.y * spanY + cellH + gapInset * 0.3 + offsetY;
     }
   }
 
@@ -674,6 +676,10 @@ export default function App() {
   const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
 
   const panel = PANEL_TYPES[panelType];
+  // Render cells to the panel's real-world aspect ratio. CELL_SIZE is the 0.5m
+  // height unit; width scales with the panel's width/height (MT 1m x 0.5m -> 2:1).
+  const cellH = CELL_SIZE;
+  const cellW = Math.round(CELL_SIZE * (panel.w / panel.h));
   const powerSpec = panel.power;
   const distro = POWER_DISTROS[powerDistro];
   const powerPorts = useMemo(() => makePowerPorts(distro.portCount), [distro.portCount]);
@@ -1188,21 +1194,21 @@ export default function App() {
     ctx.textAlign = "center";
     for (let i = 0; i < cols; i += 1) {
       const displayIndex = flipped ? cols - i : i + 1;
-      ctx.fillText(String(displayIndex), i * (CELL_SIZE + GRID_GAP) + CELL_SIZE / 2, -10);
+      ctx.fillText(String(displayIndex), i * (cellW + GRID_GAP) + cellW / 2, -10);
     }
 
     ctx.textAlign = "left";
     for (let i = 0; i < rows; i += 1) {
-      ctx.fillText(String(i + 1), -28, i * (CELL_SIZE + GRID_GAP) + CELL_SIZE / 2 + 6);
+      ctx.fillText(String(i + 1), -28, i * (cellH + GRID_GAP) + cellH / 2 + 6);
     }
 
     grid.flat().forEach((cell) => {
       if (!isActiveCell(cell)) return;
       const displayCell = getDisplayCell(cell, cols, flipped);
-      const x = displayCell.x * (CELL_SIZE + GRID_GAP);
-      const y = cell.y * (CELL_SIZE + GRID_GAP);
+      const x = displayCell.x * (cellW + GRID_GAP);
+      const y = cell.y * (cellH + GRID_GAP);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-      drawPanelShape(ctx, x, y, CELL_SIZE, CELL_SIZE, cell, fill, "#0f172a", 2);
+      drawPanelShape(ctx, x, y, cellW, cellH, cell, fill, "#0f172a", 2);
     });
 
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
@@ -1215,7 +1221,7 @@ export default function App() {
         if (idx === 0) return;
         const prev = getDisplayCell(stat.path[idx - 1], cols, flipped);
         const current = getDisplayCell(cell, cols, flipped);
-        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0);
+        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0, cellW, cellH);
         if (current.y !== prev.y) {
           const sideOffset = GRID_GAP * 0.5;
           x1 += flipped ? sideOffset : -sideOffset;
@@ -1240,7 +1246,7 @@ export default function App() {
         if (idx === 0) return;
         const prev = getDisplayCell(path[idx - 1], cols, flipped);
         const current = getDisplayCell(cell, cols, flipped);
-        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4);
+        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4, cellW, cellH);
         if (current.y !== prev.y) {
           const sideOffset = GRID_GAP * 0.5;
           x1 += flipped ? -sideOffset : sideOffset;
@@ -1257,16 +1263,16 @@ export default function App() {
     grid.flat().forEach((cell) => {
       if (!isActiveCell(cell)) return;
       const displayCell = getDisplayCell(cell, cols, flipped);
-      const x = displayCell.x * (CELL_SIZE + GRID_GAP);
-      const y = cell.y * (CELL_SIZE + GRID_GAP);
+      const x = displayCell.x * (cellW + GRID_GAP);
+      const y = cell.y * (cellH + GRID_GAP);
       ctx.fillStyle = "#020617";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
-      ctx.fillText(`↓ ${cell.y + 1} → ${displayCell.x + 1}`, x + CELL_SIZE / 2, y + 18);
-      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + CELL_SIZE / 2, y + 34);
-      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + CELL_SIZE / 2, y + 50);
+      ctx.fillText(`↓ ${cell.y + 1} → ${displayCell.x + 1}`, x + cellW / 2, y + 18);
+      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + cellW / 2, y + 34);
+      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + cellW / 2, y + 50);
       const variantSymbol = getPanelSymbol(cell);
-      if (variantSymbol) ctx.fillText(variantSymbol, x + CELL_SIZE / 2, y + CELL_SIZE - 6);
+      if (variantSymbol) ctx.fillText(variantSymbol, x + cellW / 2, y + cellH - 6);
     });
 
     ctx.restore();
@@ -2021,8 +2027,8 @@ const exportJson = () => {
   const toDisplayX = (x: number) => (isFlippedView ? flipX(x, cols) : x);
   const fromDisplayX = (displayX: number) => (isFlippedView ? flipX(displayX, cols) : displayX);
 
-  const svgW = cols * CELL_SIZE + (cols - 1) * GRID_GAP;
-  const svgH = rows * CELL_SIZE + (rows - 1) * GRID_GAP;
+  const svgW = cols * cellW + (cols - 1) * GRID_GAP;
+  const svgH = rows * cellH + (rows - 1) * GRID_GAP;
 
   return (
     <div className="min-h-screen bg-[#0f172a] p-6 text-white print-container">
@@ -2046,7 +2052,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0101"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0110"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -2394,11 +2400,11 @@ const exportJson = () => {
             </div>
             <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8 select-none">
               <div className="relative" style={{ width: svgW, height: svgH }}>
-                <div className="absolute left-0 top-[-20px] grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateColumns: `repeat(${cols}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
+                <div className="absolute left-0 top-[-20px] grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateColumns: `repeat(${cols}, ${cellW}px)`, gap: GRID_GAP }}>
                   {Array.from({ length: cols }).map((_, index) => <div key={`col-${index}`} className="text-center">{isFlippedView ? cols - index : index + 1}</div>)}
                 </div>
 
-                <div className="absolute left-[-30px] top-0 grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateRows: `repeat(${rows}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
+                <div className="absolute left-[-30px] top-0 grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateRows: `repeat(${rows}, ${cellH}px)`, gap: GRID_GAP }}>
                   {Array.from({ length: rows }).map((_, index) => <div key={`row-${index}`} className="flex items-center">{index + 1}</div>)}
                 </div>
 
@@ -2416,7 +2422,7 @@ const exportJson = () => {
                       if (idx === 0) return null;
                       const prev = getDisplayCell(stat.path[idx - 1], cols, isFlippedView);
                       const current = getDisplayCell(cell, cols, isFlippedView);
-                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0);
+                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0, cellW, cellH);
 
                       if (current.y !== prev.y) {
                         const sideOffset = GRID_GAP * 0.5;
@@ -2437,7 +2443,7 @@ const exportJson = () => {
                       if (idx === 0) return null;
                       const prev = getDisplayCell(path[idx - 1], cols, isFlippedView);
                       const current = getDisplayCell(cell, cols, isFlippedView);
-                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4);
+                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4, cellW, cellH);
 
                       if (current.y !== prev.y) {
                         const sideOffset = GRID_GAP * 0.5;
@@ -2450,7 +2456,7 @@ const exportJson = () => {
                   })}
                 </svg>
 
-                <div className="absolute inset-0 z-10 grid" style={{ gridTemplateColumns: `repeat(${cols}, ${CELL_SIZE}px)`, gap: GRID_GAP }}>
+                <div className="absolute inset-0 z-10 grid" style={{ gridTemplateColumns: `repeat(${cols}, ${cellW}px)`, gap: GRID_GAP }}>
                   {grid.flat().map((cell) => {
                     const displayX = toDisplayX(cell.x);
                     const key = `${displayX}-${cell.y}`;
@@ -2484,8 +2490,8 @@ const exportJson = () => {
                           setSelectedCells(new Set([originalKey]));
                         }}
                         style={{
-                          width: CELL_SIZE,
-                          height: CELL_SIZE,
+                          width: cellW,
+                          height: cellH,
                           background: "transparent",
                           border: `2px ${isRemoved ? "dashed" : "solid"} ${isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
                           boxShadow: "none",
