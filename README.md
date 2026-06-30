@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.11.0`
+Version `0.12.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -13,6 +13,13 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a PDF report with portrait detail pages plus both layout views in landscape
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.12.0
+
+- Added a `Match Power To Signal Pattern` button next to `Power Patch Mode`
+- Power patching can now follow the existing signal patch: panels are powered in signal order (signal port, then sequence)
+- Power plugs line up with the signal ports - each signal port starts on a fresh plug, giving a clean 1:1 plug-to-port mapping when a port fits in one plug
+- Large signal ports spill onto consecutive plugs in order, and the tool still respects the power panel-count and 16A-per-plug limits
 
 ## Recent Changes In v0.11.0
 

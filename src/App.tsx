@@ -37,7 +37,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.11.0";
+const APP_VERSION = "0.12.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -1896,6 +1896,85 @@ const exportJson = () => {
     setIsDragging(false);
   };
 
+  // Patch power to follow the existing signal patch: walk panels in signal order
+  // (signal port, then sequence) and fill power plugs, starting a fresh plug for
+  // each signal port so power plugs line up with the signal ports. Respects the
+  // power panel-count and amp limits, and stops when the plugs run out.
+  const matchPowerToSignal = () => {
+    const hasSignal = grid.flat().some((cell) => isActiveCell(cell) && cell.assignedPort);
+    if (!hasSignal) {
+      alert("Patch the signal ports first - power will follow the same pattern.");
+      return;
+    }
+
+    commitGridUpdate((prev) => {
+      const next = cloneGrid(prev);
+
+      for (const row of next) {
+        for (const cell of row) {
+          cell.assignedPowerPort = null;
+          cell.powerSequence = null;
+          cell.powerManual = false;
+        }
+      }
+
+      const byPort = new Map<number, { x: number; y: number; seq: number }[]>();
+      next.forEach((row, y) =>
+        row.forEach((cell, x) => {
+          if (!isActiveCell(cell) || !cell.assignedPort) return;
+          const list = byPort.get(cell.assignedPort) ?? [];
+          list.push({ x, y, seq: cell.sequence ?? 0 });
+          byPort.set(cell.assignedPort, list);
+        }),
+      );
+      const signalPorts = [...byPort.keys()].sort((a, b) => a - b);
+
+      let plugIndex = 0;
+      const plugLeft = () => plugIndex < powerPorts.length;
+
+      for (const sigPort of signalPorts) {
+        if (!plugLeft()) break;
+        // Align power plugs to signal ports: each new signal port starts on a fresh plug.
+        if (getPortPanelCount(next, "assignedPowerPort", powerPorts[plugIndex].id) > 0) {
+          plugIndex += 1;
+        }
+
+        const cells = byPort.get(sigPort)!.sort((a, b) => a.seq - b.seq);
+        for (const { x, y } of cells) {
+          let placed = false;
+          while (plugLeft()) {
+            const plug = powerPorts[plugIndex];
+            const currentPanels = getPortPanelCount(next, "assignedPowerPort", plug.id);
+            const currentLoad = getPowerPortLoadWatts(next, plug.id, powerSpec.maxW);
+            if (currentPanels >= safePanelsPerPowerOutlet) {
+              plugIndex += 1;
+              continue;
+            }
+            if (currentLoad + powerSpec.maxW > MAX_OUTLET_AMPS * VOLTAGE) {
+              plugIndex += 1;
+              continue;
+            }
+            next[y][x].assignedPowerPort = plug.id;
+            next[y][x].powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", plug.id);
+            next[y][x].powerManual = false;
+            placed = true;
+            break;
+          }
+          if (!placed) break;
+        }
+        if (!plugLeft()) break;
+      }
+
+      return next;
+    });
+
+    setPatchMode("power");
+    setSelectedCell(null);
+    setSelectedCells(new Set());
+    setDragVisited(new Set());
+    setIsDragging(false);
+  };
+
   const clearSignalCabling = () => {
     commitGridUpdate((prev) => clearSignalOnGrid(prev));
     setSelectedCell(null);
@@ -2052,7 +2131,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0110"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0120"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -2179,6 +2258,13 @@ const exportJson = () => {
                   onClick={() => setPatchMode("power")}
                 >
                   <Zap className="mr-2 h-4 w-4" />Power Patch Mode
+                </Button>
+                <Button
+                  className="border-amber-400 bg-amber-600 text-white hover:bg-amber-500"
+                  onClick={matchPowerToSignal}
+                  title="Patch power plugs to follow the signal patch order, aligned to the signal ports"
+                >
+                  <Wand2 className="mr-2 h-4 w-4" />Match Power To Signal Pattern
                 </Button>
               </div>
 
