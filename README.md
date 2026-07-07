@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.12.0`
+Version `0.13.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -13,6 +13,16 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a PDF report with portrait detail pages plus both layout views in landscape
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.13.0
+
+- You can now mix `MG9` and `MT` panels in one wall. The layout is a 0.5m module grid: MG9 fills one module, MT spans two side-by-side modules
+- Select Mode has a panel-type dropdown (MG9 / MT) to convert the selected panels; MT takes the module to its right and is blocked at the right edge
+- Live stats are per panel type: panel count, weight, power/amps, and pixel resolution all use each panel's own profile
+- Signal/power patching, auto-snake, and Match Power To Signal Pattern all treat an MT as a single panel and route cabling to its true edges
+- Stock table is split by type and combined: MG9 (panels + variants) and MT each use their own catalog, spare ratio, box size, and hanging bar; MG9-only hardware (reinforcement, corner connectors, ground/floor frames) counts MG9 panels only
+- PDF layout draws MT as a wide `(MT)`-labelled panel, with a mixed panel-type summary; PNG test pattern places each panel at its native pixel size (MG9 168x168, MT 256x64)
+- Opening an older all-MT settings file migrates it onto the new module grid automatically
 
 ## Recent Changes In v0.12.0
 

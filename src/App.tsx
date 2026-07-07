@@ -37,7 +37,7 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.12.0";
+const APP_VERSION = "0.13.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -194,6 +194,11 @@ type Cell = {
   isRemoved: boolean;
   panelVariant: PanelVariantKey;
   rotation: number;
+  // Per-cell panel profile. The grid is a 0.5m module grid: MG9 fills one module,
+  // MT fills two side-by-side modules (a "head" module plus the module to its right
+  // marked as mtTail). Tail modules are drawn and patched as part of their head.
+  panelType: PanelTypeKey;
+  mtTail: boolean;
 };
 
 type LayoutSnapshot = {
@@ -272,8 +277,17 @@ const makeGrid = (w: number, h: number): Cell[][] =>
       isRemoved: false,
       panelVariant: "STANDARD",
       rotation: 0,
+      panelType: "MG9",
+      mtTail: false,
     })),
   );
+
+// MG9 fills one 0.5m module. MT spans two: a head module and the module to its
+// right (mtTail). These helpers keep panel-level logic readable across the app.
+const cellPanelType = (cell: Cell): PanelTypeKey => cell.panelType ?? "MG9";
+const cellSpanX = (cell: Cell): number => (cellPanelType(cell) === "MT" ? 2 : 1);
+// A "panel head" is a real panel to count/patch/render: an active, non-tail cell.
+const isPanelHead = (cell: Cell | null | undefined): cell is Cell => isActiveCell(cell) && !cell?.mtTail;
 
 const cloneGrid = (grid: Cell[][]): Cell[][] => grid.map((row) => row.map((cell) => ({ ...cell })));
 
@@ -292,11 +306,93 @@ const normalizeGrid = (grid: Cell[][], cols: number, rows: number): Cell[][] =>
         isRemoved: cell?.isRemoved ?? false,
         panelVariant: cell?.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
         rotation: Number.isFinite(cell?.rotation) ? ((Number(cell?.rotation) % 360) + 360) % 360 : 0,
+        panelType: cell?.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
+        mtTail: Boolean(cell?.mtTail),
       };
     }),
   );
 
+// A settings file saved before per-cell panel types existed has cells with no
+// `panelType` field.
+const isLegacyGrid = (rawGrid: unknown): rawGrid is Cell[][] =>
+  Array.isArray(rawGrid) && rawGrid.some((row) => Array.isArray(row) && row.some((cell) => cell && (cell as Cell).panelType === undefined));
+
+// A legacy all-MT project stored one MT panel per grid cell (1m wide). Expand it
+// onto the 0.5m module grid: double the columns and pair each cell into an MT
+// head + tail, carrying the panel's patching onto the head.
+const expandLegacyMtGrid = (rawGrid: Cell[][], oldCols: number, rows: number) => {
+  const newCols = oldCols * 2;
+  const grid = makeGrid(newCols, rows);
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < oldCols; x += 1) {
+      const src = rawGrid?.[y]?.[x];
+      const head = grid[y][x * 2];
+      const tail = grid[y][x * 2 + 1];
+      const removed = Boolean(src?.isRemoved);
+      head.assignedPort = src?.assignedPort ?? null;
+      head.sequence = src?.sequence ?? null;
+      head.assignedPowerPort = src?.assignedPowerPort ?? null;
+      head.powerSequence = src?.powerSequence ?? null;
+      head.powerManual = Boolean(src?.powerManual);
+      head.isRemoved = removed;
+      head.rotation = Number.isFinite(src?.rotation) ? ((Number(src?.rotation) % 360) + 360) % 360 : 0;
+      head.panelType = "MT";
+      head.mtTail = false;
+      head.panelVariant = "STANDARD";
+      tail.panelType = "MT";
+      tail.mtTail = true;
+      tail.isRemoved = removed;
+    }
+  }
+  return { grid, cols: newCols };
+};
+
 const isActiveCell = (cell: Cell | null | undefined) => Boolean(cell && !cell.isRemoved);
+
+// Convert a module at (x,y) in a cloned grid to a single MG9 panel, releasing any
+// MT pairing it took part in (its own tail, or the head it was a tail of).
+const setModuleToMG9 = (grid: Cell[][], x: number, y: number) => {
+  const cell = grid[y]?.[x];
+  if (!cell) return;
+  if (cellPanelType(cell) === "MT" && !cell.mtTail) {
+    const tail = grid[y]?.[x + 1];
+    if (tail && tail.mtTail) {
+      tail.mtTail = false;
+      tail.panelType = "MG9";
+    }
+  }
+  if (cell.mtTail) {
+    const head = grid[y]?.[x - 1];
+    if (head && cellPanelType(head) === "MT" && !head.mtTail) head.panelType = "MG9";
+  }
+  cell.panelType = "MG9";
+  cell.mtTail = false;
+};
+
+// Convert the module at (x,y) into an MT head that consumes the module to its
+// right as a tail. Returns false if there is no free module to the right.
+const setModuleToMT = (grid: Cell[][], x: number, y: number): boolean => {
+  const head = grid[y]?.[x];
+  const right = grid[y]?.[x + 1];
+  if (!head || !right) return false;
+  if (right.isRemoved) return false;
+  // Normalise both modules first so any prior MT pairing is released cleanly.
+  setModuleToMG9(grid, x, y);
+  setModuleToMG9(grid, x + 1, y);
+  head.panelType = "MT";
+  head.mtTail = false;
+  right.panelType = "MT";
+  right.mtTail = true;
+  // The tail carries no independent patching or shape; it belongs to the head.
+  right.assignedPort = null;
+  right.sequence = null;
+  right.assignedPowerPort = null;
+  right.powerSequence = null;
+  right.powerManual = false;
+  right.panelVariant = "STANDARD";
+  right.rotation = head.rotation ?? 0;
+  return true;
+};
 
 const formatNumber = (value: number, digits = 0) =>
   Number(value || 0).toLocaleString(undefined, {
@@ -352,15 +448,16 @@ const getNextSequence = (
 const getPowerPortLoadWatts = (
   grid: Cell[][],
   portId: number,
-  panelPowerMaxW: number,
+  _legacyMaxW: number,
   excludeCell: { x: number; y: number } | null = null,
 ) => {
+  // Each assigned panel draws its own type's max watts (MG9 vs MT differ).
   let watts = 0;
   for (const row of grid) {
     for (const cell of row) {
       if (!isActiveCell(cell)) continue;
       if (excludeCell && cell.x === excludeCell.x && cell.y === excludeCell.y) continue;
-      if (cell.assignedPowerPort === portId) watts += panelPowerMaxW;
+      if (cell.assignedPowerPort === portId) watts += PANEL_TYPES[cellPanelType(cell)].power.maxW;
     }
   }
   return watts;
@@ -440,6 +537,14 @@ const getDisplayCell = (cell: Cell, cols: number, isFlippedView: boolean): Cell 
   x: isFlippedView ? flipX(cell.x, cols) : cell.x,
 });
 
+// For cabling geometry we want the panel's LEFT-edge display column. An MT panel
+// occupies modules x and x+1; when the view is flipped, its left display edge is
+// flipX(x) - (span - 1). getLineEndpoints then adds the panel width from its span.
+const displayPanelForCabling = (cell: Cell, cols: number, isFlippedView: boolean): Cell => {
+  const span = cellSpanX(cell);
+  return { ...cell, x: isFlippedView ? flipX(cell.x, cols) - (span - 1) : cell.x };
+};
+
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
   required: number,
@@ -472,33 +577,39 @@ const getPanelSymbol = (cell: Cell) => {
   return parts.join(" ");
 };
 
+// Cabling endpoints. Cells passed here carry a LEFT-edge display x (see
+// displayPanelForCabling), so MT panels (span 2) connect at their true outer
+// edge / visual centre instead of a single module's centre.
 const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0, cellW = CELL_SIZE, cellH = CELL_SIZE) => {
-  const centerX = cellW / 2;
-  const centerY = cellH / 2;
-  const spanX = cellW + GRID_GAP;
-  const spanY = cellH + GRID_GAP;
+  const stepX = cellW + GRID_GAP;
+  const stepY = cellH + GRID_GAP;
   const gapInset = GRID_GAP / 2;
+  const widthOf = (c: Cell) => cellSpanX(c) * cellW + (cellSpanX(c) - 1) * GRID_GAP;
+  const wPrev = widthOf(prev);
+  const wCell = widthOf(cell);
+  const leftPrev = prev.x * stepX;
+  const leftCell = cell.x * stepX;
 
-  let x1 = prev.x * spanX + centerX;
-  let y1 = prev.y * spanY + centerY + offsetY;
-  let x2 = cell.x * spanX + centerX;
-  let y2 = cell.y * spanY + centerY + offsetY;
+  let x1 = leftPrev + wPrev / 2;
+  let y1 = prev.y * stepY + cellH / 2 + offsetY;
+  let x2 = leftCell + wCell / 2;
+  let y2 = cell.y * stepY + cellH / 2 + offsetY;
 
   if (prev.y === cell.y) {
     if (cell.x > prev.x) {
-      x1 = prev.x * spanX + cellW + gapInset * 0.3;
-      x2 = cell.x * spanX - gapInset * 0.3;
+      x1 = leftPrev + wPrev + gapInset * 0.3;
+      x2 = leftCell - gapInset * 0.3;
     } else {
-      x1 = prev.x * spanX - gapInset * 0.3;
-      x2 = cell.x * spanX + cellW + gapInset * 0.3;
+      x1 = leftPrev - gapInset * 0.3;
+      x2 = leftCell + wCell + gapInset * 0.3;
     }
   } else if (prev.x === cell.x) {
     if (cell.y > prev.y) {
-      y1 = prev.y * spanY + cellH + gapInset * 0.3 + offsetY;
-      y2 = cell.y * spanY - gapInset * 0.3 + offsetY;
+      y1 = prev.y * stepY + cellH + gapInset * 0.3 + offsetY;
+      y2 = cell.y * stepY - gapInset * 0.3 + offsetY;
     } else {
-      y1 = prev.y * spanY - gapInset * 0.3 + offsetY;
-      y2 = cell.y * spanY + cellH + gapInset * 0.3 + offsetY;
+      y1 = prev.y * stepY - gapInset * 0.3 + offsetY;
+      y2 = cell.y * stepY + cellH + gapInset * 0.3 + offsetY;
     }
   }
 
@@ -676,10 +787,10 @@ export default function App() {
   const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
 
   const panel = PANEL_TYPES[panelType];
-  // Render cells to the panel's real-world aspect ratio. CELL_SIZE is the 0.5m
-  // height unit; width scales with the panel's width/height (MT 1m x 0.5m -> 2:1).
+  // The grid is a 0.5m square module grid. A single module is CELL_SIZE x CELL_SIZE;
+  // MT panels are drawn spanning two modules (see mtTail). MG9 fills one module.
   const cellH = CELL_SIZE;
-  const cellW = Math.round(CELL_SIZE * (panel.w / panel.h));
+  const cellW = CELL_SIZE;
   const powerSpec = panel.power;
   const distro = POWER_DISTROS[powerDistro];
   const powerPorts = useMemo(() => makePowerPorts(distro.portCount), [distro.portCount]);
@@ -840,19 +951,52 @@ export default function App() {
   const signalPortPixels = safePanelsPerSignalPort * panelPixels;
   const signalPortPercent = (signalPortPixels / MAX_PIXELS_PER_PORT) * 100;
 
-  const wallWidthM = cols * panel.w;
-  const wallHeightM = rows * panel.h;
-  const wallPixelW = cols * panel.pixW;
-  const wallPixelH = rows * panel.pixH;
+  // The grid is a 0.5m module grid, so physical size is module-count based.
+  const wallWidthM = cols * 0.5;
+  const wallHeightM = rows * 0.5;
   const activeCells = useMemo(() => grid.flat().filter((cell) => !cell.isRemoved), [grid]);
-  const totalPanels = activeCells.length;
+  // Panels to count/patch: active modules that are not MT tails (MG9 + MT heads).
+  const activePanels = useMemo(() => activeCells.filter((cell) => !cell.mtTail), [activeCells]);
+  const totalPanels = activePanels.length;
+  const panelTypeCounts = useMemo(() => {
+    const counts = { MG9: 0, MT: 0 } as Record<PanelTypeKey, number>;
+    activePanels.forEach((cell) => {
+      counts[cellPanelType(cell)] += 1;
+    });
+    return counts;
+  }, [activePanels]);
+  // Pixel resolution uses each panel's native pixels. Because MG9 (168x168) and
+  // MT (256x64) have different pitches, a mixed wall isn't a single clean raster:
+  // width is the widest row's pixels, height sums each row's tallest panel.
+  const wallPixels = useMemo(() => {
+    let pixelW = 0;
+    let pixelH = 0;
+    grid.forEach((row) => {
+      let rowPixelW = 0;
+      let rowPixelH = 0;
+      let rowActive = false;
+      row.forEach((cell) => {
+        if (!isPanelHead(cell)) return;
+        rowActive = true;
+        const p = PANEL_TYPES[cellPanelType(cell)];
+        rowPixelW += p.pixW;
+        rowPixelH = Math.max(rowPixelH, p.pixH);
+      });
+      pixelW = Math.max(pixelW, rowPixelW);
+      if (rowActive) pixelH += rowPixelH;
+    });
+    return { pixelW, pixelH };
+  }, [grid]);
+  const wallPixelW = wallPixels.pixelW;
+  const wallPixelH = wallPixels.pixelH;
   const panelVariantCounts = useMemo(() => {
     const counts = Object.fromEntries(Object.keys(PANEL_VARIANTS).map((key) => [key, 0])) as Record<PanelVariantKey, number>;
-    activeCells.forEach((cell) => {
+    activePanels.forEach((cell) => {
+      if (cellPanelType(cell) !== "MG9") return;
       counts[cell.panelVariant ?? "STANDARD"] += 1;
     });
     return counts;
-  }, [activeCells]);
+  }, [activePanels]);
   const activeColumns = useMemo(
     () => Array.from({ length: cols }, (_, x) => x).filter((x) => activeCells.some((cell) => cell.x === x)),
     [activeCells, cols],
@@ -863,9 +1007,23 @@ export default function App() {
   );
   const activeColsCount = activeColumns.length;
   const activeRowsCount = activeRows.length;
-  const activeWallWidthM = activeColsCount * panel.w;
-  const activeWallHeightM = activeRowsCount * panel.h;
-  const panelOnlyWeight = totalPanels * panel.weight;
+  // Module grid: each active module column/row is 0.5m.
+  const activeWallWidthM = activeColsCount * 0.5;
+  const activeWallHeightM = activeRowsCount * 0.5;
+  // Per-type totals: each panel contributes its own weight and power draw.
+  const panelTotals = useMemo(() => {
+    const totals = { weight: 0, maxW: 0, maxA: 0, avgW: 0, avgA: 0 };
+    activePanels.forEach((cell) => {
+      const p = PANEL_TYPES[cellPanelType(cell)];
+      totals.weight += p.weight;
+      totals.maxW += p.power.maxW;
+      totals.maxA += p.power.maxA;
+      totals.avgW += p.power.avgW;
+      totals.avgA += p.power.avgA;
+    });
+    return totals;
+  }, [activePanels]);
+  const panelOnlyWeight = panelTotals.weight;
   const decimalRatio = wallPixelH === 0 ? 0 : wallPixelW / wallPixelH;
   const aspectRatio = wallPixelH === 0 ? "0.00" : `${decimalRatio.toFixed(3)}:1`;
   const ratioLabel = useMemo(() => {
@@ -923,11 +1081,12 @@ export default function App() {
         if (!isActiveCell(cell)) continue;
         if (!cell.assignedPowerPort || !stats[cell.assignedPowerPort]) continue;
         const stat = stats[cell.assignedPowerPort];
+        const cellPower = PANEL_TYPES[cellPanelType(cell)].power;
         stat.panels += 1;
-        stat.maxWatts += powerSpec.maxW;
-        stat.maxAmps += powerSpec.maxA;
-        stat.avgWatts += powerSpec.avgW;
-        stat.avgAmps += powerSpec.avgA;
+        stat.maxWatts += cellPower.maxW;
+        stat.maxAmps += cellPower.maxA;
+        stat.avgWatts += cellPower.avgW;
+        stat.avgAmps += cellPower.avgA;
         stat.path.push(cell);
         if (cell.powerManual) stat.manualPanels += 1;
       }
@@ -944,8 +1103,21 @@ export default function App() {
   const powerPortsUsed = useMemo(() => Object.values(powerPortStats).filter((stat) => stat.panels > 0).length, [powerPortStats]);
   const signalPortsUsed = useMemo(() => Object.values(signalPortStats).filter((stat) => stat.panels > 0).length, [signalPortStats]);
   const effectiveSignalPortsUsed = backupSignalLoop ? signalPortsUsed * 2 : signalPortsUsed;
-  const flyBarWeight = activeColsCount * panel.defaults.flyBarWeight;
-  const slingWeight = activeColsCount * panel.defaults.slingWeight;
+  // Hanging/fly bars attach along the top row: one MG9 bar per top-row MG9 panel
+  // and one MT bar per top-row MT panel (each type uses its own bar hardware).
+  const topRowBars = useMemo(() => {
+    let mg9 = 0;
+    let mt = 0;
+    const topRow = grid.find((row) => row.some((cell) => isPanelHead(cell)));
+    topRow?.forEach((cell) => {
+      if (!isPanelHead(cell)) return;
+      if (cellPanelType(cell) === "MT") mt += 1;
+      else mg9 += 1;
+    });
+    return { mg9, mt };
+  }, [grid]);
+  const flyBarWeight = topRowBars.mg9 * PANEL_TYPES.MG9.defaults.flyBarWeight + topRowBars.mt * PANEL_TYPES.MT.defaults.flyBarWeight;
+  const slingWeight = (topRowBars.mg9 + topRowBars.mt) * PANEL_TYPES.MG9.defaults.slingWeight;
   const powerCableWeight = powerPortsUsed * 3;
   const signalCableWeight = effectiveSignalPortsUsed * 1;
   const additionalWeight =
@@ -979,16 +1151,25 @@ export default function App() {
     return phases;
   }, [powerPorts, powerPortStats, distro.safePhaseWatts]);
 
-  const totalPowerMaxW = totalPanels * powerSpec.maxW;
-  const totalPowerMaxA = totalPanels * powerSpec.maxA;
-  const totalPowerAvgW = totalPanels * powerSpec.avgW;
-  const totalPowerAvgA = totalPanels * powerSpec.avgA;
-  const unassignedPowerPanels = activeCells.filter((cell) => !cell.assignedPowerPort).length;
+  const totalPowerMaxW = panelTotals.maxW;
+  const totalPowerMaxA = panelTotals.maxA;
+  const totalPowerAvgW = panelTotals.avgW;
+  const totalPowerAvgA = panelTotals.avgA;
+  const unassignedPowerPanels = activePanels.filter((cell) => !cell.assignedPowerPort).length;
 
-  const sparePanels = Math.ceil(totalPanels * panel.defaults.spareRatio);
+  // Spares and boxes are per type (different spare ratios and box sizes).
+  const mg9Count = panelTypeCounts.MG9;
+  const mtCount = panelTypeCounts.MT;
+  const mg9Defaults = PANEL_TYPES.MG9.defaults;
+  const mtDefaults = PANEL_TYPES.MT.defaults;
+  const mg9Spare = Math.ceil(mg9Count * mg9Defaults.spareRatio);
+  const mtSpare = Math.ceil(mtCount * mtDefaults.spareRatio);
+  const mg9Boxes = mg9Count > 0 ? Math.ceil((mg9Count + mg9Spare) / mg9Defaults.panelsPerBox) : 0;
+  const mtBoxes = mtCount > 0 ? Math.ceil((mtCount + mtSpare) / mtDefaults.panelsPerBox) : 0;
+  const sparePanels = mg9Spare + mtSpare;
   const totalPanelsWithSpare = totalPanels + sparePanels;
-  const boxCount = Math.ceil(totalPanelsWithSpare / panel.defaults.panelsPerBox);
-  const boxSparePanels = boxCount * panel.defaults.panelsPerBox - totalPanelsWithSpare;
+  const boxCount = mg9Boxes + mtBoxes;
+  const boxSparePanels = mg9Boxes * mg9Defaults.panelsPerBox + mtBoxes * mtDefaults.panelsPerBox - totalPanelsWithSpare;
   const vx1000Percent = (wallPixelW * wallPixelH / 6500000) * 100;
   const vx2000Percent = (wallPixelW * wallPixelH / 13000000) * 100;
   const circuitsUsedMax = Math.ceil(totalPanels / Math.max(safePanelsPerPowerOutlet, 1));
@@ -1039,8 +1220,8 @@ export default function App() {
   }, [activeCells, grid]);
 
   const deploymentWarning = useMemo(() => {
-    if ((deploymentType === DEPLOYMENT_TYPES.GROUND || deploymentType === DEPLOYMENT_TYPES.FLOOR) && panelType !== "MG9") {
-      return `${deploymentType} deployment hardware is currently available for MG9 only.`;
+    if ((deploymentType === DEPLOYMENT_TYPES.GROUND || deploymentType === DEPLOYMENT_TYPES.FLOOR) && mtCount > 0) {
+      return `${deploymentType} deployment hardware is available for MG9 only - only the MG9 panels are included in the frame/floor stock.`;
     }
     if (deploymentType === DEPLOYMENT_TYPES.FLOOR && ((activeWallWidthM % 1 !== 0) || (activeWallHeightM % 1 !== 0))) {
       return "Floor deployment uses full 1m frame sections only. This wall size is not an exact ground-frame build.";
@@ -1049,17 +1230,21 @@ export default function App() {
   }, [activeWallHeightM, activeWallWidthM, deploymentType, panelType]);
 
   const stockRows = useMemo(() => {
-    const stock = panel.stock as Record<string, number>;
+    // Panel-specific stock lives in each type's catalog; shared items (distro,
+    // cables, prod case, joiners) are tracked in the MG9 catalog.
+    const mg9StockCat = PANEL_TYPES.MG9.stock as Record<string, number>;
+    const mtStockCat = PANEL_TYPES.MT.stock as Record<string, number>;
+    const stock = mg9StockCat;
     const rowsOut: StockRow[] = [];
     const pushBaseRow = (code: string, name: string, required: number, stockQty: number, method: string) => {
       rowsOut.push({ code, name, required, stock: stockQty, net: stockQty - required, method });
     };
 
-    if (panelType === "MG9") {
+    if (mg9Count > 0) {
       const standardCount = panelVariantCounts.STANDARD;
-      const standardSpare = Math.ceil(standardCount * panel.defaults.spareRatio);
-      const standardRounded = roundUpToBox(standardCount + standardSpare, panel.defaults.panelsPerBox);
-      pushBaseRow("12224", "MG9 LED Panel", standardRounded, stock.panels ?? 0, `${standardCount} + ${standardSpare} spare, rounded to box of ${panel.defaults.panelsPerBox}`);
+      const standardSpare = Math.ceil(standardCount * mg9Defaults.spareRatio);
+      const standardRounded = roundUpToBox(standardCount + standardSpare, mg9Defaults.panelsPerBox);
+      pushBaseRow("12224", "MG9 LED Panel", standardRounded, mg9StockCat.panels ?? 0, `${standardCount} + ${standardSpare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`);
       rowsOut[rowsOut.length - 1].spare = standardSpare;
       rowsOut[rowsOut.length - 1].rounded = standardRounded;
 
@@ -1069,26 +1254,47 @@ export default function App() {
         const item = variant.stockItem;
         const count = panelVariantCounts[variantKey];
         if (!item || count <= 0) return;
-        const spare = Math.ceil(count * panel.defaults.spareRatio);
-        const rounded = roundUpToBox(count + spare, panel.defaults.panelsPerBox);
-        rowsOut.push(makeStockRow(item, rounded, `${count} selected + ${spare} spare, rounded to box of ${panel.defaults.panelsPerBox}`, spare, rounded));
+        const spare = Math.ceil(count * mg9Defaults.spareRatio);
+        const rounded = roundUpToBox(count + spare, mg9Defaults.panelsPerBox);
+        rowsOut.push(makeStockRow(item, rounded, `${count} selected + ${spare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`, spare, rounded));
       });
-    } else {
-      pushBaseRow("12223", "MT Mesh Panel", totalPanelsWithSpare, stock.panels ?? 0, `${totalPanels} + ${sparePanels} spare`);
+    }
+
+    if (mtCount > 0) {
+      const mtWithSpare = mtCount + mtSpare;
+      pushBaseRow("12223", "MT Mesh Panel", mtWithSpare, mtStockCat.panels ?? 0, `${mtCount} + ${mtSpare} spare`);
+      rowsOut[rowsOut.length - 1].spare = mtSpare;
     }
 
     rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
-    rowsOut.push({ code: "BOX", name: "Boxes required", required: boxCount, stock: boxCount, net: 0, method: `ceil(${totalPanelsWithSpare}/${panel.defaults.panelsPerBox})` });
+    if (mg9Boxes > 0) {
+      rowsOut.push({ code: "BOX-MG9", name: "Boxes required (MG9)", required: mg9Boxes, stock: mg9Boxes, net: 0, method: `ceil(${mg9Count + mg9Spare}/${mg9Defaults.panelsPerBox})` });
+    }
+    if (mtBoxes > 0) {
+      rowsOut.push({ code: "BOX-MT", name: "Boxes required (MT)", required: mtBoxes, stock: mtBoxes, net: 0, method: `ceil(${mtCount + mtSpare}/${mtDefaults.panelsPerBox})` });
+    }
 
     if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
-      rowsOut.push({
-        code: panelType === "MG9" ? "12257" : "12262",
-        name: panelType === "MG9" ? "MG9 Floor / Hanging Bar" : "MT Floor / Hanging Bar",
-        required: activeColsCount,
-        stock: stock.hangingBar ?? 0,
-        net: (stock.hangingBar ?? 0) - activeColsCount,
-        method: "1 per active column",
-      });
+      if (topRowBars.mg9 > 0) {
+        rowsOut.push({
+          code: "12257",
+          name: "MG9 Floor / Hanging Bar",
+          required: topRowBars.mg9,
+          stock: mg9StockCat.hangingBar ?? 0,
+          net: (mg9StockCat.hangingBar ?? 0) - topRowBars.mg9,
+          method: "1 per top-row MG9 panel",
+        });
+      }
+      if (topRowBars.mt > 0) {
+        rowsOut.push({
+          code: "12262",
+          name: "MT Floor / Hanging Bar",
+          required: topRowBars.mt,
+          stock: mtStockCat.hangingBar ?? 0,
+          net: (mtStockCat.hangingBar ?? 0) - topRowBars.mt,
+          method: "1 per top-row MT panel",
+        });
+      }
     }
 
     rowsOut.push({
@@ -1116,7 +1322,7 @@ export default function App() {
       }
     }
 
-    if (panelType === "MG9") {
+    if (mg9Count > 0) {
       const flatConnectorRequired = cornerJoinStats.cornerToFlat * 3;
       const cornerConnectorRequired = cornerJoinStats.cornerToCorner * 3;
       if (flatConnectorRequired > 0) {
@@ -1127,12 +1333,12 @@ export default function App() {
       }
     }
 
-    if (panelType === "MG9" && includeReinforcementPlate) {
-      pushBaseRow("12264", "MG9 Reinforcement Plate", Math.ceil(totalPanels * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor");
-      pushBaseRow("12265", "MG9 Reinforcement Screw", Math.ceil(totalPanels * 3.42), stock.reinforcementScrew ?? 0, "sheet-style factor");
+    if (mg9Count > 0 && includeReinforcementPlate) {
+      pushBaseRow("12264", "MG9 Reinforcement Plate", Math.ceil(mg9Count * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor (MG9 panels)");
+      pushBaseRow("12265", "MG9 Reinforcement Screw", Math.ceil(mg9Count * 3.42), stock.reinforcementScrew ?? 0, "sheet-style factor (MG9 panels)");
     }
 
-    if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.GROUND) {
+    if (mg9Count > 0 && deploymentType === DEPLOYMENT_TYPES.GROUND) {
       const widthUnits = Math.floor(activeWallWidthM);
       const verticalSupports = Math.ceil(activeColsCount / 2);
       const verticalFrameHeightCount = Math.ceil(activeRowsCount / 3);
@@ -1150,11 +1356,11 @@ export default function App() {
       rowsOut.push(makeStockRow(STOCK_CATALOG.connectingJoint, verticalJoinCount * 2, `2 per vertical join across ${verticalJoinCount} joins`));
     }
 
-    if (panelType === "MG9" && deploymentType === DEPLOYMENT_TYPES.FLOOR) {
-      const feet = Math.ceil(totalPanels / 2);
+    if (mg9Count > 0 && deploymentType === DEPLOYMENT_TYPES.FLOOR) {
+      const feet = Math.ceil(mg9Count / 2);
       const perimeterSegments = activeColsCount * 2 + activeRowsCount * 2;
       rowsOut.push(makeStockRow(STOCK_CATALOG.danceFloorFeet, feet, "1 per 2 panels"));
-      rowsOut.push(makeStockRow(STOCK_CATALOG.temperedGlass, totalPanels, "1 per panel"));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.temperedGlass, mg9Count, "1 per MG9 panel"));
       rowsOut.push(makeStockRow(STOCK_CATALOG.floorReinforcementBar, feet, "1 per foot"));
       rowsOut.push(makeStockRow(STOCK_CATALOG.floorTaperPin, feet * 4, "4 per foot"));
       rowsOut.push(makeStockRow(STOCK_CATALOG.danceFloorRamp, perimeterSegments, `${perimeterSegments} external 500mm edge segments`));
@@ -1162,11 +1368,19 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, boxCount, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panel, panelType, panelVariantCounts, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, sparePanels, totalPanels, totalPanelsWithSpare, powerPortsUsed, distro.portCount]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
 
   const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
   const safeProjectName = projectName.trim() || "Untitled Project";
   const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
+  // Describe the panel mix for exports and headings.
+  const panelTypeSummary =
+    mg9Count > 0 && mtCount > 0
+      ? `Mixed (${mg9Count} MG9 + ${mtCount} MT)`
+      : mtCount > 0
+        ? "MT"
+        : "MG9";
+  const fileSafePanelType = mg9Count > 0 && mtCount > 0 ? "MIX" : mtCount > 0 ? "MT" : "MG9";
 
   const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
     const scale = 2;
@@ -1203,12 +1417,14 @@ export default function App() {
     }
 
     grid.flat().forEach((cell) => {
-      if (!isActiveCell(cell)) return;
-      const displayCell = getDisplayCell(cell, cols, flipped);
-      const x = displayCell.x * (cellW + GRID_GAP);
+      if (!isPanelHead(cell)) return;
+      const disp = displayPanelForCabling(cell, cols, flipped);
+      const span = cellSpanX(cell);
+      const w = span * cellW + (span - 1) * GRID_GAP;
+      const x = disp.x * (cellW + GRID_GAP);
       const y = cell.y * (cellH + GRID_GAP);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-      drawPanelShape(ctx, x, y, cellW, cellH, cell, fill, "#0f172a", 2);
+      drawPanelShape(ctx, x, y, w, cellH, cell, fill, "#0f172a", 2);
     });
 
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
@@ -1219,8 +1435,8 @@ export default function App() {
       ctx.lineCap = "round";
       stat.path.forEach((cell, idx) => {
         if (idx === 0) return;
-        const prev = getDisplayCell(stat.path[idx - 1], cols, flipped);
-        const current = getDisplayCell(cell, cols, flipped);
+        const prev = displayPanelForCabling(stat.path[idx - 1], cols, flipped);
+        const current = displayPanelForCabling(cell, cols, flipped);
         let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0, cellW, cellH);
         if (current.y !== prev.y) {
           const sideOffset = GRID_GAP * 0.5;
@@ -1244,8 +1460,8 @@ export default function App() {
       ctx.lineCap = "round";
       path.forEach((cell, idx) => {
         if (idx === 0) return;
-        const prev = getDisplayCell(path[idx - 1], cols, flipped);
-        const current = getDisplayCell(cell, cols, flipped);
+        const prev = displayPanelForCabling(path[idx - 1], cols, flipped);
+        const current = displayPanelForCabling(cell, cols, flipped);
         let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4, cellW, cellH);
         if (current.y !== prev.y) {
           const sideOffset = GRID_GAP * 0.5;
@@ -1261,18 +1477,22 @@ export default function App() {
     });
 
     grid.flat().forEach((cell) => {
-      if (!isActiveCell(cell)) return;
-      const displayCell = getDisplayCell(cell, cols, flipped);
-      const x = displayCell.x * (cellW + GRID_GAP);
+      if (!isPanelHead(cell)) return;
+      const disp = displayPanelForCabling(cell, cols, flipped);
+      const span = cellSpanX(cell);
+      const w = span * cellW + (span - 1) * GRID_GAP;
+      const x = disp.x * (cellW + GRID_GAP);
       const y = cell.y * (cellH + GRID_GAP);
+      const headDisplayX = getDisplayCell(cell, cols, flipped).x;
+      const cx = x + w / 2;
       ctx.fillStyle = "#020617";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
-      ctx.fillText(`↓ ${cell.y + 1} → ${displayCell.x + 1}`, x + cellW / 2, y + 18);
-      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + cellW / 2, y + 34);
-      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + cellW / 2, y + 50);
+      ctx.fillText(`↓ ${cell.y + 1} → ${headDisplayX + 1}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, y + 18);
+      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, y + 34);
+      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, y + 50);
       const variantSymbol = getPanelSymbol(cell);
-      if (variantSymbol) ctx.fillText(variantSymbol, x + cellW / 2, y + cellH - 6);
+      if (variantSymbol) ctx.fillText(variantSymbol, cx, y + cellH - 6);
     });
 
     ctx.restore();
@@ -1331,9 +1551,22 @@ const exportJson = () => {
 
   const exportTestPatternPng = () => {
     try {
+      // Front-view pixel map. Each panel uses its own native pixel size (MG9
+      // 168x168, MT 256x64) laid out left-to-right per row; rows are top-aligned
+      // and as tall as the tallest panel in that row (mixed pitches aren't a
+      // single clean raster). Panels within a row are ordered by front-view x.
+      const rowsHeads = grid.map((row) =>
+        row
+          .filter((cell) => isPanelHead(cell))
+          .map((cell) => ({ cell, leftX: flipX(cell.x, cols) - (cellSpanX(cell) - 1) }))
+          .sort((a, b) => a.leftX - b.leftX),
+      );
+      const rowHeights = rowsHeads.map((heads) => heads.reduce((m, h) => Math.max(m, PANEL_TYPES[cellPanelType(h.cell)].pixH), 0));
+      const rowWidths = rowsHeads.map((heads) => heads.reduce((s, h) => s + PANEL_TYPES[cellPanelType(h.cell)].pixW, 0));
+
       const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, wallPixelW);
-      canvas.height = Math.max(1, wallPixelH);
+      canvas.width = Math.max(1, ...rowWidths);
+      canvas.height = Math.max(1, rowHeights.reduce((a, b) => a + b, 0));
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context unavailable");
       ctx.imageSmoothingEnabled = false;
@@ -1341,30 +1574,36 @@ const exportJson = () => {
       ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      grid.flat().forEach((cell) => {
-        if (!isActiveCell(cell)) return;
-        const displayX = flipX(cell.x, cols);
-        const x = displayX * panel.pixW;
-        const y = cell.y * panel.pixH;
-        const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-        drawPanelShape(ctx, x, y, panel.pixW, panel.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern" });
+      let rowTop = 0;
+      rowsHeads.forEach((heads, y) => {
+        let xCursor = 0;
+        heads.forEach(({ cell }) => {
+          const p = PANEL_TYPES[cellPanelType(cell)];
+          const x = xCursor;
+          const yy = rowTop;
+          const headDisplayX = flipX(cell.x, cols);
+          const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+          drawPanelShape(ctx, x, yy, p.pixW, p.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern" });
 
-        ctx.fillStyle = "#020617";
-        ctx.textAlign = "center";
-        ctx.font = `bold ${Math.max(12, Math.floor(panel.pixH * 0.085))}px Arial`;
-        ctx.fillText(`↓ ${cell.y + 1} → ${displayX + 1}`, x + panel.pixW / 2, y + panel.pixH * 0.28);
-        if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + panel.pixW / 2, y + panel.pixH * 0.5);
-        if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + panel.pixW / 2, y + panel.pixH * 0.72);
-        const variantSymbol = getPanelSymbol(cell);
-        if (variantSymbol) {
-          ctx.font = `bold ${Math.max(14, Math.floor(panel.pixH * 0.12))}px Arial`;
-          ctx.fillText(variantSymbol, x + panel.pixW / 2, y + panel.pixH - 8);
-        }
+          ctx.fillStyle = "#020617";
+          ctx.textAlign = "center";
+          ctx.font = `bold ${Math.max(12, Math.floor(p.pixH * 0.085))}px Arial`;
+          ctx.fillText(`↓ ${cell.y + 1} → ${headDisplayX + 1}`, x + p.pixW / 2, yy + p.pixH * 0.28);
+          if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + p.pixW / 2, yy + p.pixH * 0.5);
+          if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + p.pixW / 2, yy + p.pixH * 0.72);
+          const variantSymbol = getPanelSymbol(cell);
+          if (variantSymbol) {
+            ctx.font = `bold ${Math.max(14, Math.floor(p.pixH * 0.12))}px Arial`;
+            ctx.fillText(variantSymbol, x + p.pixW / 2, yy + p.pixH - 8);
+          }
+          xCursor += p.pixW;
+        });
+        rowTop += rowHeights[y];
       });
 
       const link = document.createElement("a");
       link.href = canvas.toDataURL("image/png");
-      link.setAttribute("download", `${fileSafeProjectName}-${panelType}-${cols}x${rows}-front-test-pattern.png`);
+      link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-${cols}x${rows}-front-test-pattern.png`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -1383,9 +1622,18 @@ const exportJson = () => {
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(String(ev.target?.result || "{}")) as OpenJsonPayload;
-        const nextCols = Math.max(1, Number(data.wall?.cols || cols));
+        let nextCols = Math.max(1, Number(data.wall?.cols || cols));
         const nextRows = Math.max(1, Number(data.wall?.rows || rows));
-        const nextGrid = Array.isArray(data.patching?.grid) ? normalizeGrid(data.patching?.grid, nextCols, nextRows) : makeGrid(nextCols, nextRows);
+        const rawGrid = data.patching?.grid;
+        let nextGrid: Cell[][];
+        if (data.panelType === "MT" && isLegacyGrid(rawGrid)) {
+          // Legacy all-MT project: expand onto the 0.5m module grid (columns x2).
+          const migrated = expandLegacyMtGrid(rawGrid, nextCols, nextRows);
+          nextGrid = migrated.grid;
+          nextCols = migrated.cols;
+        } else {
+          nextGrid = Array.isArray(rawGrid) ? normalizeGrid(rawGrid, nextCols, nextRows) : makeGrid(nextCols, nextRows);
+        }
 
         if (data.projectName) setProjectName(data.projectName);
         if (data.panelType && PANEL_TYPES[data.panelType]) setPanelType(data.panelType);
@@ -1465,9 +1713,9 @@ const exportJson = () => {
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(10);
       pdf.text(`Project name: ${safeProjectName}`, 10, 20);
-      pdf.text(`Panel type: ${panel.name}`, 10, 26);
+      pdf.text(`Panel type: ${panelTypeSummary}`, 10, 26);
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
-      pdf.text(`Panels: ${cols} x ${rows} grid, ${totalPanels} active`, 10, 38);
+      pdf.text(`Panels: ${cols} x ${rows} module grid, ${totalPanels} active`, 10, 38);
 
       pdf.text(`Size: ${wallWidthM}m x ${wallHeightM}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
@@ -1547,9 +1795,9 @@ const exportJson = () => {
     pdf.text(`Printed ${printedAt}`, 10, 18);
 
     drawInfoBox("Wall", [
-      `Panel type: ${panel.name}`,
+      `Panel type: ${panelTypeSummary}`,
       `Power distro: ${distro.label}`,
-      `Panels: ${cols} x ${rows} grid, ${totalPanels} active`,
+      `Panels: ${cols} x ${rows} module grid, ${totalPanels} active`,
       `Size: ${wallWidthM}m x ${wallHeightM}m`,
       `Resolution: ${wallPixelW} x ${wallPixelH}`,
       `Aspect ratio: ${aspectRatio}`,
@@ -1613,7 +1861,7 @@ const exportJson = () => {
     drawLayoutPage(backLayoutCanvas, "Back View");
     drawLayoutPage(frontLayoutCanvas, "Front View");
     addPdfFooters();
-    pdf.save(`${fileSafeProjectName}-${panelType}-${cols}x${rows}.pdf`);
+    pdf.save(`${fileSafeProjectName}-${fileSafePanelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
     alert("PDF failed - check console");
@@ -1643,7 +1891,7 @@ const exportJson = () => {
     commitGridUpdate((prev) => {
       const current = prev[y]?.[x];
       if (!current) return prev;
-      if (!isActiveCell(current)) return prev;
+      if (!isActiveCell(current) || current.mtTail) return prev;
 
       const currentCount = getPortPanelCount(prev, "assignedPort", activePort);
       const isAlreadySamePort = current.assignedPort === activePort;
@@ -1668,14 +1916,15 @@ const exportJson = () => {
     commitGridUpdate((prev) => {
       const current = prev[y]?.[x];
       if (!current) return prev;
-      if (!isActiveCell(current)) return prev;
+      if (!isActiveCell(current) || current.mtTail) return prev;
 
       const currentPanels = getPortPanelCount(prev, "assignedPowerPort", activePowerPort);
       const isAlreadySamePort = current.assignedPowerPort === activePowerPort;
       if (!isAlreadySamePort && currentPanels >= safePanelsPerPowerOutlet) return prev;
 
-      const currentPortLoad = getPowerPortLoadWatts(prev, activePowerPort, powerSpec.maxW, { x, y });
-      if (!isAlreadySamePort && currentPortLoad + powerSpec.maxW > MAX_OUTLET_AMPS * VOLTAGE) return prev;
+      const cellWatts = PANEL_TYPES[cellPanelType(current)].power.maxW;
+      const currentPortLoad = getPowerPortLoadWatts(prev, activePowerPort, 0, { x, y });
+      if (!isAlreadySamePort && currentPortLoad + cellWatts > MAX_OUTLET_AMPS * VOLTAGE) return prev;
 
       const next = cloneGrid(prev);
       next[y][x].assignedPowerPort = activePowerPort;
@@ -1815,7 +2064,7 @@ const exportJson = () => {
           let seq = 1;
           const applyCell = ({ x, y }: { x: number; y: number }) => {
             if (port > SIGNAL_PORT_COUNT) return;
-            if (!isActiveCell(next[y]?.[x])) return;
+            if (!isPanelHead(next[y]?.[x])) return;
             next[y][x].assignedPort = port;
             next[y][x].sequence = seq;
             seq += 1;
@@ -1841,7 +2090,7 @@ const exportJson = () => {
           let seq = 1;
           ordered.forEach(({ x, y }) => {
             if (port > SIGNAL_PORT_COUNT) return;
-            if (!isActiveCell(next[y]?.[x])) return;
+            if (!isPanelHead(next[y]?.[x])) return;
             next[y][x].assignedPort = port;
             next[y][x].sequence = seq;
             seq += 1;
@@ -1864,10 +2113,11 @@ const exportJson = () => {
 
         let portIndex = 0;
         ordered.forEach(({ x, y }) => {
-          if (!isActiveCell(next[y]?.[x])) return;
+          if (!isPanelHead(next[y]?.[x])) return;
+          const cellWatts = PANEL_TYPES[cellPanelType(next[y][x])].power.maxW;
           while (portIndex < powerPorts.length) {
             const port = powerPorts[portIndex];
-            const currentLoad = getPowerPortLoadWatts(next, port.id, powerSpec.maxW);
+            const currentLoad = getPowerPortLoadWatts(next, port.id, 0);
             const currentPanels = getPortPanelCount(next, "assignedPowerPort", port.id);
 
             if (currentPanels >= safePanelsPerPowerOutlet) {
@@ -1875,7 +2125,7 @@ const exportJson = () => {
               continue;
             }
 
-            if (currentLoad + powerSpec.maxW <= MAX_OUTLET_AMPS * VOLTAGE) {
+            if (currentLoad + cellWatts <= MAX_OUTLET_AMPS * VOLTAGE) {
               next[y][x].assignedPowerPort = port.id;
               next[y][x].powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", port.id);
               next[y][x].powerManual = false;
@@ -1941,16 +2191,17 @@ const exportJson = () => {
 
         const cells = byPort.get(sigPort)!.sort((a, b) => a.seq - b.seq);
         for (const { x, y } of cells) {
+          const cellWatts = PANEL_TYPES[cellPanelType(next[y][x])].power.maxW;
           let placed = false;
           while (plugLeft()) {
             const plug = powerPorts[plugIndex];
             const currentPanels = getPortPanelCount(next, "assignedPowerPort", plug.id);
-            const currentLoad = getPowerPortLoadWatts(next, plug.id, powerSpec.maxW);
+            const currentLoad = getPowerPortLoadWatts(next, plug.id, 0);
             if (currentPanels >= safePanelsPerPowerOutlet) {
               plugIndex += 1;
               continue;
             }
-            if (currentLoad + powerSpec.maxW > MAX_OUTLET_AMPS * VOLTAGE) {
+            if (currentLoad + cellWatts > MAX_OUTLET_AMPS * VOLTAGE) {
               plugIndex += 1;
               continue;
             }
@@ -2051,7 +2302,6 @@ const exportJson = () => {
   };
 
   const applySelectedPanelVariant = (variant: PanelVariantKey) => {
-    if (panelType !== "MG9") return;
     const keys = getSelectedKeys(selectedCells, selectedCell);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
@@ -2060,7 +2310,29 @@ const exportJson = () => {
         const [x, y] = key.split("-").map(Number);
         const target = next[y]?.[x];
         if (!target || !isActiveCell(target)) return;
+        // Variants (triangle/curve/corner) are MG9-only.
+        if (cellPanelType(target) !== "MG9") return;
         target.panelVariant = variant;
+      });
+      return next;
+    });
+  };
+
+  const applySelectedPanelType = (type: PanelTypeKey) => {
+    const keys = getSelectedKeys(selectedCells, selectedCell);
+    if (!keys.size) return;
+    commitGridUpdate((prev) => {
+      const next = cloneGrid(prev);
+      keys.forEach((key) => {
+        const [x, y] = key.split("-").map(Number);
+        const target = next[y]?.[x];
+        // Only convert real panels (active, non-tail heads).
+        if (!isPanelHead(target)) return;
+        if (type === "MT") {
+          if (setModuleToMT(next, x, y)) target.panelVariant = "STANDARD";
+        } else {
+          setModuleToMG9(next, x, y);
+        }
       });
       return next;
     });
@@ -2131,7 +2403,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0120"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0130"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -2366,12 +2638,12 @@ const exportJson = () => {
 
                   <label className="flex items-center gap-2">
                     <input type="checkbox" checked={includeFlyBar} onChange={() => setIncludeFlyBar(!includeFlyBar)} />
-                    <span>Fly Bar ({panel.defaults.flyBarWeight}kg per column) → {flyBarWeight.toFixed(1)} kg</span>
+                    <span>Fly Bar (per top-row panel: MG9 {PANEL_TYPES.MG9.defaults.flyBarWeight}kg / MT {PANEL_TYPES.MT.defaults.flyBarWeight}kg) → {flyBarWeight.toFixed(1)} kg</span>
                   </label>
 
                   <label className="flex items-center gap-2">
                     <input type="checkbox" checked={includeSling} onChange={() => setIncludeSling(!includeSling)} />
-                    <span>Sling &amp; Shackle ({panel.defaults.slingWeight}kg per column) → {slingWeight.toFixed(1)} kg</span>
+                    <span>Sling &amp; Shackle ({PANEL_TYPES.MG9.defaults.slingWeight}kg per top-row panel) → {slingWeight.toFixed(1)} kg</span>
                   </label>
 
                   <label className="flex items-center gap-2">
@@ -2469,7 +2741,18 @@ const exportJson = () => {
               <span className="text-slate-300">{selectedCount ? `${selectedCount} selected` : "No panels selected"}</span>
               <select
                 className="rounded bg-white p-2 text-black disabled:opacity-60"
-                disabled={panelType !== "MG9" || selectedCount === 0}
+                disabled={selectedCount === 0}
+                title="Set the panel type for the selected panels (MT spans two 0.5m modules)"
+                value={selectedPanel ? cellPanelType(selectedPanel) : "MG9"}
+                onChange={(e) => applySelectedPanelType(e.target.value as PanelTypeKey)}
+              >
+                {(Object.keys(PANEL_TYPES) as PanelTypeKey[]).map((key) => (
+                  <option key={key} value={key}>{PANEL_TYPES[key].name} panel</option>
+                ))}
+              </select>
+              <select
+                className="rounded bg-white p-2 text-black disabled:opacity-60"
+                disabled={selectedCount === 0 || (selectedPanel ? cellPanelType(selectedPanel) !== "MG9" : false)}
                 value={selectedPanel?.panelVariant ?? "STANDARD"}
                 onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
               >
@@ -2506,8 +2789,8 @@ const exportJson = () => {
 
                     return stat.path.map((cell, idx) => {
                       if (idx === 0) return null;
-                      const prev = getDisplayCell(stat.path[idx - 1], cols, isFlippedView);
-                      const current = getDisplayCell(cell, cols, isFlippedView);
+                      const prev = displayPanelForCabling(stat.path[idx - 1], cols, isFlippedView);
+                      const current = displayPanelForCabling(cell, cols, isFlippedView);
                       let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0, cellW, cellH);
 
                       if (current.y !== prev.y) {
@@ -2527,8 +2810,8 @@ const exportJson = () => {
 
                     return path.map((cell, idx) => {
                       if (idx === 0) return null;
-                      const prev = getDisplayCell(path[idx - 1], cols, isFlippedView);
-                      const current = getDisplayCell(cell, cols, isFlippedView);
+                      const prev = displayPanelForCabling(path[idx - 1], cols, isFlippedView);
+                      const current = displayPanelForCabling(cell, cols, isFlippedView);
                       let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4, cellW, cellH);
 
                       if (current.y !== prev.y) {
@@ -2544,6 +2827,9 @@ const exportJson = () => {
 
                 <div className="absolute inset-0 z-10 grid" style={{ gridTemplateColumns: `repeat(${cols}, ${cellW}px)`, gap: GRID_GAP }}>
                   {grid.flat().map((cell) => {
+                    // MT tail modules are drawn as part of their head panel.
+                    if (cell.mtTail) return null;
+                    const span = cellSpanX(cell);
                     const displayX = toDisplayX(cell.x);
                     const key = `${displayX}-${cell.y}`;
                     const originalKey = `${cell.x}-${cell.y}`;
@@ -2576,13 +2862,14 @@ const exportJson = () => {
                           setSelectedCells(new Set([originalKey]));
                         }}
                         style={{
-                          width: cellW,
+                          width: span * cellW + (span - 1) * GRID_GAP,
                           height: cellH,
                           background: "transparent",
                           border: `2px ${isRemoved ? "dashed" : "solid"} ${isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
                           boxShadow: "none",
                           color: isRemoved ? "#94a3b8" : "#020617",
-                          gridColumnStart: displayX + 1,
+                          gridColumnStart: (isFlippedView ? displayX - (span - 1) : displayX) + 1,
+                          gridColumnEnd: `span ${span}`,
                           gridRowStart: cell.y + 1,
                         }}
                         className="relative flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
