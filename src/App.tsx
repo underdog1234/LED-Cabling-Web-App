@@ -37,7 +37,12 @@ const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
 const POWER_COLOR = "#f97316";
-const APP_VERSION = "0.13.0";
+// Chain-start (and backup-loop end) indicator outlines drawn alongside the
+// existing panel borders. Blue = first panel of a signal chain (and the last
+// panel too when the backup signal loop is on); orange = first panel of a power chain.
+const SIGNAL_START_COLOR = "#2563eb";
+const POWER_START_COLOR = POWER_COLOR;
+const APP_VERSION = "0.14.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -224,6 +229,8 @@ type PowerPortStat = {
   phase: string;
   manualPanels: number;
   path: Cell[];
+  firstKey: string | null;
+  lastKey: string | null;
 };
 
 type OpenJsonPayload = {
@@ -626,7 +633,7 @@ const drawPanelShape = (
   fill: string,
   stroke: string,
   lineWidth = 2,
-  options: { hatchStep?: number; curveStyle?: "test-pattern" } = {},
+  options: { hatchStep?: number; curveStyle?: "test-pattern"; signalRing?: boolean; powerRing?: boolean } = {},
 ) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
   ctx.save();
@@ -677,6 +684,27 @@ const drawPanelShape = (
       ctx.lineTo(i + h, 0);
       ctx.stroke();
     }
+  }
+
+  // Chain-start indicator rings, drawn on top of (and inside) the panel border so
+  // they never replace it. Blue = signal chain start/backup end, orange = power
+  // chain start. When both apply they nest concentrically and stay distinct.
+  const rings: string[] = [];
+  if (options.signalRing) rings.push(SIGNAL_START_COLOR);
+  if (options.powerRing) rings.push(POWER_START_COLOR);
+  if (rings.length) {
+    ctx.restore();
+    ctx.save();
+    ctx.translate(x + w / 2, y + h / 2);
+    ctx.rotate(((cell.rotation ?? 0) * Math.PI) / 180);
+    ctx.translate(-w / 2, -h / 2);
+    const ringW = Math.max(2, Math.round(Math.min(w, h) * 0.06));
+    rings.forEach((color, i) => {
+      const inset = lineWidth + ringW / 2 + i * ringW;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = ringW;
+      ctx.strokeRect(inset, inset, w - inset * 2, h - inset * 2);
+    });
   }
   ctx.restore();
 };
@@ -1072,6 +1100,8 @@ export default function App() {
           phase: port.phase,
           manualPanels: 0,
           path: [],
+          firstKey: null,
+          lastKey: null,
         },
       ]),
     );
@@ -1095,10 +1125,26 @@ export default function App() {
     Object.values(stats).forEach((stat) => {
       stat.utilisation = MAX_OUTLET_AMPS > 0 ? (stat.maxAmps / MAX_OUTLET_AMPS) * 100 : 0;
       stat.path.sort((a, b) => (a.powerSequence ?? 0) - (b.powerSequence ?? 0));
+      const first = stat.path[0];
+      const last = stat.path[stat.path.length - 1];
+      stat.firstKey = first ? `${first.x}-${first.y}` : null;
+      stat.lastKey = last ? `${last.x}-${last.y}` : null;
     });
 
     return stats;
   }, [grid, powerPorts, powerSpec.maxW, powerSpec.maxA, powerSpec.avgW, powerSpec.avgA]);
+
+  // Chain-start indicators for a panel, shared by the live layout and every export.
+  // Blue ring: first panel of its signal chain (and the last panel too when the
+  // backup signal loop is enabled). Orange ring: first panel of its power chain.
+  const getPanelIndicators = (cell: Cell) => {
+    const key = `${cell.x}-${cell.y}`;
+    const sStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
+    const signalRing = !!sStat && (sStat.firstKey === key || (backupSignalLoop && sStat.lastKey === key));
+    const pStat = cell.assignedPowerPort ? powerPortStats[cell.assignedPowerPort] : null;
+    const powerRing = !!pStat && pStat.firstKey === key;
+    return { signalRing, powerRing };
+  };
 
   const powerPortsUsed = useMemo(() => Object.values(powerPortStats).filter((stat) => stat.panels > 0).length, [powerPortStats]);
   const signalPortsUsed = useMemo(() => Object.values(signalPortStats).filter((stat) => stat.panels > 0).length, [signalPortStats]);
@@ -1424,7 +1470,8 @@ export default function App() {
       const x = disp.x * (cellW + GRID_GAP);
       const y = cell.y * (cellH + GRID_GAP);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-      drawPanelShape(ctx, x, y, w, cellH, cell, fill, "#0f172a", 2);
+      const { signalRing, powerRing } = getPanelIndicators(cell);
+      drawPanelShape(ctx, x, y, w, cellH, cell, fill, "#0f172a", 2, { signalRing, powerRing });
     });
 
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
@@ -1583,7 +1630,8 @@ const exportJson = () => {
           const yy = rowTop;
           const headDisplayX = flipX(cell.x, cols);
           const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-          drawPanelShape(ctx, x, yy, p.pixW, p.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern" });
+          const { signalRing, powerRing } = getPanelIndicators(cell);
+          drawPanelShape(ctx, x, yy, p.pixW, p.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing });
 
           ctx.fillStyle = "#020617";
           ctx.textAlign = "center";
@@ -2403,7 +2451,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0130"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0140"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -2835,6 +2883,7 @@ const exportJson = () => {
                     const originalKey = `${cell.x}-${cell.y}`;
                     const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
                     const isEdge = signalStat?.firstKey === originalKey || signalStat?.lastKey === originalKey;
+                    const { signalRing, powerRing } = getPanelIndicators(cell);
                     const isSelected = selectedCells.has(originalKey) || (selectedCell?.x === cell.x && selectedCell?.y === cell.y);
                     const isRemoved = cell.isRemoved;
                     const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
@@ -2888,6 +2937,19 @@ const exportJson = () => {
                                 transformOrigin: "center",
                               }}
                             />
+                            {/* Chain-start indicators, drawn on top of the panel fill/border without replacing it. */}
+                            {signalRing ? (
+                              <div
+                                className="pointer-events-none absolute inset-0 z-[5]"
+                                style={{ border: `3px solid ${SIGNAL_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
+                              />
+                            ) : null}
+                            {powerRing ? (
+                              <div
+                                className="pointer-events-none absolute z-[6]"
+                                style={{ inset: 3, border: `3px solid ${POWER_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
+                              />
+                            ) : null}
                             <div className="relative z-10">{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
                             {cell.assignedPort ? <div className="relative z-10 whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
                             {cell.assignedPowerPort ? <div className="relative z-10 whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}

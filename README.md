@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.13.0`
+Version `0.14.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -13,6 +13,14 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a PDF report with portrait detail pages plus both layout views in landscape
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.14.0
+
+- Added chain-start indicators drawn alongside (never replacing) the existing panel outlines
+- Blue outline on the first panel of each signal chain; orange outline on the first panel of each power chain
+- A panel that starts both chains shows both outlines as clearly separated concentric rings (blue outer, orange inner)
+- With "Do backup signal loop" enabled, the blue outline is also added to the last panel of each signal chain to show where the backup loop connects
+- Indicators appear everywhere the layout is drawn: the live editor, printed page, PDF export, and the PNG test pattern
 
 ## Recent Changes In v0.13.0
 
