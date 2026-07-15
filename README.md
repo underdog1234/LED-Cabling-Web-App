@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.14.0`
+Version `0.15.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
@@ -13,6 +13,16 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a PDF report with portrait detail pages plus both layout views in landscape
 - Save and reopen settings as JSON
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.15.0
+
+Stage 1 of the non-uniform overhaul: interface refresh (data model unchanged).
+
+- New shared design-system `Button` with consistent intents (primary / secondary / ghost / danger / success) and a clear active/selected state (bright fill + ring), replacing ad-hoc per-button colours
+- Tools and modes now show an unmistakable active highlight: Signal / Power patch mode, Select mode, and view flip
+- Controls grouped into labelled sections (Patch mode, Auto patching, Documentation & exports, Import & save, Selection & editing) with status chips for the active mode
+- Cleaner cards, spacing and typography; extracted UI primitives into `src/components/ui.tsx`
+- Cleanup: fixed the long-standing `useState` type warnings (typecheck now clean), tightened `patchMode`/`snakeDirection` types, removed a shadowed variable
 
 ## Recent Changes In v0.14.0
 

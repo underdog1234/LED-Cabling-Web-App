@@ -2,33 +2,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ImageDown } from "lucide-react";
 import { HelpCircle, Redo2, Undo2 } from "lucide-react";
-
-// Simple local UI components (replacing shadcn)
-const Button = ({ children, className = "", variant = "solid", type = "button", ...props }: any) => (
-  <button
-    className={`inline-flex items-center justify-center rounded-lg border px-3 py-2 font-medium transition-colors ${
-      variant === "outline"
-        ? "border-slate-500 bg-slate-700 text-white hover:bg-slate-600"
-        : "border-sky-400 bg-sky-600 text-white hover:bg-sky-500"
-    } ${className}`}
-    type={type}
-    {...props}
-  >
-    {children}
-  </button>
-);
-
-const Card = ({ children, className = "", ...props }: any) => (
-  <div className={`rounded border p-3 ${className}`} {...props}>{children}</div>
-);
-
-const CardHeader = ({ children, className = "" }: any) => <div className={`mb-2 font-bold ${className}`}>{children}</div>;
-const CardContent = ({ children, className = "" }: any) => <div className={className}>{children}</div>;
-const CardTitle = ({ children, className = "" }: any) => <div className={className}>{children}</div>;
-
-const Input = ({ className = "", ...props }: any) => (
-  <input className={`w-full rounded border p-2 text-black ${className}`} {...props} />
-);
+import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -42,7 +16,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.14.0";
+const APP_VERSION = "0.15.0";
 
 const PANEL_TYPES = {
   MG9: {
@@ -795,7 +769,7 @@ export default function App() {
   const [grid, setGrid] = useState<Cell[][]>(() => makeGrid(24, 8));
   const [activePort, setActivePort] = useState(1);
   const [activePowerPort, setActivePowerPort] = useState(1);
-  const [patchMode, setPatchMode] = useState("signal");
+  const [patchMode, setPatchMode] = useState<"signal" | "power">("signal");
   const [powerDistro, setPowerDistro] = useState<PowerDistroKey>("32A");
   const [isDragging, setIsDragging] = useState(false);
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
@@ -807,7 +781,7 @@ export default function App() {
   const [undoStack, setUndoStack] = useState<LayoutSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<LayoutSnapshot[]>([]);
   const [showHelp, setShowHelp] = useState(false);
-  const [snakeDirection, setSnakeDirection] = useState("LR");
+  const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
@@ -823,8 +797,8 @@ export default function App() {
   const distro = POWER_DISTROS[powerDistro];
   const powerPorts = useMemo(() => makePowerPorts(distro.portCount), [distro.portCount]);
 
-  const [panelsPerPowerOutlet, setPanelsPerPowerOutlet] = useState(panel.defaults.powerPanelsPerOutlet);
-  const [panelsPerSignalPort, setPanelsPerSignalPort] = useState(panel.defaults.signalPanelsPerPort);
+  const [panelsPerPowerOutlet, setPanelsPerPowerOutlet] = useState<number>(panel.defaults.powerPanelsPerOutlet);
+  const [panelsPerSignalPort, setPanelsPerSignalPort] = useState<number>(panel.defaults.signalPanelsPerPort);
 
   const selectedPanel = selectedCell ? grid[selectedCell.y]?.[selectedCell.x] ?? null : null;
   const activeSelectedKeys = getSelectedKeys(selectedCells, selectedCell);
@@ -2225,12 +2199,12 @@ const exportJson = () => {
           byPort.set(cell.assignedPort, list);
         }),
       );
-      const signalPorts = [...byPort.keys()].sort((a, b) => a - b);
+      const orderedSignalPorts = [...byPort.keys()].sort((a, b) => a - b);
 
       let plugIndex = 0;
       const plugLeft = () => plugIndex < powerPorts.length;
 
-      for (const sigPort of signalPorts) {
+      for (const sigPort of orderedSignalPorts) {
         if (!plugLeft()) break;
         // Align power plugs to signal ports: each new signal port starts on a fresh plug.
         if (getPortPanelCount(next, "assignedPowerPort", powerPorts[plugIndex].id) > 0) {
@@ -2451,7 +2425,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0140"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0150"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -2459,22 +2433,26 @@ const exportJson = () => {
               </a>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Button className="border-cyan-400 bg-cyan-600 hover:bg-cyan-500" onClick={generatePdf}>
-              <FileText className="mr-2 h-4 w-4" />Generate PDF
-            </Button>
-            <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={exportTestPatternPng}>
-              <ImageDown className="mr-2 h-4 w-4" />Download PNG Test Pattern
-            </Button>
-            <Button variant="outline" onClick={() => setShowHelp(true)}>
-              <HelpCircle className="mr-2 h-4 w-4" />Help
-            </Button>
-            <Button variant="outline" onClick={exportJson}>
-              <Download className="mr-2 h-4 w-4" />Download Settings
-            </Button>
-            <Button variant="outline" onClick={() => fileInputRef.current?.click()}>
-              <Upload className="mr-2 h-4 w-4" />Open Settings
-            </Button>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">
+              <Button intent="primary" onClick={generatePdf}>
+                <FileText className="h-4 w-4" />Generate PDF
+              </Button>
+              <Button intent="primary" onClick={exportTestPatternPng}>
+                <ImageDown className="h-4 w-4" />PNG Test Pattern
+              </Button>
+            </div>
+            <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">
+              <Button intent="secondary" onClick={exportJson}>
+                <Download className="h-4 w-4" />Save
+              </Button>
+              <Button intent="secondary" onClick={() => fileInputRef.current?.click()}>
+                <Upload className="h-4 w-4" />Open
+              </Button>
+              <Button intent="ghost" onClick={() => setShowHelp(true)}>
+                <HelpCircle className="h-4 w-4" />Help
+              </Button>
+            </div>
             <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={openJson} />
           </div>
         </div>
@@ -2564,38 +2542,29 @@ const exportJson = () => {
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2 no-print">
-                <Button
-                  variant="outline"
-                  className={patchMode === "signal" ? "border-sky-300 bg-sky-200 font-semibold text-slate-950 hover:bg-sky-100" : ""}
-                  onClick={() => setPatchMode("signal")}
-                >
-                  Signal Patch Mode
+              <ControlGroup label="Patch mode" className="no-print">
+                <Button active={patchMode === "signal"} activeAccent="sky" intent="secondary" onClick={() => setPatchMode("signal")}>
+                  <Zap className="h-4 w-4" />Signal Patch Mode
+                </Button>
+                <Button active={patchMode === "power"} activeAccent="amber" intent="secondary" onClick={() => setPatchMode("power")}>
+                  <Zap className="h-4 w-4" />Power Patch Mode
                 </Button>
                 <Button
-                  variant="outline"
-                  className={patchMode === "power" ? "border-amber-300 bg-amber-200 font-semibold text-slate-950 hover:bg-amber-100" : ""}
-                  onClick={() => setPatchMode("power")}
-                >
-                  <Zap className="mr-2 h-4 w-4" />Power Patch Mode
-                </Button>
-                <Button
-                  className="border-amber-400 bg-amber-600 text-white hover:bg-amber-500"
+                  intent="secondary"
                   onClick={matchPowerToSignal}
                   title="Patch power plugs to follow the signal patch order, aligned to the signal ports"
                 >
-                  <Wand2 className="mr-2 h-4 w-4" />Match Power To Signal Pattern
+                  <Wand2 className="h-4 w-4" />Match Power To Signal Pattern
                 </Button>
-              </div>
+                <StatusChip tone={patchMode === "signal" ? "sky" : "amber"}>
+                  {patchMode === "signal"
+                    ? activePort > 0 ? `Signal patching · port ${activePort}` : "Signal patching · no port selected"
+                    : activePowerPort > 0 ? `Power patching · plug ${activePowerPort}` : "Power patching · no plug selected"}
+                </StatusChip>
+              </ControlGroup>
 
-              <div className={`rounded-lg border px-4 py-3 text-sm font-medium [text-shadow:none] no-print ${
-                patchMode === "signal" ? "border-sky-300 bg-sky-100 text-slate-950" : "border-amber-300 bg-amber-100 text-slate-950"
-              }`}>
-                Current mode: {patchMode === "signal" ? (activePort > 0 ? `Signal patching on port ${activePort}` : "Signal patching - no port selected") : (activePowerPort > 0 ? `Power patching on plug ${activePowerPort}` : "Power patching - no plug selected")}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2 no-print">
-                <select className="rounded bg-white p-2 text-black" value={snakeDirection} onChange={(e) => setSnakeDirection(e.target.value)}>
+              <ControlGroup label="Auto patching" className="no-print">
+                <select className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black" value={snakeDirection} onChange={(e) => setSnakeDirection(e.target.value as typeof snakeDirection)}>
                   <option value="LR">Left to Right</option>
                   <option value="RL">Right to Left</option>
                   <option value="LRB">Left to Right from the Bottom</option>
@@ -2604,17 +2573,17 @@ const exportJson = () => {
                   <option value="BT">Bottom to Top</option>
                   <option value="LOOP_TOGETHER">Loop together</option>
                 </select>
-                <label className="flex items-center gap-2 rounded border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white">
+                <label className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white">
                   <input type="checkbox" checked={snakeAlternates} onChange={() => setSnakeAlternates((prev) => !prev)} />
-                  <span>Snake / alternate direction</span>
+                  <span>Snake / alternate</span>
                 </label>
-                <Button className="border-violet-400 bg-violet-600 hover:bg-violet-500" onClick={snakePatch}><Wand2 className="mr-2 h-4 w-4" />Auto Snake</Button>
-                <Button className="border-fuchsia-400 bg-fuchsia-600 hover:bg-fuchsia-500" onClick={clearSelectedPortPatching}>
+                <Button intent="primary" onClick={snakePatch}><Wand2 className="h-4 w-4" />Auto Snake</Button>
+                <Button intent="secondary" onClick={clearSelectedPortPatching}>
                   Clear Selected {patchMode === "signal" ? (activePort > 0 ? `Port ${activePort}` : "Port") : (activePowerPort > 0 ? `Plug ${activePowerPort}` : "Plug")}
                 </Button>
-                <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSignalCabling}>Clear Signal</Button>
-                <Button className="border-orange-400 bg-orange-600 hover:bg-orange-500" onClick={clearPowerAssignments}>Clear Power</Button>
-              </div>
+                <Button intent="danger" onClick={clearSignalCabling}>Clear Signal</Button>
+                <Button intent="danger" onClick={clearPowerAssignments}>Clear Power</Button>
+              </ControlGroup>
             </CardContent>
           </Card>
 
@@ -2760,10 +2729,8 @@ const exportJson = () => {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
               <div className="flex items-center gap-2 no-print">
-                <div className={`rounded-full border px-3 py-1 text-xs font-semibold ${isFlippedView ? "border-amber-300 bg-amber-100 text-slate-950" : "border-sky-300 bg-sky-100 text-slate-950"}`}>
-                  {isFlippedView ? "Current: Front View" : "Current: Back View"}
-                </div>
-                <Button variant="outline" className="text-sm" onClick={() => setIsFlippedView((prev) => !prev)}>
+                <StatusChip tone={isFlippedView ? "amber" : "sky"}>{isFlippedView ? "Front View" : "Back View"}</StatusChip>
+                <Button intent="secondary" size="sm" onClick={() => setIsFlippedView((prev) => !prev)}>
                   {isFlippedView ? "Show Back View" : "Show Front View"}
                 </Button>
               </div>
@@ -2772,8 +2739,10 @@ const exportJson = () => {
           <CardContent>
             <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 p-2 text-xs text-white [text-shadow:0_0_2px_black] no-print">
               <Button
-                variant="outline"
-                className={panelSelectMode ? "border-emerald-300 bg-emerald-200 font-semibold text-slate-950 hover:bg-emerald-100" : "border-sky-300 bg-sky-700"}
+                intent="secondary"
+                size="sm"
+                active={panelSelectMode}
+                activeAccent="emerald"
                 onClick={() => {
                   setPanelSelectMode((prev) => {
                     if (prev) {
@@ -2784,11 +2753,11 @@ const exportJson = () => {
                   });
                 }}
               >
-                {panelSelectMode ? "Select Mode" : "Patching Mode"}
+                {panelSelectMode ? "Select Mode (on)" : "Enable Select Mode"}
               </Button>
-              <span className="text-slate-300">{selectedCount ? `${selectedCount} selected` : "No panels selected"}</span>
+              <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
               <select
-                className="rounded bg-white p-2 text-black disabled:opacity-60"
+                className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
                 disabled={selectedCount === 0}
                 title="Set the panel type for the selected panels (MT spans two 0.5m modules)"
                 value={selectedPanel ? cellPanelType(selectedPanel) : "MG9"}
@@ -2799,7 +2768,7 @@ const exportJson = () => {
                 ))}
               </select>
               <select
-                className="rounded bg-white p-2 text-black disabled:opacity-60"
+                className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
                 disabled={selectedCount === 0 || (selectedPanel ? cellPanelType(selectedPanel) !== "MG9" : false)}
                 value={selectedPanel?.panelVariant ?? "STANDARD"}
                 onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
@@ -2808,12 +2777,12 @@ const exportJson = () => {
                   <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
                 ))}
               </select>
-              <Button className="border-indigo-400 bg-indigo-600 hover:bg-indigo-500" onClick={rotateSelectedPanels} disabled={selectedCount === 0}>Rotate 🔄</Button>
-              <Button className="border-rose-400 bg-rose-600 hover:bg-rose-500" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Selected Patching</Button>
-              <Button className="border-slate-400 bg-slate-700 hover:bg-slate-600" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete Panel</Button>
-              <Button className="border-emerald-400 bg-emerald-600 hover:bg-emerald-500" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore Panel</Button>
-              <Button variant="outline" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="mr-1 h-4 w-4" />Undo</Button>
-              <Button variant="outline" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="mr-1 h-4 w-4" />Redo</Button>
+              <Button intent="secondary" size="sm" onClick={rotateSelectedPanels} disabled={selectedCount === 0}>Rotate 🔄</Button>
+              <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
+              <Button intent="danger" size="sm" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete</Button>
+              <Button intent="success" size="sm" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore</Button>
+              <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
+              <Button intent="ghost" size="sm" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="h-4 w-4" />Redo</Button>
             </div>
             <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8 select-none">
               <div className="relative" style={{ width: svgW, height: svgH }}>
