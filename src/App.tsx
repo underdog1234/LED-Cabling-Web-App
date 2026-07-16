@@ -13,6 +13,7 @@ import {
   rectsJoined,
   MODULE_MM,
 } from "./model/panels";
+import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -808,9 +809,10 @@ function HelpModal({ onClose }: { onClose: () => void }) {
         <div className="grid gap-4 text-sm md:grid-cols-2">
           <div className="space-y-2">
             <div className="font-semibold text-sky-200">Workflow</div>
-            <div><b>Patching Mode</b>: click or drag panels to patch the selected signal port or power plug.</div>
-            <div><b>Select Mode</b>: drag a box around panels, then change type, rotate, clear, delete, or restore.</div>
-            <div>Click away from the signal/power patching cards to clear the active patch target.</div>
+            <div><b>Patch</b>: click or drag panels to patch the selected signal port or power plug.</div>
+            <div><b>Select</b>: click a panel or drag a box (Shift adds). Then change type, rotate, clear, delete, or restore.</div>
+            <div><b>Move</b>: drag panels to reposition freely; edges snap and join. Toggle Snap for fine positioning.</div>
+            <div><b>Import Project</b>: bring in a layout from the YES TECH Layout Tool.</div>
           </div>
           <div className="space-y-2">
             <div className="font-semibold text-sky-200">Shortcuts</div>
@@ -819,9 +821,100 @@ function HelpModal({ onClose }: { onClose: () => void }) {
             <div><b>Delete</b>: Delete selected panels</div>
             <div><b>R</b>: Rotate selected panels</div>
             <div><b>C</b>: Clear selected panel patching</div>
-            <div><b>Escape</b>: Clear selection or leave Select Mode</div>
+            <div><b>Escape</b>: Clear selection or leave the current mode</div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportPreviewModal({
+  result,
+  hasUnsavedWork,
+  onCancel,
+  onApply,
+}: {
+  result: ImportResult;
+  hasUnsavedWork: boolean;
+  onCancel: () => void;
+  onApply: (result: ImportResult, mode: "replace" | "new") => void;
+}) {
+  const typeLabel: Record<string, string> = { MG9: "MG9 square", MG12: "MG12 triangle", MG13: "MG13 quarter-circle" };
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onCancel}>
+      <div className="max-h-[85vh] w-full max-w-xl overflow-auto rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between gap-4">
+          <div className="text-lg font-bold">Import Project</div>
+          <Button variant="outline" onClick={onCancel}>Close</Button>
+        </div>
+
+        {result.ok ? (
+          <>
+            <div className="rounded-lg border border-slate-700 bg-slate-800 p-3 text-sm">
+              <div className="mb-2 font-semibold text-sky-200">Detected</div>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-1">
+                <dt className="text-slate-400">Project name</dt>
+                <dd>{result.projectName}</dd>
+                <dt className="text-slate-400">Source version</dt>
+                <dd>{result.summary.sourceVersion ?? "unknown"}</dd>
+                <dt className="text-slate-400">Active panels</dt>
+                <dd>{result.summary.panelCount}</dd>
+                <dt className="text-slate-400">Panel types</dt>
+                <dd>{Object.entries(result.summary.typeCounts).map(([t, n]) => `${n}× ${typeLabel[t] ?? t}`).join(", ")}</dd>
+                <dt className="text-slate-400">Wall size</dt>
+                <dd>{result.summary.widthM.toFixed(2)}m × {result.summary.heightM.toFixed(2)}m</dd>
+                <dt className="text-slate-400">Signal / power</dt>
+                <dd>0 outputs (imported un-patched)</dd>
+                <dt className="text-slate-400">Backup loop</dt>
+                <dd>Unchanged</dd>
+              </dl>
+            </div>
+
+            {result.converted.length ? (
+              <div className="mt-3 rounded-lg border border-sky-800 bg-sky-950/40 p-3 text-xs text-sky-200">
+                <div className="mb-1 font-semibold">Converted</div>
+                <ul className="list-disc space-y-0.5 pl-4">{result.converted.map((c, i) => <li key={i}>{c}</li>)}</ul>
+              </div>
+            ) : null}
+            {result.warnings.length ? (
+              <div className="mt-3 rounded-lg border border-amber-700 bg-amber-950/40 p-3 text-xs text-amber-200">
+                <div className="mb-1 font-semibold">Notes</div>
+                <ul className="list-disc space-y-0.5 pl-4">{result.warnings.map((c, i) => <li key={i}>{c}</li>)}</ul>
+              </div>
+            ) : null}
+            {result.skipped.length ? (
+              <div className="mt-3 rounded-lg border border-rose-800 bg-rose-950/40 p-3 text-xs text-rose-200">
+                <div className="mb-1 font-semibold">Skipped ({result.skipped.length})</div>
+                <ul className="list-disc space-y-0.5 pl-4">{result.skipped.slice(0, 8).map((c, i) => <li key={i}>{c}</li>)}</ul>
+                {result.skipped.length > 8 ? <div className="pl-4">…and {result.skipped.length - 8} more.</div> : null}
+              </div>
+            ) : null}
+
+            {hasUnsavedWork ? (
+              <div className="mt-3 rounded-lg border border-amber-500 bg-amber-500/15 p-2 text-xs text-amber-200">
+                ⚠ Your current project has patching that will be replaced. Save it first if you want to keep it.
+              </div>
+            ) : null}
+
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <Button variant="outline" onClick={onCancel}>Cancel</Button>
+              <Button intent="secondary" onClick={() => onApply(result, "replace")}>Replace current</Button>
+              <Button intent="primary" onClick={() => onApply(result, "new")}>Import as new project</Button>
+            </div>
+          </>
+        ) : (
+          <div className="rounded-lg border border-rose-700 bg-rose-950/40 p-3 text-sm text-rose-200">
+            <div className="mb-1 font-semibold">Could not import this file</div>
+            <div>{result.error}</div>
+            {result.skipped.length ? (
+              <ul className="mt-2 list-disc space-y-0.5 pl-4 text-xs">{result.skipped.slice(0, 8).map((c, i) => <li key={i}>{c}</li>)}</ul>
+            ) : null}
+            <div className="mt-4 flex justify-end">
+              <Button variant="outline" onClick={onCancel}>Close</Button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -830,7 +923,9 @@ function HelpModal({ onClose }: { onClose: () => void }) {
 export default function App() {
   const signalPorts = useMemo(() => makeSignalPorts(), []);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
 
   const [projectName, setProjectName] = useState("Untitled Project");
   const [panelType, setPanelType] = useState<PanelTypeKey>("MG9");
@@ -1812,6 +1907,53 @@ const exportJson = () => {
     reader.readAsText(file);
   };
 
+  // --- Import from the YES TECH Layout Tool --------------------------------
+  // Read + validate the file, then show a preview modal before touching the
+  // current project (the user can cancel, replace, or open a new project).
+  const handleImportFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const result = parseYesTechLayout(String(ev.target?.result || ""));
+      setImportPreview(result);
+      if (importInputRef.current) importInputRef.current.value = "";
+    };
+    reader.readAsText(file);
+  };
+
+  const hasUnsavedWork = grid.some((cell) => isActiveCell(cell) && (cell.assignedPort || cell.assignedPowerPort));
+
+  const applyImport = (result: ImportResult, mode: "replace" | "new") => {
+    // Both modes replace the on-screen project; "new" also resets the name to
+    // the imported one. The original source file is never modified.
+    const panels: Cell[] = result.panels.map((p) => ({
+      id: newCellId(),
+      x: p.x,
+      y: p.y,
+      assignedPort: null,
+      sequence: null,
+      assignedPowerPort: null,
+      powerSequence: null,
+      powerManual: false,
+      isRemoved: false,
+      panelVariant: p.panelVariant,
+      rotation: p.rotation,
+      panelType: p.panelType,
+    }));
+    setProjectName(mode === "new" ? result.projectName : result.projectName || projectName);
+    setPanelType("MG9");
+    setGrid(panels);
+    setSelectedId(null);
+    setSelectedCells(new Set());
+    setUndoStack([]);
+    setRedoStack([]);
+    setEditMode("patch");
+    setPatchMode("signal");
+    setOverlapNotice(null);
+    setImportPreview(null);
+  };
+
   const generatePdf = async () => {
   try {
     const jsPDF = (await import("jspdf")).default;
@@ -2628,6 +2770,14 @@ const exportJson = () => {
   return (
     <div className="min-h-screen bg-[#0f172a] p-6 text-white print-container">
       {showHelp ? <HelpModal onClose={() => setShowHelp(false)} /> : null}
+      {importPreview ? (
+        <ImportPreviewModal
+          result={importPreview}
+          hasUnsavedWork={hasUnsavedWork}
+          onCancel={() => setImportPreview(null)}
+          onApply={applyImport}
+        />
+      ) : null}
       <style>{`
         @media print {
           @page { size: landscape; margin: 12mm; }
@@ -2671,11 +2821,15 @@ const exportJson = () => {
               <Button intent="secondary" onClick={() => fileInputRef.current?.click()}>
                 <Upload className="h-4 w-4" />Open
               </Button>
+              <Button intent="secondary" onClick={() => importInputRef.current?.click()} title="Import a project from the YES TECH Layout Tool">
+                <Upload className="h-4 w-4" />Import Project
+              </Button>
               <Button intent="ghost" onClick={() => setShowHelp(true)}>
                 <HelpCircle className="h-4 w-4" />Help
               </Button>
             </div>
             <input ref={fileInputRef} type="file" accept="application/json" className="hidden" onChange={openJson} />
+            <input ref={importInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleImportFile} />
           </div>
         </div>
 
