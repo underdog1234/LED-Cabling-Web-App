@@ -123,6 +123,33 @@ const PANEL_VARIANTS = {
   CORNER: { id: "CORNER", label: "MG9 LED Corner Panel", symbol: "Corner", stockItem: STOCK_CATALOG.mg9Corner, shape: "corner" },
 } as const;
 
+// Shaped panels (MG12 triangle / MG13 quarter circle) are physical one-way
+// pieces: the location of the right-angle corner after rotation decides which
+// stock unit is consumed. Mapping matches the YES TECH layout tool exactly.
+const SHAPE_ORIENTATIONS = {
+  LU: { key: "LU", icon: "↖", label: "Left Up" },
+  LD: { key: "LD", icon: "↙", label: "Left Down" },
+  RU: { key: "RU", icon: "↗", label: "Right Up" },
+  RD: { key: "RD", icon: "↘", label: "Right Down" },
+} as const;
+type ShapeOrientationKey = keyof typeof SHAPE_ORIENTATIONS;
+// Right-angle corner after clockwise rotation -> orientation bucket.
+// Base shapes (rotation 0): triangle corner bottom-left (LD); sector corner bottom-right (RD).
+const TRIANGLE_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "LD", 90: "LU", 180: "RU", 270: "RD" };
+const SECTOR_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "RD", 90: "LD", 180: "LU", 270: "RU" };
+// Per-orientation stock on the shelf (matches the layout tool's inventory).
+const SHAPED_STOCK_PER_ORIENTATION = { TRIANGLE: 5, CURVED: 5 } as const;
+
+const normalizeRotation = (rotation: number | undefined | null) =>
+  ((Math.round((Number(rotation) || 0) / 90) * 90) % 360 + 360) % 360;
+
+const getShapeOrientation = (variant: PanelVariantKey, rotation: number | undefined | null): ShapeOrientationKey | null => {
+  const rot = normalizeRotation(rotation);
+  if (variant === "TRIANGLE") return TRIANGLE_ORIENTATION[rot] ?? null;
+  if (variant === "CURVED") return SECTOR_ORIENTATION[rot] ?? null;
+  return null;
+};
+
 const PORT_COLORS = [
   "#48d7d2",
   "#d58cff",
@@ -999,6 +1026,20 @@ export default function App() {
     });
     return counts;
   }, [activePanels]);
+  // Shaped panels split by the orientation their rotation puts them in
+  // (LU/LD/RU/RD) - each orientation is a separate physical stock item.
+  const shapedOrientationCounts = useMemo(() => {
+    const zero = () => ({ LU: 0, LD: 0, RU: 0, RD: 0 }) as Record<ShapeOrientationKey, number>;
+    const counts = { TRIANGLE: zero(), CURVED: zero() };
+    activePanels.forEach((cell) => {
+      if (cellPanelType(cell) !== "MG9") return;
+      const variant = cell.panelVariant ?? "STANDARD";
+      if (variant !== "TRIANGLE" && variant !== "CURVED") return;
+      const orientation = getShapeOrientation(variant, cell.rotation);
+      if (orientation) counts[variant][orientation] += 1;
+    });
+    return counts;
+  }, [activePanels]);
   const activeColumns = useMemo(
     () => Array.from({ length: cols }, (_, x) => x).filter((x) => activeCells.some((cell) => cell.x === x)),
     [activeCells, cols],
@@ -1268,16 +1309,40 @@ export default function App() {
       rowsOut[rowsOut.length - 1].spare = standardSpare;
       rowsOut[rowsOut.length - 1].rounded = standardRounded;
 
-      (Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).forEach((variantKey) => {
-        if (variantKey === "STANDARD") return;
+      // Shaped panels (triangle / quarter circle) are one-way physical pieces:
+      // each rotation orientation (LU/LD/RU/RD) is its own stock line, checked
+      // against the per-orientation shelf quantity - same as the layout tool.
+      (["TRIANGLE", "CURVED"] as const).forEach((variantKey) => {
         const variant = PANEL_VARIANTS[variantKey];
         const item = variant.stockItem;
-        const count = panelVariantCounts[variantKey];
-        if (!item || count <= 0) return;
-        const spare = Math.ceil(count * mg9Defaults.spareRatio);
-        const rounded = roundUpToBox(count + spare, mg9Defaults.panelsPerBox);
-        rowsOut.push(makeStockRow(item, rounded, `${count} selected + ${spare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`, spare, rounded));
+        if (!item || panelVariantCounts[variantKey] <= 0) return;
+        (Object.keys(SHAPE_ORIENTATIONS) as ShapeOrientationKey[]).forEach((orientationKey) => {
+          const count = shapedOrientationCounts[variantKey][orientationKey];
+          if (count <= 0) return;
+          const orientation = SHAPE_ORIENTATIONS[orientationKey];
+          const spare = Math.ceil(count * mg9Defaults.spareRatio);
+          const stockQty = SHAPED_STOCK_PER_ORIENTATION[variantKey];
+          pushBaseRow(
+            `${item.code}-${orientationKey}`,
+            `${variant.label} ${orientation.icon} ${orientation.label}`,
+            count + spare,
+            stockQty,
+            `${count} placed at this orientation + ${spare} spare`,
+          );
+          rowsOut[rowsOut.length - 1].spare = spare;
+        });
       });
+
+      // Corner panels are orientation-free; keep the original single line.
+      {
+        const item = PANEL_VARIANTS.CORNER.stockItem;
+        const count = panelVariantCounts.CORNER;
+        if (item && count > 0) {
+          const spare = Math.ceil(count * mg9Defaults.spareRatio);
+          const rounded = roundUpToBox(count + spare, mg9Defaults.panelsPerBox);
+          rowsOut.push(makeStockRow(item, rounded, `${count} selected + ${spare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`, spare, rounded));
+        }
+      }
     }
 
     if (mtCount > 0) {
@@ -1388,7 +1453,7 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
 
   const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
   const safeProjectName = projectName.trim() || "Untitled Project";
@@ -2857,11 +2922,14 @@ const exportJson = () => {
                     const isRemoved = cell.isRemoved;
                     const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
                     const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+                    // Match the canvas/PDF base shapes (and the YES TECH layout
+                    // tool): triangle = right angle at bottom-left at rotation 0;
+                    // curve = quarter disc centred on the bottom-right corner.
                     const shapeClipPath =
                       variant.shape === "triangle"
-                        ? "polygon(50% 0, 100% 100%, 0 100%)"
+                        ? "polygon(0 0, 100% 100%, 0 100%)"
                         : variant.shape === "curve"
-                          ? "polygon(0 0, 100% 0, 100% 70%, 72% 100%, 0 100%)"
+                          ? "circle(farthest-side at 100% 100%)"
                           : undefined;
                     const hatch =
                       variant.shape === "corner"
