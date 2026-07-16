@@ -8,6 +8,7 @@ import {
   activeBBox,
   bandPanels,
   computeSnapDelta,
+  connectedGroups,
   findOverlaps,
   joinedGroupIds,
   rectsJoined,
@@ -615,6 +616,89 @@ const mirrorRectX = (rect: RectMm, bbox: RectMm): RectMm => ({
   x: 2 * bbox.x + bbox.w - rect.x - rect.w,
 });
 
+// Depth-first bottom->top traversal of one letter (a connected group of
+// panels). Starts at the bottom-most/left-most panel and, at each step, walks
+// to the highest unvisited joined neighbour first; on reaching the top of a
+// branch it backtracks to the fork and takes the next branch. This yields the
+// "patch up one branch, jump back to the fork, continue" order.
+const orderLetterBottomUp = (cells: Cell[]): Cell[] => {
+  if (cells.length <= 1) return [...cells];
+  const rectOf = new Map(cells.map((c) => [c.id, cellRect(c)]));
+  const byId = new Map(cells.map((c) => [c.id, c]));
+  const adj = new Map<string, string[]>();
+  cells.forEach((c) => adj.set(c.id, []));
+  for (let i = 0; i < cells.length; i += 1) {
+    for (let j = i + 1; j < cells.length; j += 1) {
+      if (rectsJoined(rectOf.get(cells[i].id)!, rectOf.get(cells[j].id)!)) {
+        adj.get(cells[i].id)!.push(cells[j].id);
+        adj.get(cells[j].id)!.push(cells[i].id);
+      }
+    }
+  }
+  const start = [...cells].sort((a, b) => {
+    const ra = rectOf.get(a.id)!;
+    const rb = rectOf.get(b.id)!;
+    return rb.y + rb.h - (ra.y + ra.h) || ra.x - rb.x; // lowest bottom edge, then left-most
+  })[0];
+  const visited = new Set<string>();
+  const order: Cell[] = [];
+  const visit = (id: string) => {
+    if (visited.has(id)) return;
+    visited.add(id);
+    order.push(byId.get(id)!);
+    const neighbours = adj
+      .get(id)!
+      .filter((n) => !visited.has(n))
+      .sort((a, b) => {
+        const ra = rectOf.get(a)!;
+        const rb = rectOf.get(b)!;
+        return ra.y - rb.y || ra.x - rb.x; // go up (smaller y) first
+      });
+    neighbours.forEach(visit);
+  };
+  visit(start.id);
+  cells.forEach((c) => {
+    if (!visited.has(c.id)) order.push(c);
+  });
+  return order;
+};
+
+// Order panels for letter-shaped layouts: split active panels into connected
+// "letters", order the letters left->right within top->bottom text lines, and
+// return each letter as a bottom-up traversal. snakePatch keeps a whole letter
+// on one port where it fits.
+const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
+  const active = panels.filter((c) => isActiveCell(c));
+  if (!active.length) return [];
+  const groups = connectedGroups(active, cellRect);
+  const byGroup = new Map<number, Cell[]>();
+  active.forEach((c) => {
+    const g = groups.get(c.id);
+    if (g === undefined) return;
+    const arr = byGroup.get(g) ?? [];
+    arr.push(c);
+    byGroup.set(g, arr);
+  });
+  const letters = [...byGroup.values()].map((cells) => {
+    const bb = activeBBox(cells.map(cellRect));
+    return { cells, bb, cx: bb.x + bb.w / 2, cy: bb.y + bb.h / 2 };
+  });
+  // Band letters into text lines by vertical centre, lines top->bottom.
+  letters.sort((a, b) => a.cy - b.cy);
+  const lines: (typeof letters)[] = [];
+  letters.forEach((letter) => {
+    const line = lines.find((l) => Math.abs(l[0].cy - letter.cy) < letter.bb.h * 0.6 + 250);
+    if (line) line.push(letter);
+    else lines.push([letter]);
+  });
+  const ordered: Cell[][] = [];
+  lines.forEach((line) => {
+    line.sort((a, b) => a.bb.x - b.bb.x); // left -> right
+    line.forEach((letter) => ordered.push(orderLetterBottomUp(letter.cells)));
+  });
+  return ordered;
+};
+
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
   required: number,
@@ -968,7 +1052,7 @@ export default function App() {
   const [undoStack, setUndoStack] = useState<LayoutSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<LayoutSnapshot[]>([]);
   const [showHelp, setShowHelp] = useState(false);
-  const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER">("LR");
+  const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
@@ -2494,9 +2578,13 @@ const exportJson = () => {
   const snakePatch = () => {
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
-      // Reading order over the free layout: row/column bands with alternation;
-      // LOOP_TOGETHER returns one segment per loop, each starting a new port.
-      const segments = orderPanelsForSnake(next, snakeDirection, snakeAlternates);
+      // Reading order over the free layout. LETTERS = one segment per connected
+      // letter (bottom-up, branch-aware); LOOP_TOGETHER = one segment per loop;
+      // otherwise a single reading-order segment over row/column bands.
+      const letterMode = snakeDirection === "LETTERS";
+      const segments = letterMode
+        ? orderPanelsForLetters(next)
+        : orderPanelsForSnake(next, snakeDirection, snakeAlternates);
 
       if (patchMode === "signal") {
         for (const cell of next) {
@@ -2507,6 +2595,16 @@ const exportJson = () => {
         let port = 1;
         let seq = 1;
         segments.forEach((segment) => {
+          // Letter mode: don't split a letter across ports - start it on a fresh
+          // port if the whole letter won't fit in the remaining capacity (unless
+          // the letter is larger than a full port, in which case it must split).
+          if (letterMode && seq > 1) {
+            const remaining = safePanelsPerSignalPort - (seq - 1);
+            if (segment.length > remaining && segment.length <= safePanelsPerSignalPort) {
+              port += 1;
+              seq = 1;
+            }
+          }
           segment.forEach((cell) => {
             if (port > SIGNAL_PORT_COUNT) return;
             cell.assignedPort = port;
@@ -2518,7 +2616,7 @@ const exportJson = () => {
             }
           });
           // Each loop-together segment starts on a fresh port.
-          if (segments.length > 1 && seq !== 1) {
+          if (!letterMode && segments.length > 1 && seq !== 1) {
             port += 1;
             seq = 1;
           }
@@ -2533,27 +2631,39 @@ const exportJson = () => {
         }
 
         let portIndex = 0;
-        segments.flat().forEach((cell) => {
+        const assignToPlug = (cell: Cell) => {
           const cellWatts = PANEL_TYPES[cellPanelType(cell)].power.maxW;
           while (portIndex < powerPorts.length) {
             const port = powerPorts[portIndex];
             const currentLoad = getPowerPortLoadWatts(next, port.id, 0);
             const currentPanels = getPortPanelCount(next, "assignedPowerPort", port.id);
-
             if (currentPanels >= safePanelsPerPowerOutlet) {
               portIndex += 1;
               continue;
             }
-
             if (currentLoad + cellWatts <= MAX_OUTLET_AMPS * VOLTAGE) {
               cell.assignedPowerPort = port.id;
               cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", port.id);
               cell.powerManual = false;
               return;
             }
-
             portIndex += 1;
           }
+        };
+
+        segments.forEach((segment) => {
+          // Letter mode: keep a letter on one plug where it fits (advance first
+          // if the whole letter won't fit the current plug's count/amp headroom).
+          if (letterMode && portIndex < powerPorts.length) {
+            const plug = powerPorts[portIndex];
+            const load = getPowerPortLoadWatts(next, plug.id, 0);
+            const count = getPortPanelCount(next, "assignedPowerPort", plug.id);
+            const letterWatts = segment.reduce((s, c) => s + PANEL_TYPES[cellPanelType(c)].power.maxW, 0);
+            const fitsFullPlug = segment.length <= safePanelsPerPowerOutlet && letterWatts <= MAX_OUTLET_AMPS * VOLTAGE;
+            const fitsRemaining = count + segment.length <= safePanelsPerPowerOutlet && load + letterWatts <= MAX_OUTLET_AMPS * VOLTAGE;
+            if (count > 0 && fitsFullPlug && !fitsRemaining) portIndex += 1;
+          }
+          segment.forEach(assignToPlug);
         });
       }
 
@@ -2979,6 +3089,7 @@ const exportJson = () => {
                   <option value="TB">Top to Bottom</option>
                   <option value="BT">Bottom to Top</option>
                   <option value="LOOP_TOGETHER">Loop together</option>
+                  <option value="LETTERS">Letter patching (bottom-up)</option>
                 </select>
                 <label className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white">
                   <input type="checkbox" checked={snakeAlternates} onChange={() => setSnakeAlternates((prev) => !prev)} />
