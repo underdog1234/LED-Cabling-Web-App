@@ -685,11 +685,14 @@ const drawPanelShape = (
   fill: string,
   stroke: string,
   lineWidth = 2,
-  options: { hatchStep?: number; curveStyle?: "test-pattern"; signalRing?: boolean; powerRing?: boolean } = {},
+  options: { hatchStep?: number; curveStyle?: "test-pattern"; signalRing?: boolean; powerRing?: boolean; mirrorX?: boolean } = {},
 ) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
   ctx.save();
   ctx.translate(x + w / 2, y + h / 2);
+  // Front view: mirror the whole panel horizontally (walk around the wall)
+  // without altering its stored rotation - scaleX(-1) applied to the rotated shape.
+  if (options.mirrorX) ctx.scale(-1, 1);
   ctx.rotate(((cell.rotation ?? 0) * Math.PI) / 180);
   ctx.translate(-w / 2, -h / 2);
   ctx.fillStyle = fill;
@@ -1117,6 +1120,22 @@ export default function App() {
       if (event.key.toLowerCase() === "c") {
         event.preventDefault();
         clearSelectedPanelPatching();
+        return;
+      }
+      // Mode shortcuts.
+      if (event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        setEditMode("select");
+        return;
+      }
+      if (event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        setEditMode("move");
+        return;
+      }
+      if (event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        setEditMode("patch");
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -1682,7 +1701,7 @@ export default function App() {
       const r = dispRectPx(cell);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
       const { signalRing, powerRing } = getPanelIndicators(cell);
-      drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalRing, powerRing });
+      drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalRing, powerRing, mirrorX: flipped });
     });
 
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
@@ -1826,7 +1845,7 @@ const exportJson = () => {
           const yy = rowTop;
           const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
           const { signalRing, powerRing } = getPanelIndicators(cell);
-          drawPanelShape(ctx, x, yy, p.pixW, p.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing });
+          drawPanelShape(ctx, x, yy, p.pixW, p.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing, mirrorX: true });
 
           ctx.fillStyle = "#020617";
           ctx.textAlign = "center";
@@ -2547,6 +2566,17 @@ const exportJson = () => {
     setIsDragging(false);
   };
 
+  // Remove every panel, leaving an empty workspace (undoable).
+  const clearAllPanels = () => {
+    if (grid.length && !window.confirm("Remove all panels from the layout? This can be undone.")) return;
+    commitGridUpdate(() => []);
+    setSelectedId(null);
+    setSelectedCells(new Set());
+    setDragVisited(new Set());
+    setIsDragging(false);
+    setOverlapNotice(null);
+  };
+
   // Patch power to follow the existing signal patch: walk panels in signal order
   // (signal port, then sequence) and fill power plugs, starting a fresh plug for
   // each signal port so power plugs line up with the signal ports. Respects the
@@ -2821,8 +2851,8 @@ const exportJson = () => {
               <Button intent="secondary" onClick={() => fileInputRef.current?.click()}>
                 <Upload className="h-4 w-4" />Open
               </Button>
-              <Button intent="secondary" onClick={() => importInputRef.current?.click()} title="Import a project from the YES TECH Layout Tool">
-                <Upload className="h-4 w-4" />Import Project
+              <Button intent="secondary" onClick={() => importInputRef.current?.click()} title="Import a project from the Creative Layout Tool">
+                <Upload className="h-4 w-4" />Import Project from Creative Layout Tool
               </Button>
               <Button intent="ghost" onClick={() => setShowHelp(true)}>
                 <HelpCircle className="h-4 w-4" />Help
@@ -2854,10 +2884,6 @@ const exportJson = () => {
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2 no-print">
-                <Button onClick={applyGridSize}>Apply Grid Size</Button>
-              </div>
-
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-1">
                   <label className="text-xs text-slate-300">Panel Type</label>
@@ -2875,6 +2901,11 @@ const exportJson = () => {
                     ))}
                   </select>
                 </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 no-print">
+                <Button onClick={applyGridSize}>Apply Grid Size</Button>
+                <Button intent="danger" onClick={clearAllPanels}>Clear All Panels</Button>
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
@@ -3241,16 +3272,50 @@ const exportJson = () => {
                 onMouseMove={onWorkspaceMouseMove}
                 onMouseUp={onWorkspaceMouseUp}
               >
-                {/* Metre grid + ruler labels (0.5m lines, metre numbers on the wall edges). */}
+                {/* Metre grid + ruler labels. Lines are anchored to the wall origin so
+                    the 1m (major, dashed) and 0.5m (minor, fainter dashed) lines line up
+                    exactly with the metre markings. No solid outer border is drawn. */}
                 <svg className="absolute inset-0 z-0 pointer-events-none" width={svgW} height={svgH}>
-                  {Array.from({ length: Math.floor(workspaceSizeMm.w / MODULE_MM) + 1 }).map((_, i) => {
-                    const x = mmToPx(i * MODULE_MM);
-                    return <line key={`gv-${i}`} x1={x} y1={0} x2={x} y2={svgH} stroke="rgba(148,163,184,0.12)" strokeWidth="1" />;
-                  })}
-                  {Array.from({ length: Math.floor(workspaceSizeMm.h / MODULE_MM) + 1 }).map((_, i) => {
-                    const y = mmToPx(i * MODULE_MM);
-                    return <line key={`gh-${i}`} x1={0} y1={y} x2={svgW} y2={y} stroke="rgba(148,163,184,0.12)" strokeWidth="1" />;
-                  })}
+                  {(() => {
+                    const lines: React.ReactNode[] = [];
+                    const kxStart = Math.floor((workspaceOrigin.x - wallBBox.x) / MODULE_MM);
+                    const kxEnd = Math.ceil((workspaceOrigin.x + workspaceSizeMm.w - wallBBox.x) / MODULE_MM);
+                    for (let k = kxStart; k <= kxEnd; k += 1) {
+                      const x = mmToPx(wallBBox.x + k * MODULE_MM - workspaceOrigin.x);
+                      const major = k % 2 === 0;
+                      lines.push(
+                        <line
+                          key={`gv-${k}`}
+                          x1={x}
+                          y1={0}
+                          x2={x}
+                          y2={svgH}
+                          stroke={major ? "rgba(148,163,184,0.38)" : "rgba(148,163,184,0.16)"}
+                          strokeWidth={major ? 1.4 : 1}
+                          strokeDasharray={major ? "6 4" : "2 6"}
+                        />,
+                      );
+                    }
+                    const kyStart = Math.floor((workspaceOrigin.y - wallBBox.y) / MODULE_MM);
+                    const kyEnd = Math.ceil((workspaceOrigin.y + workspaceSizeMm.h - wallBBox.y) / MODULE_MM);
+                    for (let k = kyStart; k <= kyEnd; k += 1) {
+                      const y = mmToPx(wallBBox.y + k * MODULE_MM - workspaceOrigin.y);
+                      const major = k % 2 === 0;
+                      lines.push(
+                        <line
+                          key={`gh-${k}`}
+                          x1={0}
+                          y1={y}
+                          x2={svgW}
+                          y2={y}
+                          stroke={major ? "rgba(148,163,184,0.38)" : "rgba(148,163,184,0.16)"}
+                          strokeWidth={major ? 1.4 : 1}
+                          strokeDasharray={major ? "6 4" : "2 6"}
+                        />,
+                      );
+                    }
+                    return lines;
+                  })()}
                   {Array.from({ length: Math.floor(wallBBox.w / 1000) + 1 }).map((_, m) => (
                     <text
                       key={`rx-${m}`}
@@ -3366,7 +3431,10 @@ const exportJson = () => {
                               background: hatch,
                               border: `2px solid ${isEdge ? "black" : "#334155"}`,
                               clipPath: shapeClipPath,
-                              transform: `rotate(${cell.rotation ?? 0}deg)`,
+                              // Front view mirrors the whole wall horizontally: flip each
+                              // panel's shape (scaleX -1) around the rotated shape, without
+                              // changing its stored rotation. Labels stay un-mirrored.
+                              transform: `${isFlippedView ? "scaleX(-1) " : ""}rotate(${cell.rotation ?? 0}deg)`,
                               transformOrigin: "center",
                             }}
                           />
