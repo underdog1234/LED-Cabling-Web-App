@@ -190,6 +190,8 @@ type StockRow = {
 };
 
 type Cell = {
+  /** Stable identity - selection, patching stats, and (soon) free placement key off this. */
+  id: string;
   x: number;
   y: number;
   assignedPort: number | null;
@@ -272,9 +274,30 @@ const makePowerPorts = (count: number) =>
     phase: `P${(i % 3) + 1}`,
   }));
 
+let cellIdCounter = 0;
+const newCellId = () => {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    cellIdCounter += 1;
+    return `c-${Date.now().toString(36)}-${cellIdCounter}`;
+  }
+};
+
+const findCellById = (grid: Cell[][], id: string | null | undefined): Cell | null => {
+  if (!id) return null;
+  for (const row of grid) {
+    for (const cell of row) {
+      if (cell.id === id) return cell;
+    }
+  }
+  return null;
+};
+
 const makeGrid = (w: number, h: number): Cell[][] =>
   Array.from({ length: h }, (_, y) =>
     Array.from({ length: w }, (_, x) => ({
+      id: newCellId(),
       x,
       y,
       assignedPort: null,
@@ -304,6 +327,7 @@ const normalizeGrid = (grid: Cell[][], cols: number, rows: number): Cell[][] =>
     Array.from({ length: cols }, (_, x) => {
       const cell = grid?.[y]?.[x];
       return {
+        id: typeof cell?.id === "string" && cell.id ? cell.id : newCellId(),
         x,
         y,
         assignedPort: cell?.assignedPort ?? null,
@@ -457,14 +481,14 @@ const getPowerPortLoadWatts = (
   grid: Cell[][],
   portId: number,
   _legacyMaxW: number,
-  excludeCell: { x: number; y: number } | null = null,
+  excludeId: string | null = null,
 ) => {
   // Each assigned panel draws its own type's max watts (MG9 vs MT differ).
   let watts = 0;
   for (const row of grid) {
     for (const cell of row) {
       if (!isActiveCell(cell)) continue;
-      if (excludeCell && cell.x === excludeCell.x && cell.y === excludeCell.y) continue;
+      if (excludeId && cell.id === excludeId) continue;
       if (cell.assignedPowerPort === portId) watts += PANEL_TYPES[cellPanelType(cell)].power.maxW;
     }
   }
@@ -572,9 +596,9 @@ const makeStockRow = (
 
 const roundUpToBox = (value: number, boxSize = 10) => Math.ceil(Math.max(value, 0) / boxSize) * boxSize;
 
-const getSelectedKeys = (selectedCells: Set<string>, selectedCell: { x: number; y: number } | null) => {
+const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null) => {
   if (selectedCells.size > 0) return selectedCells;
-  return selectedCell ? new Set([`${selectedCell.x}-${selectedCell.y}`]) : new Set<string>();
+  return selectedId ? new Set([selectedId]) : new Set<string>();
 };
 
 const getPanelSymbol = (cell: Cell) => {
@@ -800,7 +824,7 @@ export default function App() {
   const [powerDistro, setPowerDistro] = useState<PowerDistroKey>("32A");
   const [isDragging, setIsDragging] = useState(false);
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
-  const [selectedCell, setSelectedCell] = useState<{ x: number; y: number } | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(() => new Set());
   const [panelSelectMode, setPanelSelectMode] = useState(false);
   const [isSelectingPanels, setIsSelectingPanels] = useState(false);
@@ -827,8 +851,8 @@ export default function App() {
   const [panelsPerPowerOutlet, setPanelsPerPowerOutlet] = useState<number>(panel.defaults.powerPanelsPerOutlet);
   const [panelsPerSignalPort, setPanelsPerSignalPort] = useState<number>(panel.defaults.signalPanelsPerPort);
 
-  const selectedPanel = selectedCell ? grid[selectedCell.y]?.[selectedCell.x] ?? null : null;
-  const activeSelectedKeys = getSelectedKeys(selectedCells, selectedCell);
+  const selectedPanel = findCellById(grid, selectedId);
+  const activeSelectedKeys = getSelectedIds(selectedCells, selectedId);
   const selectedCount = activeSelectedKeys.size;
   const isPatchTargetActive = patchMode === "signal" ? activePort > 0 : activePowerPort > 0;
 
@@ -839,7 +863,7 @@ export default function App() {
     setRows(snapshot.rows);
     setDraftCols(String(snapshot.cols));
     setDraftRows(String(snapshot.rows));
-    setSelectedCell(null);
+    setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
@@ -944,7 +968,7 @@ export default function App() {
         return;
       }
       if (event.key === "Escape") {
-        setSelectedCell(null);
+        setSelectedId(null);
         setSelectedCells(new Set());
         setPanelSelectMode(false);
         return;
@@ -1094,8 +1118,8 @@ export default function App() {
       stat.path.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
       const first = stat.path[0];
       const last = stat.path[stat.path.length - 1];
-      stat.firstKey = first ? `${first.x}-${first.y}` : null;
-      stat.lastKey = last ? `${last.x}-${last.y}` : null;
+      stat.firstKey = first ? first.id : null;
+      stat.lastKey = last ? last.id : null;
     });
 
     return stats;
@@ -1142,8 +1166,8 @@ export default function App() {
       stat.path.sort((a, b) => (a.powerSequence ?? 0) - (b.powerSequence ?? 0));
       const first = stat.path[0];
       const last = stat.path[stat.path.length - 1];
-      stat.firstKey = first ? `${first.x}-${first.y}` : null;
-      stat.lastKey = last ? `${last.x}-${last.y}` : null;
+      stat.firstKey = first ? first.id : null;
+      stat.lastKey = last ? last.id : null;
     });
 
     return stats;
@@ -1153,7 +1177,7 @@ export default function App() {
   // Blue ring: first panel of its signal chain (and the last panel too when the
   // backup signal loop is enabled). Orange ring: first panel of its power chain.
   const getPanelIndicators = (cell: Cell) => {
-    const key = `${cell.x}-${cell.y}`;
+    const key = cell.id;
     const sStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
     const signalRing = !!sStat && (sStat.firstKey === key || (backupSignalLoop && sStat.lastKey === key));
     const pStat = cell.assignedPowerPort ? powerPortStats[cell.assignedPowerPort] : null;
@@ -1734,7 +1758,7 @@ const exportJson = () => {
         setDraftCols(String(nextCols));
         setDraftRows(String(nextRows));
         setGrid(nextGrid);
-        setSelectedCell(null);
+        setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
         setRedoStack([]);
@@ -1964,7 +1988,7 @@ const exportJson = () => {
     setCols(nextCols);
     setRows(nextRows);
     setGrid(makeGrid(nextCols, nextRows));
-    setSelectedCell(null);
+    setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
@@ -2010,7 +2034,7 @@ const exportJson = () => {
       if (!isAlreadySamePort && currentPanels >= safePanelsPerPowerOutlet) return prev;
 
       const cellWatts = PANEL_TYPES[cellPanelType(current)].power.maxW;
-      const currentPortLoad = getPowerPortLoadWatts(prev, activePowerPort, 0, { x, y });
+      const currentPortLoad = getPowerPortLoadWatts(prev, activePowerPort, 0, current.id);
       if (!isAlreadySamePort && currentPortLoad + cellWatts > MAX_OUTLET_AMPS * VOLTAGE) return prev;
 
       const next = cloneGrid(prev);
@@ -2029,11 +2053,10 @@ const exportJson = () => {
     const target = grid[y]?.[x];
     if (!target) return;
     if (panelSelectMode) {
-      const key = `${x}-${y}`;
       setSelectionStart({ x, y });
       setIsSelectingPanels(true);
-      setSelectedCell({ x, y });
-      setSelectedCells(new Set([key]));
+      setSelectedId(target.id);
+      setSelectedCells(new Set([target.id]));
       return;
     }
     if (!isActiveCell(target)) return;
@@ -2052,11 +2075,12 @@ const exportJson = () => {
       const next = new Set<string>();
       for (let yy = minY; yy <= maxY; yy += 1) {
         for (let xx = minX; xx <= maxX; xx += 1) {
-          if (grid[yy]?.[xx]) next.add(`${xx}-${yy}`);
+          const cell = grid[yy]?.[xx];
+          if (cell) next.add(cell.id);
         }
       }
       setSelectedCells(next);
-      setSelectedCell({ x, y });
+      setSelectedId(grid[y]?.[x]?.id ?? null);
       return;
     }
     if (!isDragging) return;
@@ -2067,13 +2091,13 @@ const exportJson = () => {
   };
 
   const applyManualSignalPatch = (value: string) => {
-    if (!selectedCell) return;
+    if (!selectedId) return;
     const nextPort = value === "" ? null : Number.parseInt(value, 10);
     if (nextPort !== null && (!Number.isFinite(nextPort) || nextPort < 1 || nextPort > SIGNAL_PORT_COUNT)) return;
 
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
-      const target = next[selectedCell.y]?.[selectedCell.x];
+      const target = findCellById(next, selectedId);
       if (!target) return prev;
       if (!isActiveCell(target)) return prev;
 
@@ -2096,13 +2120,13 @@ const exportJson = () => {
   };
 
   const applyManualPowerPatch = (value: string) => {
-    if (!selectedCell) return;
+    if (!selectedId) return;
     const nextPort = value === "" ? null : Number.parseInt(value, 10);
     if (nextPort !== null && (!Number.isFinite(nextPort) || nextPort < 1 || nextPort > powerPorts.length)) return;
 
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
-      const target = next[selectedCell.y]?.[selectedCell.x];
+      const target = findCellById(next, selectedId);
       if (!target) return prev;
       if (!isActiveCell(target)) return prev;
 
@@ -2117,7 +2141,7 @@ const exportJson = () => {
       const isAlreadySamePort = target.assignedPowerPort === nextPort;
       if (!isAlreadySamePort && currentPanels >= safePanelsPerPowerOutlet) return prev;
 
-      const currentPortLoad = getPowerPortLoadWatts(prev, nextPort, powerSpec.maxW, selectedCell);
+      const currentPortLoad = getPowerPortLoadWatts(prev, nextPort, powerSpec.maxW, selectedId);
       if (!isAlreadySamePort && currentPortLoad + powerSpec.maxW > MAX_OUTLET_AMPS * VOLTAGE) return prev;
 
       target.assignedPowerPort = nextPort;
@@ -2227,7 +2251,7 @@ const exportJson = () => {
       return next;
     });
 
-    setSelectedCell(null);
+    setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
@@ -2307,7 +2331,7 @@ const exportJson = () => {
     });
 
     setPatchMode("power");
-    setSelectedCell(null);
+    setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
@@ -2315,7 +2339,7 @@ const exportJson = () => {
 
   const clearSignalCabling = () => {
     commitGridUpdate((prev) => clearSignalOnGrid(prev));
-    setSelectedCell(null);
+    setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
@@ -2323,18 +2347,17 @@ const exportJson = () => {
 
   const clearPowerAssignments = () => {
     commitGridUpdate((prev) => clearPowerOnGrid(prev));
-    setSelectedCell(null);
+    setSelectedId(null);
     setSelectedCells(new Set());
   };
 
   const clearSelectedPanelPatching = () => {
-    const keys = getSelectedKeys(selectedCells, selectedCell);
+    const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
-        const [x, y] = key.split("-").map(Number);
-        const target = next[y]?.[x];
+        const target = findCellById(next, key);
         if (!target || !isActiveCell(target)) return;
         target.assignedPort = null;
         target.sequence = null;
@@ -2347,13 +2370,12 @@ const exportJson = () => {
   };
 
   const deleteSelectedPanel = () => {
-    const keys = getSelectedKeys(selectedCells, selectedCell);
+    const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
-        const [x, y] = key.split("-").map(Number);
-        const target = next[y]?.[x];
+        const target = findCellById(next, key);
         if (!target || target.isRemoved) return;
         target.assignedPort = null;
         target.sequence = null;
@@ -2367,13 +2389,12 @@ const exportJson = () => {
   };
 
   const restoreSelectedPanel = () => {
-    const keys = getSelectedKeys(selectedCells, selectedCell);
+    const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
-        const [x, y] = key.split("-").map(Number);
-        const target = next[y]?.[x];
+        const target = findCellById(next, key);
         if (!target || !target.isRemoved) return;
         target.isRemoved = false;
         target.assignedPort = null;
@@ -2389,13 +2410,12 @@ const exportJson = () => {
   };
 
   const applySelectedPanelVariant = (variant: PanelVariantKey) => {
-    const keys = getSelectedKeys(selectedCells, selectedCell);
+    const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
-        const [x, y] = key.split("-").map(Number);
-        const target = next[y]?.[x];
+        const target = findCellById(next, key);
         if (!target || !isActiveCell(target)) return;
         // Variants (triangle/curve/corner) are MG9-only.
         if (cellPanelType(target) !== "MG9") return;
@@ -2406,19 +2426,18 @@ const exportJson = () => {
   };
 
   const applySelectedPanelType = (type: PanelTypeKey) => {
-    const keys = getSelectedKeys(selectedCells, selectedCell);
+    const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
-        const [x, y] = key.split("-").map(Number);
-        const target = next[y]?.[x];
+        const target = findCellById(next, key);
         // Only convert real panels (active, non-tail heads).
         if (!isPanelHead(target)) return;
         if (type === "MT") {
-          if (setModuleToMT(next, x, y)) target.panelVariant = "STANDARD";
+          if (setModuleToMT(next, target.x, target.y)) target.panelVariant = "STANDARD";
         } else {
-          setModuleToMG9(next, x, y);
+          setModuleToMG9(next, target.x, target.y);
         }
       });
       return next;
@@ -2426,13 +2445,12 @@ const exportJson = () => {
   };
 
   const rotateSelectedPanels = () => {
-    const keys = getSelectedKeys(selectedCells, selectedCell);
+    const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       keys.forEach((key) => {
-        const [x, y] = key.split("-").map(Number);
-        const target = next[y]?.[x];
+        const target = findCellById(next, key);
         if (!target || !isActiveCell(target)) return;
         target.rotation = ((target.rotation ?? 0) + 90) % 360;
       });
@@ -2811,7 +2829,7 @@ const exportJson = () => {
                 onClick={() => {
                   setPanelSelectMode((prev) => {
                     if (prev) {
-                      setSelectedCell(null);
+                      setSelectedId(null);
                       setSelectedCells(new Set());
                     }
                     return !prev;
@@ -2913,12 +2931,10 @@ const exportJson = () => {
                     if (cell.mtTail) return null;
                     const span = cellSpanX(cell);
                     const displayX = toDisplayX(cell.x);
-                    const key = `${displayX}-${cell.y}`;
-                    const originalKey = `${cell.x}-${cell.y}`;
                     const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
-                    const isEdge = signalStat?.firstKey === originalKey || signalStat?.lastKey === originalKey;
+                    const isEdge = signalStat?.firstKey === cell.id || signalStat?.lastKey === cell.id;
                     const { signalRing, powerRing } = getPanelIndicators(cell);
-                    const isSelected = selectedCells.has(originalKey) || (selectedCell?.x === cell.x && selectedCell?.y === cell.y);
+                    const isSelected = selectedCells.has(cell.id) || selectedId === cell.id;
                     const isRemoved = cell.isRemoved;
                     const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
                     const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
@@ -2938,14 +2954,14 @@ const exportJson = () => {
 
                     return (
                       <div
-                        key={key}
+                        key={cell.id}
                         onMouseDown={() => startDrag(fromDisplayX(displayX), cell.y)}
                         onMouseEnter={() => continueDrag(fromDisplayX(displayX), cell.y)}
                         onClick={() => {
                           if (isSelectingPanels) return;
                           if (!panelSelectMode) return;
-                          setSelectedCell({ x: cell.x, y: cell.y });
-                          setSelectedCells(new Set([originalKey]));
+                          setSelectedId(cell.id);
+                          setSelectedCells(new Set([cell.id]));
                         }}
                         style={{
                           width: span * cellW + (span - 1) * GRID_GAP,
