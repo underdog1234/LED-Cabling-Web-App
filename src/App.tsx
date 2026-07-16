@@ -3,6 +3,16 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ImageDown } from "lucide-react";
 import { HelpCircle, Redo2, Undo2 } from "lucide-react";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
+import {
+  type RectMm,
+  activeBBox,
+  bandPanels,
+  computeSnapDelta,
+  findOverlaps,
+  joinedGroupIds,
+  rectsJoined,
+  MODULE_MM,
+} from "./model/panels";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -189,10 +199,16 @@ type StockRow = {
   rounded?: number;
 };
 
+// A panel in the free workspace. x/y are the TOP-LEFT corner in workspace
+// millimetres - panels are no longer bound to a rows x cols grid (the grid
+// generator just emits panels on a 500mm pitch). MT is a plain 1000x500mm
+// record; the old head/tail module pairing exists only in legacy migration.
 type Cell = {
-  /** Stable identity - selection, patching stats, and (soon) free placement key off this. */
+  /** Stable identity - selection, patching stats and joins key off this. */
   id: string;
+  /** Top-left, workspace millimetres. */
   x: number;
+  /** Top-left, workspace millimetres. */
   y: number;
   assignedPort: number | null;
   sequence: number | null;
@@ -202,17 +218,11 @@ type Cell = {
   isRemoved: boolean;
   panelVariant: PanelVariantKey;
   rotation: number;
-  // Per-cell panel profile. The grid is a 0.5m module grid: MG9 fills one module,
-  // MT fills two side-by-side modules (a "head" module plus the module to its right
-  // marked as mtTail). Tail modules are drawn and patched as part of their head.
   panelType: PanelTypeKey;
-  mtTail: boolean;
 };
 
 type LayoutSnapshot = {
-  grid: Cell[][];
-  cols: number;
-  rows: number;
+  panels: Cell[];
 };
 
 type SignalPortStat = {
@@ -236,7 +246,25 @@ type PowerPortStat = {
   lastKey: string | null;
 };
 
+// Legacy (formatVersion 1) grid cell as stored by older saves.
+type LegacyGridCell = {
+  x: number;
+  y: number;
+  assignedPort?: number | null;
+  sequence?: number | null;
+  assignedPowerPort?: number | null;
+  powerSequence?: number | null;
+  powerManual?: boolean;
+  isRemoved?: boolean;
+  panelVariant?: PanelVariantKey;
+  rotation?: number;
+  panelType?: PanelTypeKey;
+  mtTail?: boolean;
+  id?: string;
+};
+
 type OpenJsonPayload = {
+  formatVersion?: number;
   projectName?: string;
   panelType?: PanelTypeKey;
   powerDistro?: PowerDistroKey;
@@ -247,8 +275,11 @@ type OpenJsonPayload = {
     cols?: number;
     rows?: number;
   };
+  /** v2: flat list of mm-positioned panels. */
+  panels?: Cell[];
+  /** v1 legacy: rows x cols grid of cells. */
   patching?: {
-    grid?: Cell[][];
+    grid?: LegacyGridCell[][];
   };
 };
 
@@ -284,146 +315,159 @@ const newCellId = () => {
   }
 };
 
-const findCellById = (grid: Cell[][], id: string | null | undefined): Cell | null => {
+const findCellById = (panels: Cell[], id: string | null | undefined): Cell | null => {
   if (!id) return null;
-  for (const row of grid) {
-    for (const cell of row) {
-      if (cell.id === id) return cell;
-    }
-  }
-  return null;
+  return panels.find((cell) => cell.id === id) ?? null;
 };
 
-const makeGrid = (w: number, h: number): Cell[][] =>
-  Array.from({ length: h }, (_, y) =>
-    Array.from({ length: w }, (_, x) => ({
-      id: newCellId(),
-      x,
-      y,
-      assignedPort: null,
-      sequence: null,
-      assignedPowerPort: null,
-      powerSequence: null,
-      powerManual: false,
-      isRemoved: false,
-      panelVariant: "STANDARD",
-      rotation: 0,
-      panelType: "MG9",
-      mtTail: false,
-    })),
-  );
+const makePanelAt = (xMm: number, yMm: number, panelType: PanelTypeKey = "MG9"): Cell => ({
+  id: newCellId(),
+  x: xMm,
+  y: yMm,
+  assignedPort: null,
+  sequence: null,
+  assignedPowerPort: null,
+  powerSequence: null,
+  powerManual: false,
+  isRemoved: false,
+  panelVariant: "STANDARD",
+  rotation: 0,
+  panelType,
+});
 
-// MG9 fills one 0.5m module. MT spans two: a head module and the module to its
-// right (mtTail). These helpers keep panel-level logic readable across the app.
-const cellPanelType = (cell: Cell): PanelTypeKey => cell.panelType ?? "MG9";
-const cellSpanX = (cell: Cell): number => (cellPanelType(cell) === "MT" ? 2 : 1);
-// A "panel head" is a real panel to count/patch/render: an active, non-tail cell.
-const isPanelHead = (cell: Cell | null | undefined): cell is Cell => isActiveCell(cell) && !cell?.mtTail;
-
-const cloneGrid = (grid: Cell[][]): Cell[][] => grid.map((row) => row.map((cell) => ({ ...cell })));
-
-const normalizeGrid = (grid: Cell[][], cols: number, rows: number): Cell[][] =>
-  Array.from({ length: rows }, (_, y) =>
-    Array.from({ length: cols }, (_, x) => {
-      const cell = grid?.[y]?.[x];
-      return {
-        id: typeof cell?.id === "string" && cell.id ? cell.id : newCellId(),
-        x,
-        y,
-        assignedPort: cell?.assignedPort ?? null,
-        sequence: cell?.sequence ?? null,
-        assignedPowerPort: cell?.assignedPowerPort ?? null,
-        powerSequence: cell?.powerSequence ?? null,
-        powerManual: cell?.powerManual ?? false,
-        isRemoved: cell?.isRemoved ?? false,
-        panelVariant: cell?.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
-        rotation: Number.isFinite(cell?.rotation) ? ((Number(cell?.rotation) % 360) + 360) % 360 : 0,
-        panelType: cell?.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
-        mtTail: Boolean(cell?.mtTail),
-      };
-    }),
-  );
-
-// A settings file saved before per-cell panel types existed has cells with no
-// `panelType` field.
-const isLegacyGrid = (rawGrid: unknown): rawGrid is Cell[][] =>
-  Array.isArray(rawGrid) && rawGrid.some((row) => Array.isArray(row) && row.some((cell) => cell && (cell as Cell).panelType === undefined));
-
-// A legacy all-MT project stored one MT panel per grid cell (1m wide). Expand it
-// onto the 0.5m module grid: double the columns and pair each cell into an MT
-// head + tail, carrying the panel's patching onto the head.
-const expandLegacyMtGrid = (rawGrid: Cell[][], oldCols: number, rows: number) => {
-  const newCols = oldCols * 2;
-  const grid = makeGrid(newCols, rows);
+// Grid generator: cols x rows of the given type on its own pitch (MG9 500mm,
+// MT 1000mm wide). After generation every panel is freely movable.
+const makeGridPanels = (cols: number, rows: number, panelType: PanelTypeKey = "MG9"): Cell[] => {
+  const wMm = PANEL_TYPES[panelType].w * 1000;
+  const hMm = PANEL_TYPES[panelType].h * 1000;
+  const panels: Cell[] = [];
   for (let y = 0; y < rows; y += 1) {
-    for (let x = 0; x < oldCols; x += 1) {
-      const src = rawGrid?.[y]?.[x];
-      const head = grid[y][x * 2];
-      const tail = grid[y][x * 2 + 1];
-      const removed = Boolean(src?.isRemoved);
-      head.assignedPort = src?.assignedPort ?? null;
-      head.sequence = src?.sequence ?? null;
-      head.assignedPowerPort = src?.assignedPowerPort ?? null;
-      head.powerSequence = src?.powerSequence ?? null;
-      head.powerManual = Boolean(src?.powerManual);
-      head.isRemoved = removed;
-      head.rotation = Number.isFinite(src?.rotation) ? ((Number(src?.rotation) % 360) + 360) % 360 : 0;
-      head.panelType = "MT";
-      head.mtTail = false;
-      head.panelVariant = "STANDARD";
-      tail.panelType = "MT";
-      tail.mtTail = true;
-      tail.isRemoved = removed;
+    for (let x = 0; x < cols; x += 1) {
+      panels.push(makePanelAt(x * wMm, y * hMm, panelType));
     }
   }
-  return { grid, cols: newCols };
+  return panels;
+};
+
+const cellPanelType = (cell: Cell): PanelTypeKey => cell.panelType ?? "MG9";
+
+// Footprint in workspace mm, honouring rotation (90/270 swaps width/height).
+const cellSizeMm = (cell: Cell) => {
+  const spec = PANEL_TYPES[cellPanelType(cell)];
+  const rot = ((Math.round((cell.rotation ?? 0) / 90) * 90) % 360 + 360) % 360;
+  const wMm = spec.w * 1000;
+  const hMm = spec.h * 1000;
+  return rot === 90 || rot === 270 ? { wMm: hMm, hMm: wMm } : { wMm, hMm };
+};
+
+const cellRect = (cell: Cell): RectMm => {
+  const { wMm, hMm } = cellSizeMm(cell);
+  return { x: cell.x, y: cell.y, w: wMm, h: hMm };
+};
+
+// The old grid model called real panels "heads" (vs MT tail modules). In the
+// free model every active record is a panel; keep the name for call sites.
+const isPanelHead = (cell: Cell | null | undefined): cell is Cell => isActiveCell(cell);
+
+const cloneGrid = (panels: Cell[]): Cell[] => panels.map((cell) => ({ ...cell }));
+
+// Validate/repair a v2 panel list from a file.
+const normalizePanels = (raw: unknown): Cell[] => {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const panels: Cell[] = [];
+  raw.forEach((item) => {
+    const cell = item as Partial<Cell> | null;
+    if (!cell || !Number.isFinite(Number(cell.x)) || !Number.isFinite(Number(cell.y))) return;
+    let id = typeof cell.id === "string" && cell.id ? cell.id : newCellId();
+    if (seen.has(id)) id = newCellId();
+    seen.add(id);
+    panels.push({
+      id,
+      x: Number(cell.x),
+      y: Number(cell.y),
+      assignedPort: cell.assignedPort ?? null,
+      sequence: cell.sequence ?? null,
+      assignedPowerPort: cell.assignedPowerPort ?? null,
+      powerSequence: cell.powerSequence ?? null,
+      powerManual: Boolean(cell.powerManual),
+      isRemoved: Boolean(cell.isRemoved),
+      panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
+      rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
+      panelType: cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
+    });
+  });
+  return panels;
+};
+
+// A settings file saved before per-cell panel types existed has cells with no
+// `panelType` field. Those all-one-type files stored one panel per grid cell.
+const isLegacyUntypedGrid = (rawGrid: unknown): boolean =>
+  Array.isArray(rawGrid) &&
+  rawGrid.some((row) => Array.isArray(row) && row.some((cell) => cell && (cell as LegacyGridCell).panelType === undefined));
+
+// Migrate a legacy formatVersion-1 grid (rows x cols of cells, MT stored as a
+// head module + mtTail module) onto the free mm workspace. Tail modules are
+// absorbed into their head, which becomes a single 1000x500mm MT record.
+// `legacyAllType` handles pre-panelType files where the wall was one type.
+const gridCellsToPanels = (rawGrid: LegacyGridCell[][], legacyAllType: PanelTypeKey | null = null): Cell[] => {
+  const panels: Cell[] = [];
+  rawGrid.forEach((row, y) => {
+    if (!Array.isArray(row)) return;
+    row.forEach((cell, x) => {
+      if (!cell) return;
+      if (cell.mtTail) return; // absorbed into its head
+      const cellType: PanelTypeKey =
+        legacyAllType ?? (cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9");
+      // Legacy grid columns are 0.5m modules, except pre-panelType MT files
+      // where each column was a full 1m MT panel.
+      const pitchX = legacyAllType === "MT" ? 1000 : 500;
+      panels.push({
+        id: typeof cell.id === "string" && cell.id ? cell.id : newCellId(),
+        x: (Number(cell.x) || x) * pitchX,
+        y: (Number(cell.y) || y) * 500,
+        assignedPort: cell.assignedPort ?? null,
+        sequence: cell.sequence ?? null,
+        assignedPowerPort: cell.assignedPowerPort ?? null,
+        powerSequence: cell.powerSequence ?? null,
+        powerManual: Boolean(cell.powerManual),
+        isRemoved: Boolean(cell.isRemoved),
+        panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
+        rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
+        panelType: cellType,
+      });
+    });
+  });
+  return panels;
 };
 
 const isActiveCell = (cell: Cell | null | undefined) => Boolean(cell && !cell.isRemoved);
 
-// Convert a module at (x,y) in a cloned grid to a single MG9 panel, releasing any
-// MT pairing it took part in (its own tail, or the head it was a tail of).
-const setModuleToMG9 = (grid: Cell[][], x: number, y: number) => {
-  const cell = grid[y]?.[x];
-  if (!cell) return;
-  if (cellPanelType(cell) === "MT" && !cell.mtTail) {
-    const tail = grid[y]?.[x + 1];
-    if (tail && tail.mtTail) {
-      tail.mtTail = false;
-      tail.panelType = "MG9";
-    }
+// Change a panel's type in place (mutates a cloned list). Converting MG9 -> MT
+// doubles the footprint: if a standard MG9 sits flush in the newly covered
+// space it is absorbed (removed); any other overlap is left to the overlap
+// warning. Converting MT -> MG9 halves the footprint and backfills the freed
+// half-module with a fresh MG9 so the wall keeps its outline.
+const convertPanelTypeInList = (panels: Cell[], id: string, type: PanelTypeKey): Cell[] => {
+  const target = panels.find((p) => p.id === id);
+  if (!target || target.isRemoved || cellPanelType(target) === type) return panels;
+  if (type === "MT") {
+    const absorbRect: RectMm = { x: target.x + 500, y: target.y, w: 500, h: 500 };
+    const survivors = panels.filter((p) => {
+      if (p.id === target.id || p.isRemoved) return true;
+      if (cellPanelType(p) !== "MG9" || p.panelVariant !== "STANDARD") return true;
+      const r = cellRect(p);
+      const flush = Math.abs(r.x - absorbRect.x) < 1 && Math.abs(r.y - absorbRect.y) < 1 && Math.abs(r.w - 500) < 1;
+      return !flush;
+    });
+    target.panelType = "MT";
+    target.panelVariant = "STANDARD";
+    return survivors;
   }
-  if (cell.mtTail) {
-    const head = grid[y]?.[x - 1];
-    if (head && cellPanelType(head) === "MT" && !head.mtTail) head.panelType = "MG9";
-  }
-  cell.panelType = "MG9";
-  cell.mtTail = false;
-};
-
-// Convert the module at (x,y) into an MT head that consumes the module to its
-// right as a tail. Returns false if there is no free module to the right.
-const setModuleToMT = (grid: Cell[][], x: number, y: number): boolean => {
-  const head = grid[y]?.[x];
-  const right = grid[y]?.[x + 1];
-  if (!head || !right) return false;
-  if (right.isRemoved) return false;
-  // Normalise both modules first so any prior MT pairing is released cleanly.
-  setModuleToMG9(grid, x, y);
-  setModuleToMG9(grid, x + 1, y);
-  head.panelType = "MT";
-  head.mtTail = false;
-  right.panelType = "MT";
-  right.mtTail = true;
-  // The tail carries no independent patching or shape; it belongs to the head.
-  right.assignedPort = null;
-  right.sequence = null;
-  right.assignedPowerPort = null;
-  right.powerSequence = null;
-  right.powerManual = false;
-  right.panelVariant = "STANDARD";
-  right.rotation = head.rotation ?? 0;
-  return true;
+  // MT -> MG9: shrink in place and backfill the freed right half.
+  target.panelType = "MG9";
+  const filler = makePanelAt(target.x + 500, target.y, "MG9");
+  return [...panels, filler];
 };
 
 const formatNumber = (value: number, digits = 0) =>
@@ -440,142 +484,135 @@ const getStatusColor = (percent: number) => {
 
 const clampActivePort = (value: number, max: number) => Math.min(Math.max(value, 1), max);
 
-const clearSignalOnGrid = (grid: Cell[][]) =>
-  grid.map((row) =>
-    row.map((cell) => ({
-      ...cell,
-      assignedPort: null,
-      sequence: null,
-    })),
-  );
+const clearSignalOnGrid = (panels: Cell[]) =>
+  panels.map((cell) => ({
+    ...cell,
+    assignedPort: null,
+    sequence: null,
+  }));
 
-const clearPowerOnGrid = (grid: Cell[][]) =>
-  grid.map((row) =>
-    row.map((cell) => ({
-      ...cell,
-      assignedPowerPort: null,
-      powerSequence: null,
-      powerManual: false,
-    })),
-  );
+const clearPowerOnGrid = (panels: Cell[]) =>
+  panels.map((cell) => ({
+    ...cell,
+    assignedPowerPort: null,
+    powerSequence: null,
+    powerManual: false,
+  }));
 
 const getNextSequence = (
-  grid: Cell[][],
+  panels: Cell[],
   portField: "assignedPort" | "assignedPowerPort",
   sequenceField: "sequence" | "powerSequence",
   portId: number,
 ) => {
   let max = 0;
-  for (const row of grid) {
-    for (const cell of row) {
-      if (!isActiveCell(cell)) continue;
-      if (cell[portField] === portId && (cell[sequenceField] ?? 0) > max) {
-        max = cell[sequenceField] ?? 0;
-      }
+  for (const cell of panels) {
+    if (!isActiveCell(cell)) continue;
+    if (cell[portField] === portId && (cell[sequenceField] ?? 0) > max) {
+      max = cell[sequenceField] ?? 0;
     }
   }
   return max + 1;
 };
 
 const getPowerPortLoadWatts = (
-  grid: Cell[][],
+  panels: Cell[],
   portId: number,
   _legacyMaxW: number,
   excludeId: string | null = null,
 ) => {
   // Each assigned panel draws its own type's max watts (MG9 vs MT differ).
   let watts = 0;
-  for (const row of grid) {
-    for (const cell of row) {
-      if (!isActiveCell(cell)) continue;
-      if (excludeId && cell.id === excludeId) continue;
-      if (cell.assignedPowerPort === portId) watts += PANEL_TYPES[cellPanelType(cell)].power.maxW;
-    }
+  for (const cell of panels) {
+    if (!isActiveCell(cell)) continue;
+    if (excludeId && cell.id === excludeId) continue;
+    if (cell.assignedPowerPort === portId) watts += PANEL_TYPES[cellPanelType(cell)].power.maxW;
   }
   return watts;
 };
 
-const getPortPanelCount = (grid: Cell[][], portField: "assignedPort" | "assignedPowerPort", portId: number) =>
-  grid.flat().filter((cell) => isActiveCell(cell) && cell[portField] === portId).length;
+const getPortPanelCount = (panels: Cell[], portField: "assignedPort" | "assignedPowerPort", portId: number) =>
+  panels.filter((cell) => isActiveCell(cell) && cell[portField] === portId).length;
 
-const getSnakeOrder = (cols: number, rows: number, snakeDirection: string, snakeAlternates = true) => {
-  const ordered: Array<{ x: number; y: number }> = [];
-
-  if (snakeDirection === "LR" || snakeDirection === "RL" || snakeDirection === "LRB" || snakeDirection === "RLB") {
-    const startFromBottom = snakeDirection === "LRB" || snakeDirection === "RLB";
-    const horizontalDirection = snakeDirection === "RL" || snakeDirection === "RLB" ? "RL" : "LR";
-    const yIndexes = [...Array(rows).keys()];
-    if (startFromBottom) yIndexes.reverse();
-
-    yIndexes.forEach((y, rowIndex) => {
-      let row = [...Array(cols).keys()];
-      if (horizontalDirection === "RL") row.reverse();
-      if (snakeAlternates && rowIndex % 2 === 1) row.reverse();
-      row.forEach((x) => ordered.push({ x, y }));
-    });
-  } else {
-    for (let x = 0; x < cols; x += 1) {
-      let col = [...Array(rows).keys()];
-      if (snakeDirection === "BT") col.reverse();
-      if (snakeAlternates && x % 2 === 1) col.reverse();
-      col.forEach((y) => ordered.push({ x, y }));
+// Column banding (for TB/BT snake): group active panels into visual columns by
+// their horizontal centre, columns left->right and panels top->bottom within.
+const bandPanelsByColumn = (panels: Cell[]): Cell[][] => {
+  const active = panels.filter((p) => isActiveCell(p));
+  const entries = active
+    .map((p) => ({ p, r: cellRect(p) }))
+    .sort((a, b) => a.r.x + a.r.w / 2 - (b.r.x + b.r.w / 2));
+  const bands: { centerX: number; items: { p: Cell; r: RectMm }[] }[] = [];
+  entries.forEach((e) => {
+    const cx = e.r.x + e.r.w / 2;
+    const band = bands.find((b) => Math.abs(b.centerX - cx) < MODULE_MM / 2);
+    if (band) {
+      band.items.push(e);
+      band.centerX = band.items.reduce((s, i) => s + i.r.x + i.r.w / 2, 0) / band.items.length;
+    } else {
+      bands.push({ centerX: cx, items: [e] });
     }
-  }
-
-  return ordered;
+  });
+  return bands.map((b) => b.items.sort((a, c) => a.r.y - c.r.y).map((i) => i.p));
 };
 
-const getLoopTogetherSegments = (cols: number, rows: number) => {
-  const segments: Array<Array<{ x: number; y: number }>> = [];
-  const leftCount = Math.floor(cols / 2);
-  const rightStart = leftCount;
-
-  for (let pairStart = 0; pairStart < rows; pairStart += 2) {
-    const topY = pairStart;
-    const bottomY = pairStart + 1 < rows ? pairStart + 1 : null;
-
-    const leftSegment: Array<{ x: number; y: number }> = [];
-    for (let x = leftCount - 1; x >= 0; x -= 1) leftSegment.push({ x, y: topY });
-    if (bottomY !== null) {
-      for (let x = 0; x < leftCount; x += 1) leftSegment.push({ x, y: bottomY });
-    }
-    if (leftSegment.length) segments.push(leftSegment);
-
-    const rightSegment: Array<{ x: number; y: number }> = [];
-    for (let x = rightStart; x < cols; x += 1) rightSegment.push({ x, y: topY });
-    if (bottomY !== null) {
-      for (let x = cols - 1; x >= rightStart; x -= 1) rightSegment.push({ x, y: bottomY });
-    }
-    if (rightSegment.length) segments.push(rightSegment);
+// Reading order for auto-snake over a free layout: row bands (or column bands
+// for TB/BT) with optional alternation - the non-uniform generalisation of the
+// old rows x cols walk. LOOP_TOGETHER pairs row bands into left/right loops.
+const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAlternates = true): Cell[][] => {
+  if (snakeDirection === "TB" || snakeDirection === "BT") {
+    const columns = bandPanelsByColumn(panels);
+    return [
+      columns.flatMap((column, index) => {
+        let col = [...column];
+        if (snakeDirection === "BT") col.reverse();
+        if (snakeAlternates && index % 2 === 1) col.reverse();
+        return col;
+      }),
+    ];
   }
 
-  return segments;
-};
+  const rows = bandPanels(panels, cellRect) as Cell[][];
 
-const getVerticalStartOrder = (cols: number, rows: number) => {
-  const ordered: Array<{ x: number; y: number }> = [];
-  for (let x = 0; x < cols; x += 1) {
-    for (let y = 0; y < rows; y += 1) {
-      ordered.push({ x, y });
+  if (snakeDirection === "LOOP_TOGETHER") {
+    // Pair adjacent row bands; each pair splits into a left loop and a right
+    // loop that both start at the middle, mirroring the old grid behaviour.
+    const segments: Cell[][] = [];
+    for (let pairStart = 0; pairStart < rows.length; pairStart += 2) {
+      const top = rows[pairStart];
+      const bottom = pairStart + 1 < rows.length ? rows[pairStart + 1] : null;
+      const splitAt = (row: Cell[]) => Math.floor(row.length / 2);
+      const topSplit = splitAt(top);
+      const leftSegment = [...top.slice(0, topSplit)].reverse();
+      const rightSegment = top.slice(topSplit);
+      if (bottom) {
+        const bottomSplit = splitAt(bottom);
+        leftSegment.push(...bottom.slice(0, bottomSplit));
+        rightSegment.push(...[...bottom.slice(bottomSplit)].reverse());
+      }
+      if (leftSegment.length) segments.push(leftSegment);
+      if (rightSegment.length) segments.push(rightSegment);
     }
+    return segments;
   }
-  return ordered;
+
+  const startFromBottom = snakeDirection === "LRB" || snakeDirection === "RLB";
+  const rightToLeft = snakeDirection === "RL" || snakeDirection === "RLB";
+  const orderedRows = startFromBottom ? [...rows].reverse() : rows;
+  return [
+    orderedRows.flatMap((row, index) => {
+      let out = [...row];
+      if (rightToLeft) out.reverse();
+      if (snakeAlternates && index % 2 === 1) out.reverse();
+      return out;
+    }),
+  ];
 };
 
-const flipX = (x: number, cols: number) => cols - 1 - x;
-
-const getDisplayCell = (cell: Cell, cols: number, isFlippedView: boolean): Cell => ({
-  ...cell,
-  x: isFlippedView ? flipX(cell.x, cols) : cell.x,
+// Mirror a mm rect horizontally inside the wall bbox (front view).
+const mirrorRectX = (rect: RectMm, bbox: RectMm): RectMm => ({
+  ...rect,
+  x: 2 * bbox.x + bbox.w - rect.x - rect.w,
 });
-
-// For cabling geometry we want the panel's LEFT-edge display column. An MT panel
-// occupies modules x and x+1; when the view is flipped, its left display edge is
-// flipX(x) - (span - 1). getLineEndpoints then adds the panel width from its span.
-const displayPanelForCabling = (cell: Cell, cols: number, isFlippedView: boolean): Cell => {
-  const span = cellSpanX(cell);
-  return { ...cell, x: isFlippedView ? flipX(cell.x, cols) - (span - 1) : cell.x };
-};
 
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
@@ -609,43 +646,32 @@ const getPanelSymbol = (cell: Cell) => {
   return parts.join(" ");
 };
 
-// Cabling endpoints. Cells passed here carry a LEFT-edge display x (see
-// displayPanelForCabling), so MT panels (span 2) connect at their true outer
-// edge / visual centre instead of a single module's centre.
-const getLineEndpoints = (prev: Cell, cell: Cell, offsetY = 0, cellW = CELL_SIZE, cellH = CELL_SIZE) => {
-  const stepX = cellW + GRID_GAP;
-  const stepY = cellH + GRID_GAP;
-  const gapInset = GRID_GAP / 2;
-  const widthOf = (c: Cell) => cellSpanX(c) * cellW + (cellSpanX(c) - 1) * GRID_GAP;
-  const wPrev = widthOf(prev);
-  const wCell = widthOf(cell);
-  const leftPrev = prev.x * stepX;
-  const leftCell = cell.x * stepX;
+// Cabling endpoints between two panel rects (px space). Side-by-side panels
+// connect edge to edge at the middle of their vertical overlap; stacked panels
+// connect at the middle of their horizontal overlap; anything else runs
+// centre to centre.
+const getLineEndpointsPx = (a: RectMm, b: RectMm, offsetY = 0) => {
+  const vOverlapLo = Math.max(a.y, b.y);
+  const vOverlapHi = Math.min(a.y + a.h, b.y + b.h);
+  const hOverlapLo = Math.max(a.x, b.x);
+  const hOverlapHi = Math.min(a.x + a.w, b.x + b.w);
 
-  let x1 = leftPrev + wPrev / 2;
-  let y1 = prev.y * stepY + cellH / 2 + offsetY;
-  let x2 = leftCell + wCell / 2;
-  let y2 = cell.y * stepY + cellH / 2 + offsetY;
-
-  if (prev.y === cell.y) {
-    if (cell.x > prev.x) {
-      x1 = leftPrev + wPrev + gapInset * 0.3;
-      x2 = leftCell - gapInset * 0.3;
-    } else {
-      x1 = leftPrev - gapInset * 0.3;
-      x2 = leftCell + wCell + gapInset * 0.3;
-    }
-  } else if (prev.x === cell.x) {
-    if (cell.y > prev.y) {
-      y1 = prev.y * stepY + cellH + gapInset * 0.3 + offsetY;
-      y2 = cell.y * stepY - gapInset * 0.3 + offsetY;
-    } else {
-      y1 = prev.y * stepY - gapInset * 0.3 + offsetY;
-      y2 = cell.y * stepY + cellH + gapInset * 0.3 + offsetY;
-    }
+  if (vOverlapHi - vOverlapLo > 4) {
+    const y = (vOverlapLo + vOverlapHi) / 2 + offsetY;
+    if (b.x >= a.x + a.w - 1) return { x1: a.x + a.w - 1, y1: y, x2: b.x + 1, y2: y };
+    if (a.x >= b.x + b.w - 1) return { x1: a.x + 1, y1: y, x2: b.x + b.w - 1, y2: y };
   }
-
-  return { x1, y1, x2, y2 };
+  if (hOverlapHi - hOverlapLo > 4) {
+    const x = (hOverlapLo + hOverlapHi) / 2 + offsetY; // offset separates signal/power runs
+    if (b.y >= a.y + a.h - 1) return { x1: x, y1: a.y + a.h - 1, x2: x, y2: b.y + 1 };
+    if (a.y >= b.y + b.h - 1) return { x1: x, y1: a.y + 1, x2: x, y2: b.y + b.h - 1 };
+  }
+  return {
+    x1: a.x + a.w / 2 + offsetY,
+    y1: a.y + a.h / 2 + offsetY,
+    x2: b.x + b.w / 2 + offsetY,
+    y2: b.y + b.h / 2 + offsetY,
+  };
 };
 
 const drawPanelShape = (
@@ -804,6 +830,7 @@ function HelpModal({ onClose }: { onClose: () => void }) {
 export default function App() {
   const signalPorts = useMemo(() => makeSignalPorts(), []);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
 
   const [projectName, setProjectName] = useState("Untitled Project");
   const [panelType, setPanelType] = useState<PanelTypeKey>("MG9");
@@ -817,7 +844,7 @@ export default function App() {
   const [rows, setRows] = useState(8);
   const [draftCols, setDraftCols] = useState("24");
   const [draftRows, setDraftRows] = useState("8");
-  const [grid, setGrid] = useState<Cell[][]>(() => makeGrid(24, 8));
+  const [grid, setGrid] = useState<Cell[]>(() => makeGridPanels(24, 8));
   const [activePort, setActivePort] = useState(1);
   const [activePowerPort, setActivePowerPort] = useState(1);
   const [patchMode, setPatchMode] = useState<"signal" | "power">("signal");
@@ -826,9 +853,20 @@ export default function App() {
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(() => new Set());
-  const [panelSelectMode, setPanelSelectMode] = useState(false);
+  // Workspace editor mode: patch (default click-to-patch), select (click/marquee
+  // selection), move (free drag repositioning).
+  const [editMode, setEditMode] = useState<"patch" | "select" | "move">("patch");
   const [isSelectingPanels, setIsSelectingPanels] = useState(false);
+  // Marquee corners in workspace mm while select-dragging.
   const [selectionStart, setSelectionStart] = useState<{ x: number; y: number } | null>(null);
+  const [selectionEnd, setSelectionEnd] = useState<{ x: number; y: number } | null>(null);
+  // Free-move gesture: which panels are moving and the live mm delta.
+  const [moveDrag, setMoveDrag] = useState<{ ids: string[]; startX: number; startY: number; dx: number; dy: number } | null>(null);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [allowOverlaps, setAllowOverlaps] = useState(false);
+  const [moveJoinedGroup, setMoveJoinedGroup] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [overlapNotice, setOverlapNotice] = useState<string | null>(null);
   const [undoStack, setUndoStack] = useState<LayoutSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<LayoutSnapshot[]>([]);
   const [showHelp, setShowHelp] = useState(false);
@@ -840,10 +878,9 @@ export default function App() {
   const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
 
   const panel = PANEL_TYPES[panelType];
-  // The grid is a 0.5m square module grid. A single module is CELL_SIZE x CELL_SIZE;
-  // MT panels are drawn spanning two modules (see mtTail). MG9 fills one module.
-  const cellH = CELL_SIZE;
-  const cellW = CELL_SIZE;
+  // Workspace scale: CELL_SIZE px per 0.5m module at zoom 1.
+  const pxPerMm = (CELL_SIZE / MODULE_MM) * zoom;
+  const panelSelectMode = editMode === "select";
   const powerSpec = panel.power;
   const distro = POWER_DISTROS[powerDistro];
   const powerPorts = useMemo(() => makePowerPorts(distro.portCount), [distro.portCount]);
@@ -856,24 +893,21 @@ export default function App() {
   const selectedCount = activeSelectedKeys.size;
   const isPatchTargetActive = patchMode === "signal" ? activePort > 0 : activePowerPort > 0;
 
-  const captureLayout = (): LayoutSnapshot => ({ grid: cloneGrid(grid), cols, rows });
+  const captureLayout = (): LayoutSnapshot => ({ panels: cloneGrid(grid) });
   const restoreLayout = (snapshot: LayoutSnapshot) => {
-    setGrid(cloneGrid(snapshot.grid));
-    setCols(snapshot.cols);
-    setRows(snapshot.rows);
-    setDraftCols(String(snapshot.cols));
-    setDraftRows(String(snapshot.rows));
+    setGrid(cloneGrid(snapshot.panels));
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
     setIsSelectingPanels(false);
+    setMoveDrag(null);
   };
   const pushUndoSnapshot = (snapshot = captureLayout()) => {
     setUndoStack((prev) => [...prev.slice(-49), snapshot]);
     setRedoStack([]);
   };
-  const commitGridUpdate = (updater: (prev: Cell[][]) => Cell[][]) => {
+  const commitGridUpdate = (updater: (prev: Cell[]) => Cell[]) => {
     const snapshot = captureLayout();
     setGrid((prev) => updater(prev));
     pushUndoSnapshot(snapshot);
@@ -913,19 +947,17 @@ export default function App() {
   useEffect(() => {
     setActivePowerPort((prev) => clampActivePort(prev, powerPorts.length));
     setGrid((prev) =>
-      prev.map((row) =>
-        row.map((cell) => {
-          if (cell.assignedPowerPort && cell.assignedPowerPort > powerPorts.length) {
-            return {
-              ...cell,
-              assignedPowerPort: null,
-              powerSequence: null,
-              powerManual: false,
-            };
-          }
-          return { ...cell };
-        }),
-      ),
+      prev.map((cell) => {
+        if (cell.assignedPowerPort && cell.assignedPowerPort > powerPorts.length) {
+          return {
+            ...cell,
+            assignedPowerPort: null,
+            powerSequence: null,
+            powerManual: false,
+          };
+        }
+        return { ...cell };
+      }),
     );
   }, [powerPorts.length]);
 
@@ -934,7 +966,11 @@ export default function App() {
       setIsDragging(false);
       setIsSelectingPanels(false);
       setSelectionStart(null);
+      setSelectionEnd(null);
       setDragVisited(new Set());
+      // Releasing outside the workspace cancels an in-flight move (the
+      // workspace's own mouseup commits it first when released inside).
+      setMoveDrag(null);
     };
     window.addEventListener("mouseup", stop);
     return () => window.removeEventListener("mouseup", stop);
@@ -970,7 +1006,7 @@ export default function App() {
       if (event.key === "Escape") {
         setSelectedId(null);
         setSelectedCells(new Set());
-        setPanelSelectMode(false);
+        setEditMode("patch");
         return;
       }
       if (event.key === "Delete" || event.key === "Backspace") {
@@ -1004,13 +1040,21 @@ export default function App() {
   const signalPortPixels = safePanelsPerSignalPort * panelPixels;
   const signalPortPercent = (signalPortPixels / MAX_PIXELS_PER_PORT) * 100;
 
-  // The grid is a 0.5m module grid, so physical size is module-count based.
-  const wallWidthM = cols * 0.5;
-  const wallHeightM = rows * 0.5;
-  const activeCells = useMemo(() => grid.flat().filter((cell) => !cell.isRemoved), [grid]);
-  // Panels to count/patch: active modules that are not MT tails (MG9 + MT heads).
-  const activePanels = useMemo(() => activeCells.filter((cell) => !cell.mtTail), [activeCells]);
+  const activeCells = useMemo(() => grid.filter((cell) => !cell.isRemoved), [grid]);
+  const activePanels = activeCells;
   const totalPanels = activePanels.length;
+  // Wall size = bounding box of all active panels (free layouts included).
+  const wallBBox = useMemo(() => activeBBox(activePanels.map(cellRect)), [activePanels]);
+  const wallWidthM = wallBBox.w / 1000;
+  const wallHeightM = wallBBox.h / 1000;
+  // Visual row bands (top->bottom, left->right) drive snake order, pixel maths,
+  // the PNG test pattern, and row labels for non-uniform layouts.
+  const panelBands = useMemo(() => bandPanels(activePanels, cellRect) as Cell[][], [activePanels]);
+  const bandIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    panelBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
+    return map;
+  }, [panelBands]);
   const panelTypeCounts = useMemo(() => {
     const counts = { MG9: 0, MT: 0 } as Record<PanelTypeKey, number>;
     activePanels.forEach((cell) => {
@@ -1020,26 +1064,23 @@ export default function App() {
   }, [activePanels]);
   // Pixel resolution uses each panel's native pixels. Because MG9 (168x168) and
   // MT (256x64) have different pitches, a mixed wall isn't a single clean raster:
-  // width is the widest row's pixels, height sums each row's tallest panel.
+  // width is the widest band's pixels, height sums each band's tallest panel.
   const wallPixels = useMemo(() => {
     let pixelW = 0;
     let pixelH = 0;
-    grid.forEach((row) => {
+    panelBands.forEach((band) => {
       let rowPixelW = 0;
       let rowPixelH = 0;
-      let rowActive = false;
-      row.forEach((cell) => {
-        if (!isPanelHead(cell)) return;
-        rowActive = true;
+      band.forEach((cell) => {
         const p = PANEL_TYPES[cellPanelType(cell)];
         rowPixelW += p.pixW;
         rowPixelH = Math.max(rowPixelH, p.pixH);
       });
       pixelW = Math.max(pixelW, rowPixelW);
-      if (rowActive) pixelH += rowPixelH;
+      pixelH += rowPixelH;
     });
     return { pixelW, pixelH };
-  }, [grid]);
+  }, [panelBands]);
   const wallPixelW = wallPixels.pixelW;
   const wallPixelH = wallPixels.pixelH;
   const panelVariantCounts = useMemo(() => {
@@ -1064,19 +1105,21 @@ export default function App() {
     });
     return counts;
   }, [activePanels]);
-  const activeColumns = useMemo(
-    () => Array.from({ length: cols }, (_, x) => x).filter((x) => activeCells.some((cell) => cell.x === x)),
-    [activeCells, cols],
-  );
-  const activeRows = useMemo(
-    () => Array.from({ length: rows }, (_, y) => y).filter((y) => activeCells.some((cell) => cell.y === y)),
-    [activeCells, rows],
-  );
-  const activeColsCount = activeColumns.length;
-  const activeRowsCount = activeRows.length;
-  // Module grid: each active module column/row is 0.5m.
-  const activeWallWidthM = activeColsCount * 0.5;
-  const activeWallHeightM = activeRowsCount * 0.5;
+  // Occupied 0.5m module columns/rows across the wall bbox - used by the
+  // frame/floor deployment stock formulas (rectangle-oriented hardware).
+  const activeColsCount = useMemo(() => {
+    const occupied = new Set<number>();
+    activePanels.forEach((cell) => {
+      const r = cellRect(cell);
+      const first = Math.floor((r.x - wallBBox.x) / MODULE_MM);
+      const last = Math.ceil((r.x + r.w - wallBBox.x) / MODULE_MM) - 1;
+      for (let i = first; i <= last; i += 1) occupied.add(i);
+    });
+    return occupied.size;
+  }, [activePanels, wallBBox]);
+  const activeRowsCount = panelBands.length;
+  const activeWallWidthM = wallBBox.w / 1000;
+  const activeWallHeightM = wallBBox.h / 1000;
   // Per-type totals: each panel contributes its own weight and power draw.
   const panelTotals = useMemo(() => {
     const totals = { weight: 0, maxW: 0, maxA: 0, avgW: 0, avgA: 0 };
@@ -1104,13 +1147,11 @@ export default function App() {
       signalPorts.map((port) => [port.id, { panels: 0, path: [], firstKey: null, lastKey: null }]),
     );
 
-    for (const row of grid) {
-      for (const cell of row) {
-        if (!isActiveCell(cell)) continue;
-        if (!cell.assignedPort || !stats[cell.assignedPort]) continue;
-        stats[cell.assignedPort].panels += 1;
-        stats[cell.assignedPort].path.push(cell);
-      }
+    for (const cell of grid) {
+      if (!isActiveCell(cell)) continue;
+      if (!cell.assignedPort || !stats[cell.assignedPort]) continue;
+      stats[cell.assignedPort].panels += 1;
+      stats[cell.assignedPort].path.push(cell);
     }
 
     signalPorts.forEach((port) => {
@@ -1145,20 +1186,18 @@ export default function App() {
       ]),
     );
 
-    for (const row of grid) {
-      for (const cell of row) {
-        if (!isActiveCell(cell)) continue;
-        if (!cell.assignedPowerPort || !stats[cell.assignedPowerPort]) continue;
-        const stat = stats[cell.assignedPowerPort];
-        const cellPower = PANEL_TYPES[cellPanelType(cell)].power;
-        stat.panels += 1;
-        stat.maxWatts += cellPower.maxW;
-        stat.maxAmps += cellPower.maxA;
-        stat.avgWatts += cellPower.avgW;
-        stat.avgAmps += cellPower.avgA;
-        stat.path.push(cell);
-        if (cell.powerManual) stat.manualPanels += 1;
-      }
+    for (const cell of grid) {
+      if (!isActiveCell(cell)) continue;
+      if (!cell.assignedPowerPort || !stats[cell.assignedPowerPort]) continue;
+      const stat = stats[cell.assignedPowerPort];
+      const cellPower = PANEL_TYPES[cellPanelType(cell)].power;
+      stat.panels += 1;
+      stat.maxWatts += cellPower.maxW;
+      stat.maxAmps += cellPower.maxA;
+      stat.avgWatts += cellPower.avgW;
+      stat.avgAmps += cellPower.avgA;
+      stat.path.push(cell);
+      if (cell.powerManual) stat.manualPanels += 1;
     }
 
     Object.values(stats).forEach((stat) => {
@@ -1191,16 +1230,17 @@ export default function App() {
   // Hanging/fly bars attach along the top row: one MG9 bar per top-row MG9 panel
   // and one MT bar per top-row MT panel (each type uses its own bar hardware).
   const topRowBars = useMemo(() => {
+    // Hanging bars attach along the top edge of the wall: count panels whose
+    // top edge sits on the bbox top (within half a module for near-misses).
     let mg9 = 0;
     let mt = 0;
-    const topRow = grid.find((row) => row.some((cell) => isPanelHead(cell)));
-    topRow?.forEach((cell) => {
-      if (!isPanelHead(cell)) return;
+    activePanels.forEach((cell) => {
+      if (Math.abs(cellRect(cell).y - wallBBox.y) > MODULE_MM / 2) return;
       if (cellPanelType(cell) === "MT") mt += 1;
       else mg9 += 1;
     });
     return { mg9, mt };
-  }, [grid]);
+  }, [activePanels, wallBBox]);
   const flyBarWeight = topRowBars.mg9 * PANEL_TYPES.MG9.defaults.flyBarWeight + topRowBars.mt * PANEL_TYPES.MT.defaults.flyBarWeight;
   const slingWeight = (topRowBars.mg9 + topRowBars.mt) * PANEL_TYPES.MG9.defaults.slingWeight;
   const powerCableWeight = powerPortsUsed * 3;
@@ -1280,24 +1320,21 @@ export default function App() {
   const distroRequired = Math.max(1, Math.ceil(powerPortsUsed / distro.portCount));
 
   const cornerJoinStats = useMemo(() => {
+    // Corner-panel joins = flush shared edges with neighbours (position-based,
+    // works for free layouts too). Corner-to-corner pairs counted once.
     let cornerToFlat = 0;
     let cornerToCorner = 0;
-    const directions = [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ];
-
-    activeCells.forEach((cell) => {
-      if (cell.panelVariant !== "CORNER") return;
-      directions.forEach(([dx, dy]) => {
-        const neighbor = grid[cell.y + dy]?.[cell.x + dx];
-        if (!isActiveCell(neighbor)) return;
-        if (neighbor.panelVariant === "CORNER") {
-          if (neighbor.y > cell.y || (neighbor.y === cell.y && neighbor.x > cell.x)) cornerToCorner += 1;
+    const corners = activeCells.filter((cell) => cell.panelVariant === "CORNER");
+    corners.forEach((cell) => {
+      const rect = cellRect(cell);
+      activeCells.forEach((other) => {
+        if (other.id === cell.id) return;
+        if (!rectsJoined(rect, cellRect(other))) return;
+        if (other.panelVariant === "CORNER") {
+          if (other.id > cell.id) cornerToCorner += 1;
+        } else {
+          cornerToFlat += 1;
         }
-        else cornerToFlat += 1;
       });
     });
 
@@ -1493,48 +1530,64 @@ export default function App() {
 
   const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
     const scale = 2;
+    const px = CELL_SIZE / MODULE_MM; // export scale, independent of on-screen zoom
+    const margin = 52;
+    const wallW = Math.max(1, Math.round(wallBBox.w * px));
+    const wallH = Math.max(1, Math.round(wallBBox.h * px));
     const canvas = document.createElement("canvas");
-    canvas.width = (svgW + 96) * scale;
-    canvas.height = (svgH + 96) * scale;
+    canvas.width = (wallW + margin * 2) * scale;
+    canvas.height = (wallH + margin * 2 + 20) * scale;
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas context unavailable");
     ctx.scale(scale, scale);
 
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, svgW + 96, svgH + 96);
+    ctx.fillRect(0, 0, wallW + margin * 2, wallH + margin * 2 + 20);
     ctx.fillStyle = "#0f172a";
     ctx.font = "bold 18px Arial";
     ctx.textAlign = "left";
-    ctx.fillText(viewLabel, 20, 24);
+    ctx.fillText(viewLabel, 16, 24);
 
-    const offsetX = 56;
-    const offsetY = 40;
     ctx.save();
-    ctx.translate(offsetX, offsetY);
+    ctx.translate(margin, margin + 20);
 
-    ctx.fillStyle = "#0f172a";
-    ctx.font = "16px Arial";
+    // Panel rect in export px, mirrored for the front view.
+    const dispRectPx = (cell: Cell): RectMm => {
+      const raw = cellRect(cell);
+      const d = flipped ? mirrorRectX(raw, wallBBox) : raw;
+      return { x: (d.x - wallBBox.x) * px, y: (d.y - wallBBox.y) * px, w: d.w * px, h: d.h * px };
+    };
+
+    // Metre ruler along the top and left edges.
+    ctx.strokeStyle = "#94a3b8";
+    ctx.fillStyle = "#475569";
+    ctx.font = "11px Arial";
     ctx.textAlign = "center";
-    for (let i = 0; i < cols; i += 1) {
-      const displayIndex = flipped ? cols - i : i + 1;
-      ctx.fillText(String(displayIndex), i * (cellW + GRID_GAP) + cellW / 2, -10);
+    ctx.lineWidth = 1;
+    for (let m = 0; m * 1000 <= wallBBox.w + 1; m += 0.5) {
+      const x = m * 1000 * px;
+      ctx.beginPath();
+      ctx.moveTo(x, -4);
+      ctx.lineTo(x, m % 1 === 0 ? -12 : -8);
+      ctx.stroke();
+      if (m % 1 === 0) ctx.fillText(`${m}m`, x, -16);
+    }
+    ctx.textAlign = "right";
+    for (let m = 0; m * 1000 <= wallBBox.h + 1; m += 0.5) {
+      const y = m * 1000 * px;
+      ctx.beginPath();
+      ctx.moveTo(-4, y);
+      ctx.lineTo(m % 1 === 0 ? -12 : -8, y);
+      ctx.stroke();
+      if (m % 1 === 0) ctx.fillText(`${m}m`, -16, y + 4);
     }
 
-    ctx.textAlign = "left";
-    for (let i = 0; i < rows; i += 1) {
-      ctx.fillText(String(i + 1), -28, i * (cellH + GRID_GAP) + cellH / 2 + 6);
-    }
-
-    grid.flat().forEach((cell) => {
+    grid.forEach((cell) => {
       if (!isPanelHead(cell)) return;
-      const disp = displayPanelForCabling(cell, cols, flipped);
-      const span = cellSpanX(cell);
-      const w = span * cellW + (span - 1) * GRID_GAP;
-      const x = disp.x * (cellW + GRID_GAP);
-      const y = cell.y * (cellH + GRID_GAP);
+      const r = dispRectPx(cell);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
       const { signalRing, powerRing } = getPanelIndicators(cell);
-      drawPanelShape(ctx, x, y, w, cellH, cell, fill, "#0f172a", 2, { signalRing, powerRing });
+      drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalRing, powerRing });
     });
 
     Object.entries(signalPortStats).forEach(([portId, stat]) => {
@@ -1545,14 +1598,7 @@ export default function App() {
       ctx.lineCap = "round";
       stat.path.forEach((cell, idx) => {
         if (idx === 0) return;
-        const prev = displayPanelForCabling(stat.path[idx - 1], cols, flipped);
-        const current = displayPanelForCabling(cell, cols, flipped);
-        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0, cellW, cellH);
-        if (current.y !== prev.y) {
-          const sideOffset = GRID_GAP * 0.5;
-          x1 += flipped ? sideOffset : -sideOffset;
-          x2 += flipped ? sideOffset : -sideOffset;
-        }
+        const { x1, y1, x2, y2 } = getLineEndpointsPx(dispRectPx(stat.path[idx - 1]), dispRectPx(cell), -4);
         ctx.beginPath();
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
@@ -1570,14 +1616,7 @@ export default function App() {
       ctx.lineCap = "round";
       path.forEach((cell, idx) => {
         if (idx === 0) return;
-        const prev = displayPanelForCabling(path[idx - 1], cols, flipped);
-        const current = displayPanelForCabling(cell, cols, flipped);
-        let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4, cellW, cellH);
-        if (current.y !== prev.y) {
-          const sideOffset = GRID_GAP * 0.5;
-          x1 += flipped ? -sideOffset : sideOffset;
-          x2 += flipped ? -sideOffset : sideOffset;
-        }
+        const { x1, y1, x2, y2 } = getLineEndpointsPx(dispRectPx(path[idx - 1]), dispRectPx(cell), 4);
         ctx.beginPath();
         ctx.moveTo(x1, y1);
         ctx.lineTo(x2, y2);
@@ -1586,23 +1625,18 @@ export default function App() {
       });
     });
 
-    grid.flat().forEach((cell) => {
+    grid.forEach((cell) => {
       if (!isPanelHead(cell)) return;
-      const disp = displayPanelForCabling(cell, cols, flipped);
-      const span = cellSpanX(cell);
-      const w = span * cellW + (span - 1) * GRID_GAP;
-      const x = disp.x * (cellW + GRID_GAP);
-      const y = cell.y * (cellH + GRID_GAP);
-      const headDisplayX = getDisplayCell(cell, cols, flipped).x;
-      const cx = x + w / 2;
+      const r = dispRectPx(cell);
+      const cx = r.x + r.w / 2;
       ctx.fillStyle = "#020617";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
-      ctx.fillText(`↓ ${cell.y + 1} → ${headDisplayX + 1}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, y + 18);
-      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, y + 34);
-      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, y + 50);
+      ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, r.y + 18);
+      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, r.y + 34);
+      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, r.y + 50);
       const variantSymbol = getPanelSymbol(cell);
-      if (variantSymbol) ctx.fillText(variantSymbol, cx, y + cellH - 6);
+      if (variantSymbol) ctx.fillText(variantSymbol, cx, r.y + r.h - 6);
     });
 
     ctx.restore();
@@ -1611,7 +1645,10 @@ export default function App() {
 
 const exportJson = () => {
   try {
+    // formatVersion 2: free mm-positioned panel list (v1 grids still open).
     const payload = {
+      formatVersion: 2,
+      appVersion: APP_VERSION,
       projectName: safeProjectName,
       panelType,
       powerDistro,
@@ -1619,7 +1656,8 @@ const exportJson = () => {
       includeReinforcementPlate,
       deploymentType,
       wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
-      patching: { grid, signalPortsUsed, powerPortsUsed },
+      panels: grid,
+      patching: { signalPortsUsed, powerPortsUsed },
       stockRows,
     };
 
@@ -1662,13 +1700,13 @@ const exportJson = () => {
   const exportTestPatternPng = () => {
     try {
       // Front-view pixel map. Each panel uses its own native pixel size (MG9
-      // 168x168, MT 256x64) laid out left-to-right per row; rows are top-aligned
-      // and as tall as the tallest panel in that row (mixed pitches aren't a
-      // single clean raster). Panels within a row are ordered by front-view x.
-      const rowsHeads = grid.map((row) =>
-        row
-          .filter((cell) => isPanelHead(cell))
-          .map((cell) => ({ cell, leftX: flipX(cell.x, cols) - (cellSpanX(cell) - 1) }))
+      // 168x168, MT 256x64) laid out left-to-right per row band; bands are
+      // top-aligned and as tall as the tallest panel in the band (mixed pitches
+      // aren't a single clean raster). Bands come from the panels' mm positions
+      // and are mirrored for the front view.
+      const rowsHeads = panelBands.map((band) =>
+        band
+          .map((cell) => ({ cell, leftX: mirrorRectX(cellRect(cell), wallBBox).x }))
           .sort((a, b) => a.leftX - b.leftX),
       );
       const rowHeights = rowsHeads.map((heads) => heads.reduce((m, h) => Math.max(m, PANEL_TYPES[cellPanelType(h.cell)].pixH), 0));
@@ -1691,7 +1729,6 @@ const exportJson = () => {
           const p = PANEL_TYPES[cellPanelType(cell)];
           const x = xCursor;
           const yy = rowTop;
-          const headDisplayX = flipX(cell.x, cols);
           const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
           const { signalRing, powerRing } = getPanelIndicators(cell);
           drawPanelShape(ctx, x, yy, p.pixW, p.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing });
@@ -1699,7 +1736,7 @@ const exportJson = () => {
           ctx.fillStyle = "#020617";
           ctx.textAlign = "center";
           ctx.font = `bold ${Math.max(12, Math.floor(p.pixH * 0.085))}px Arial`;
-          ctx.fillText(`↓ ${cell.y + 1} → ${headDisplayX + 1}`, x + p.pixW / 2, yy + p.pixH * 0.28);
+          ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`, x + p.pixW / 2, yy + p.pixH * 0.28);
           if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + p.pixW / 2, yy + p.pixH * 0.5);
           if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + p.pixW / 2, yy + p.pixH * 0.72);
           const variantSymbol = getPanelSymbol(cell);
@@ -1733,17 +1770,21 @@ const exportJson = () => {
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(String(ev.target?.result || "{}")) as OpenJsonPayload;
-        let nextCols = Math.max(1, Number(data.wall?.cols || cols));
+        const nextCols = Math.max(1, Number(data.wall?.cols || cols));
         const nextRows = Math.max(1, Number(data.wall?.rows || rows));
         const rawGrid = data.patching?.grid;
-        let nextGrid: Cell[][];
-        if (data.panelType === "MT" && isLegacyGrid(rawGrid)) {
-          // Legacy all-MT project: expand onto the 0.5m module grid (columns x2).
-          const migrated = expandLegacyMtGrid(rawGrid, nextCols, nextRows);
-          nextGrid = migrated.grid;
-          nextCols = migrated.cols;
+        let nextPanels: Cell[];
+        if (Array.isArray(data.panels)) {
+          // formatVersion 2: free mm panel list.
+          nextPanels = normalizePanels(data.panels);
+        } else if (Array.isArray(rawGrid)) {
+          // formatVersion 1 grid. Pre-panelType files were one type per wall
+          // (MT cells there are a full 1m wide); typed grids carry mtTail pairs
+          // which gridCellsToPanels absorbs into single MT records.
+          const legacyAllType = isLegacyUntypedGrid(rawGrid) && data.panelType === "MT" ? "MT" : null;
+          nextPanels = gridCellsToPanels(rawGrid, legacyAllType);
         } else {
-          nextGrid = Array.isArray(rawGrid) ? normalizeGrid(rawGrid, nextCols, nextRows) : makeGrid(nextCols, nextRows);
+          nextPanels = makeGridPanels(nextCols, nextRows);
         }
 
         if (data.projectName) setProjectName(data.projectName);
@@ -1757,7 +1798,7 @@ const exportJson = () => {
         setRows(nextRows);
         setDraftCols(String(nextCols));
         setDraftRows(String(nextRows));
-        setGrid(nextGrid);
+        setGrid(nextPanels);
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -1826,7 +1867,7 @@ const exportJson = () => {
       pdf.text(`Project name: ${safeProjectName}`, 10, 20);
       pdf.text(`Panel type: ${panelTypeSummary}`, 10, 26);
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
-      pdf.text(`Panels: ${cols} x ${rows} module grid, ${totalPanels} active`, 10, 38);
+      pdf.text(`Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`, 10, 38);
 
       pdf.text(`Size: ${wallWidthM}m x ${wallHeightM}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
@@ -1908,7 +1949,7 @@ const exportJson = () => {
     drawInfoBox("Wall", [
       `Panel type: ${panelTypeSummary}`,
       `Power distro: ${distro.label}`,
-      `Panels: ${cols} x ${rows} module grid, ${totalPanels} active`,
+      `Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`,
       `Size: ${wallWidthM}m x ${wallHeightM}m`,
       `Resolution: ${wallPixelW} x ${wallPixelH}`,
       `Aspect ratio: ${aspectRatio}`,
@@ -1987,47 +2028,162 @@ const exportJson = () => {
     pushUndoSnapshot();
     setCols(nextCols);
     setRows(nextRows);
-    setGrid(makeGrid(nextCols, nextRows));
+    setGrid(makeGridPanels(nextCols, nextRows, panelType));
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
   };
 
-  const assignSignalCell = (x: number, y: number) => {
+  // --- Workspace display geometry ------------------------------------------
+  // Display space = workspace mm, mirrored horizontally inside the wall bbox
+  // when the front view is shown. The workspace origin is the bbox corner
+  // minus padding and stays fixed during a drag gesture.
+  const WORKSPACE_PAD_MM = 300;
+  const workspaceOrigin = { x: wallBBox.x - WORKSPACE_PAD_MM, y: wallBBox.y - WORKSPACE_PAD_MM };
+  const workspaceSizeMm = { w: wallBBox.w + WORKSPACE_PAD_MM * 2, h: wallBBox.h + WORKSPACE_PAD_MM * 2 };
+  const mmToPx = (mm: number) => mm * pxPerMm;
+  const displayRectOf = (cell: Cell): RectMm => {
+    const rect = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
+    if (moveDrag && moveDrag.ids.includes(cell.id)) {
+      return { ...rect, x: rect.x + moveDrag.dx, y: rect.y + moveDrag.dy };
+    }
+    return rect;
+  };
+  const rectToPx = (rect: RectMm) => ({
+    x: mmToPx(rect.x - workspaceOrigin.x),
+    y: mmToPx(rect.y - workspaceOrigin.y),
+    w: mmToPx(rect.w),
+    h: mmToPx(rect.h),
+  });
+  const eventToDisplayMm = (event: React.MouseEvent): { x: number; y: number } | null => {
+    const host = workspaceRef.current;
+    if (!host) return null;
+    const bounds = host.getBoundingClientRect();
+    return {
+      x: (event.clientX - bounds.left) / pxPerMm + workspaceOrigin.x,
+      y: (event.clientY - bounds.top) / pxPerMm + workspaceOrigin.y,
+    };
+  };
+
+  const rectsIntersect = (a: RectMm, b: RectMm) =>
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+
+  const updateMarqueeSelection = (a: { x: number; y: number }, b: { x: number; y: number }) => {
+    const marquee: RectMm = {
+      x: Math.min(a.x, b.x),
+      y: Math.min(a.y, b.y),
+      w: Math.abs(a.x - b.x),
+      h: Math.abs(a.y - b.y),
+    };
+    const ids = new Set<string>();
+    grid.forEach((cell) => {
+      const rect = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
+      if (rectsIntersect(marquee, rect)) ids.add(cell.id);
+    });
+    setSelectedCells(ids);
+  };
+
+  const commitMoveDrag = () => {
+    const drag = moveDrag;
+    setMoveDrag(null);
+    if (!drag) return;
+    if (Math.abs(drag.dx) < 1 && Math.abs(drag.dy) < 1) return;
+    // Display-space delta -> true mm delta (front view mirrors x).
+    const trueDx = isFlippedView ? -drag.dx : drag.dx;
+    const trueDy = drag.dy;
+    const movingIds = new Set(drag.ids);
+    const movingRects = grid
+      .filter((p) => movingIds.has(p.id) && !p.isRemoved)
+      .map((p) => {
+        const r = cellRect(p);
+        return { ...r, x: r.x + trueDx, y: r.y + trueDy };
+      });
+    const otherRects = grid.filter((p) => !movingIds.has(p.id) && !p.isRemoved).map(cellRect);
+    const snap = computeSnapDelta(movingRects, otherRects, snapEnabled);
+    const dx = trueDx + snap.dx;
+    const dy = trueDy + snap.dy;
+    const nextPanels = grid.map((p) => (movingIds.has(p.id) ? { ...p, x: p.x + dx, y: p.y + dy } : { ...p }));
+    const overlaps = findOverlaps(nextPanels, cellRect);
+    if (overlaps.length && !allowOverlaps) {
+      setOverlapNotice(
+        `Move cancelled: it would overlap ${overlaps.length} panel pair${overlaps.length === 1 ? "" : "s"}. Enable "Allow overlaps" to override.`,
+      );
+      return;
+    }
+    setOverlapNotice(
+      overlaps.length ? `${overlaps.length} overlapping panel pair${overlaps.length === 1 ? "" : "s"} kept by override.` : null,
+    );
+    commitGridUpdate(() => nextPanels);
+  };
+
+  const onWorkspaceMouseMove = (event: React.MouseEvent) => {
+    if (moveDrag) {
+      const mm = eventToDisplayMm(event);
+      if (!mm) return;
+      setMoveDrag((prev) => (prev ? { ...prev, dx: mm.x - prev.startX, dy: mm.y - prev.startY } : prev));
+      return;
+    }
+    if (editMode === "select" && isSelectingPanels && selectionStart) {
+      const mm = eventToDisplayMm(event);
+      if (!mm) return;
+      setSelectionEnd(mm);
+      updateMarqueeSelection(selectionStart, mm);
+    }
+  };
+
+  const onWorkspaceMouseDown = (event: React.MouseEvent) => {
+    // Marquee start on empty workspace (panel handlers stop propagation).
+    if (editMode !== "select") return;
+    const mm = eventToDisplayMm(event);
+    if (!mm) return;
+    setSelectionStart(mm);
+    setSelectionEnd(mm);
+    setIsSelectingPanels(true);
+    if (!event.shiftKey) {
+      setSelectedCells(new Set());
+      setSelectedId(null);
+    }
+  };
+
+  const onWorkspaceMouseUp = () => {
+    if (moveDrag) commitMoveDrag();
+    setIsSelectingPanels(false);
+    setSelectionStart(null);
+    setSelectionEnd(null);
+  };
+
+  const assignSignalPanel = (target: Cell) => {
     if (activePort < 1) return;
-    const key = `${x}-${y}`;
-    if (dragVisited.has(key)) return;
+    if (dragVisited.has(target.id)) return;
 
     commitGridUpdate((prev) => {
-      const current = prev[y]?.[x];
-      if (!current) return prev;
-      if (!isActiveCell(current) || current.mtTail) return prev;
+      const current = findCellById(prev, target.id);
+      if (!current || !isActiveCell(current)) return prev;
 
       const currentCount = getPortPanelCount(prev, "assignedPort", activePort);
       const isAlreadySamePort = current.assignedPort === activePort;
       if (!isAlreadySamePort && currentCount >= safePanelsPerSignalPort) return prev;
 
       const next = cloneGrid(prev);
-      next[y][x].assignedPort = activePort;
+      const cell = findCellById(next, target.id)!;
+      cell.assignedPort = activePort;
       if (!isAlreadySamePort) {
-        next[y][x].sequence = getNextSequence(next, "assignedPort", "sequence", activePort);
+        cell.sequence = getNextSequence(next, "assignedPort", "sequence", activePort);
       }
       return next;
     });
 
-    setDragVisited((prev) => new Set(prev).add(key));
+    setDragVisited((prev) => new Set(prev).add(target.id));
   };
 
-  const assignPowerCell = (x: number, y: number) => {
+  const assignPowerPanel = (target: Cell) => {
     if (activePowerPort < 1) return;
-    const key = `${x}-${y}`;
-    if (dragVisited.has(key)) return;
+    if (dragVisited.has(target.id)) return;
 
     commitGridUpdate((prev) => {
-      const current = prev[y]?.[x];
-      if (!current) return prev;
-      if (!isActiveCell(current) || current.mtTail) return prev;
+      const current = findCellById(prev, target.id);
+      if (!current || !isActiveCell(current)) return prev;
 
       const currentPanels = getPortPanelCount(prev, "assignedPowerPort", activePowerPort);
       const isAlreadySamePort = current.assignedPowerPort === activePowerPort;
@@ -2038,56 +2194,77 @@ const exportJson = () => {
       if (!isAlreadySamePort && currentPortLoad + cellWatts > MAX_OUTLET_AMPS * VOLTAGE) return prev;
 
       const next = cloneGrid(prev);
-      next[y][x].assignedPowerPort = activePowerPort;
-      next[y][x].powerManual = true;
+      const cell = findCellById(next, target.id)!;
+      cell.assignedPowerPort = activePowerPort;
+      cell.powerManual = true;
       if (!isAlreadySamePort) {
-        next[y][x].powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", activePowerPort);
+        cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", activePowerPort);
       }
       return next;
     });
 
-    setDragVisited((prev) => new Set(prev).add(key));
+    setDragVisited((prev) => new Set(prev).add(target.id));
   };
 
-  const startDrag = (x: number, y: number) => {
-    const target = grid[y]?.[x];
-    if (!target) return;
-    if (panelSelectMode) {
-      setSelectionStart({ x, y });
-      setIsSelectingPanels(true);
-      setSelectedId(target.id);
-      setSelectedCells(new Set([target.id]));
+  // --- Workspace pointer interactions -------------------------------------
+  // Patch mode: press/drag over panels assigns the active port.
+  // Select mode: click selects, drag draws a marquee (workspace mm space).
+  // Move mode: drag repositions the pressed panel, the multi-selection it
+  // belongs to, or its joined group; snap + overlap checks run on release.
+
+  const onPanelMouseDown = (cell: Cell, event: React.MouseEvent) => {
+    if (editMode === "move") {
+      if (!isActiveCell(cell)) return;
+      event.preventDefault();
+      const mm = eventToDisplayMm(event);
+      if (!mm) return;
+      let ids: string[];
+      if (activeSelectedKeys.has(cell.id) && selectedCount > 1) {
+        ids = [...activeSelectedKeys].filter((id) => isActiveCell(findCellById(grid, id)));
+      } else if (moveJoinedGroup) {
+        ids = [...joinedGroupIds(grid, cellRect, new Set([cell.id]))];
+      } else {
+        ids = [cell.id];
+      }
+      if (!activeSelectedKeys.has(cell.id)) {
+        setSelectedId(cell.id);
+        setSelectedCells(new Set([cell.id]));
+      }
+      setOverlapNotice(null);
+      setMoveDrag({ ids, startX: mm.x, startY: mm.y, dx: 0, dy: 0 });
       return;
     }
-    if (!isActiveCell(target)) return;
+    if (editMode === "select") {
+      const mm = eventToDisplayMm(event);
+      setSelectionStart(mm);
+      setSelectionEnd(mm);
+      setIsSelectingPanels(true);
+      if (event.shiftKey) {
+        setSelectedCells((prev) => {
+          const next = new Set(prev);
+          if (next.has(cell.id)) next.delete(cell.id);
+          else next.add(cell.id);
+          return next;
+        });
+        setSelectedId(cell.id);
+      } else {
+        setSelectedId(cell.id);
+        setSelectedCells(new Set([cell.id]));
+      }
+      return;
+    }
+    if (!isActiveCell(cell)) return;
     setDragVisited(new Set());
     setIsDragging(true);
-    if (patchMode === "signal") assignSignalCell(x, y);
-    else assignPowerCell(x, y);
+    if (patchMode === "signal") assignSignalPanel(cell);
+    else assignPowerPanel(cell);
   };
 
-  const continueDrag = (x: number, y: number) => {
-    if (panelSelectMode && isSelectingPanels && selectionStart) {
-      const minX = Math.min(selectionStart.x, x);
-      const maxX = Math.max(selectionStart.x, x);
-      const minY = Math.min(selectionStart.y, y);
-      const maxY = Math.max(selectionStart.y, y);
-      const next = new Set<string>();
-      for (let yy = minY; yy <= maxY; yy += 1) {
-        for (let xx = minX; xx <= maxX; xx += 1) {
-          const cell = grid[yy]?.[xx];
-          if (cell) next.add(cell.id);
-        }
-      }
-      setSelectedCells(next);
-      setSelectedId(grid[y]?.[x]?.id ?? null);
-      return;
-    }
-    if (!isDragging) return;
-    const target = grid[y]?.[x];
-    if (!isActiveCell(target)) return;
-    if (patchMode === "signal") assignSignalCell(x, y);
-    else assignPowerCell(x, y);
+  const onPanelMouseEnter = (cell: Cell) => {
+    if (editMode !== "patch" || !isDragging) return;
+    if (!isActiveCell(cell)) return;
+    if (patchMode === "signal") assignSignalPanel(cell);
+    else assignPowerPanel(cell);
   };
 
   const applyManualSignalPatch = (value: string) => {
@@ -2154,78 +2331,49 @@ const exportJson = () => {
   };
 
   const snakePatch = () => {
-    const ordered = snakeDirection === "LOOP_TOGETHER" ? [] : getSnakeOrder(cols, rows, snakeDirection, snakeAlternates);
-    const loopTogetherSegments = snakeDirection === "LOOP_TOGETHER" ? getLoopTogetherSegments(cols, rows) : [];
-    const useVerticalLoopTogether = snakeDirection === "LOOP_TOGETHER" && Math.max(cols, rows) > 23;
-    const loopTogetherVertical = useVerticalLoopTogether ? getVerticalStartOrder(cols, rows) : [];
-
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
+      // Reading order over the free layout: row/column bands with alternation;
+      // LOOP_TOGETHER returns one segment per loop, each starting a new port.
+      const segments = orderPanelsForSnake(next, snakeDirection, snakeAlternates);
 
       if (patchMode === "signal") {
-        for (const row of next) {
-          for (const cell of row) {
-            cell.assignedPort = null;
-            cell.sequence = null;
-          }
+        for (const cell of next) {
+          cell.assignedPort = null;
+          cell.sequence = null;
         }
 
-        if (snakeDirection === "LOOP_TOGETHER") {
-          let port = 1;
-          let seq = 1;
-          const applyCell = ({ x, y }: { x: number; y: number }) => {
+        let port = 1;
+        let seq = 1;
+        segments.forEach((segment) => {
+          segment.forEach((cell) => {
             if (port > SIGNAL_PORT_COUNT) return;
-            if (!isPanelHead(next[y]?.[x])) return;
-            next[y][x].assignedPort = port;
-            next[y][x].sequence = seq;
-            seq += 1;
-            if (seq > safePanelsPerSignalPort) {
-              port += 1;
-              seq = 1;
-            }
-          };
-
-          if (useVerticalLoopTogether) {
-            loopTogetherVertical.forEach(applyCell);
-          } else {
-            loopTogetherSegments.forEach((segment) => {
-              segment.forEach(applyCell);
-              if (seq !== 1) {
-                port += 1;
-                seq = 1;
-              }
-            });
-          }
-        } else {
-          let port = 1;
-          let seq = 1;
-          ordered.forEach(({ x, y }) => {
-            if (port > SIGNAL_PORT_COUNT) return;
-            if (!isPanelHead(next[y]?.[x])) return;
-            next[y][x].assignedPort = port;
-            next[y][x].sequence = seq;
+            cell.assignedPort = port;
+            cell.sequence = seq;
             seq += 1;
             if (seq > safePanelsPerSignalPort) {
               port += 1;
               seq = 1;
             }
           });
-        }
+          // Each loop-together segment starts on a fresh port.
+          if (segments.length > 1 && seq !== 1) {
+            port += 1;
+            seq = 1;
+          }
+        });
       }
 
       if (patchMode === "power") {
-        for (const row of next) {
-          for (const cell of row) {
-            cell.assignedPowerPort = null;
-            cell.powerSequence = null;
-            cell.powerManual = false;
-          }
+        for (const cell of next) {
+          cell.assignedPowerPort = null;
+          cell.powerSequence = null;
+          cell.powerManual = false;
         }
 
         let portIndex = 0;
-        ordered.forEach(({ x, y }) => {
-          if (!isPanelHead(next[y]?.[x])) return;
-          const cellWatts = PANEL_TYPES[cellPanelType(next[y][x])].power.maxW;
+        segments.flat().forEach((cell) => {
+          const cellWatts = PANEL_TYPES[cellPanelType(cell)].power.maxW;
           while (portIndex < powerPorts.length) {
             const port = powerPorts[portIndex];
             const currentLoad = getPowerPortLoadWatts(next, port.id, 0);
@@ -2237,9 +2385,9 @@ const exportJson = () => {
             }
 
             if (currentLoad + cellWatts <= MAX_OUTLET_AMPS * VOLTAGE) {
-              next[y][x].assignedPowerPort = port.id;
-              next[y][x].powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", port.id);
-              next[y][x].powerManual = false;
+              cell.assignedPowerPort = port.id;
+              cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", port.id);
+              cell.powerManual = false;
               return;
             }
 
@@ -2262,7 +2410,7 @@ const exportJson = () => {
   // each signal port so power plugs line up with the signal ports. Respects the
   // power panel-count and amp limits, and stops when the plugs run out.
   const matchPowerToSignal = () => {
-    const hasSignal = grid.flat().some((cell) => isActiveCell(cell) && cell.assignedPort);
+    const hasSignal = grid.some((cell) => isActiveCell(cell) && cell.assignedPort);
     if (!hasSignal) {
       alert("Patch the signal ports first - power will follow the same pattern.");
       return;
@@ -2271,23 +2419,19 @@ const exportJson = () => {
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
 
-      for (const row of next) {
-        for (const cell of row) {
-          cell.assignedPowerPort = null;
-          cell.powerSequence = null;
-          cell.powerManual = false;
-        }
+      for (const cell of next) {
+        cell.assignedPowerPort = null;
+        cell.powerSequence = null;
+        cell.powerManual = false;
       }
 
-      const byPort = new Map<number, { x: number; y: number; seq: number }[]>();
-      next.forEach((row, y) =>
-        row.forEach((cell, x) => {
-          if (!isActiveCell(cell) || !cell.assignedPort) return;
-          const list = byPort.get(cell.assignedPort) ?? [];
-          list.push({ x, y, seq: cell.sequence ?? 0 });
-          byPort.set(cell.assignedPort, list);
-        }),
-      );
+      const byPort = new Map<number, Cell[]>();
+      next.forEach((cell) => {
+        if (!isActiveCell(cell) || !cell.assignedPort) return;
+        const list = byPort.get(cell.assignedPort) ?? [];
+        list.push(cell);
+        byPort.set(cell.assignedPort, list);
+      });
       const orderedSignalPorts = [...byPort.keys()].sort((a, b) => a - b);
 
       let plugIndex = 0;
@@ -2300,9 +2444,9 @@ const exportJson = () => {
           plugIndex += 1;
         }
 
-        const cells = byPort.get(sigPort)!.sort((a, b) => a.seq - b.seq);
-        for (const { x, y } of cells) {
-          const cellWatts = PANEL_TYPES[cellPanelType(next[y][x])].power.maxW;
+        const cells = byPort.get(sigPort)!.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+        for (const cell of cells) {
+          const cellWatts = PANEL_TYPES[cellPanelType(cell)].power.maxW;
           let placed = false;
           while (plugLeft()) {
             const plug = powerPorts[plugIndex];
@@ -2316,9 +2460,9 @@ const exportJson = () => {
               plugIndex += 1;
               continue;
             }
-            next[y][x].assignedPowerPort = plug.id;
-            next[y][x].powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", plug.id);
-            next[y][x].powerManual = false;
+            cell.assignedPowerPort = plug.id;
+            cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", plug.id);
+            cell.powerManual = false;
             placed = true;
             break;
           }
@@ -2429,16 +2573,9 @@ const exportJson = () => {
     const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
-      const next = cloneGrid(prev);
+      let next = cloneGrid(prev);
       keys.forEach((key) => {
-        const target = findCellById(next, key);
-        // Only convert real panels (active, non-tail heads).
-        if (!isPanelHead(target)) return;
-        if (type === "MT") {
-          if (setModuleToMT(next, target.x, target.y)) target.panelVariant = "STANDARD";
-        } else {
-          setModuleToMG9(next, target.x, target.y);
-        }
+        next = convertPanelTypeInList(next, key, type);
       });
       return next;
     });
@@ -2462,29 +2599,31 @@ const exportJson = () => {
     if ((patchMode === "signal" && activePort < 1) || (patchMode === "power" && activePowerPort < 1)) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
-      next.forEach((row) =>
-        row.forEach((cell) => {
-          if (!isActiveCell(cell)) return;
-          if (patchMode === "signal" && cell.assignedPort === activePort) {
-            cell.assignedPort = null;
-            cell.sequence = null;
-          }
-          if (patchMode === "power" && cell.assignedPowerPort === activePowerPort) {
-            cell.assignedPowerPort = null;
-            cell.powerSequence = null;
-            cell.powerManual = false;
-          }
-        }),
-      );
+      next.forEach((cell) => {
+        if (!isActiveCell(cell)) return;
+        if (patchMode === "signal" && cell.assignedPort === activePort) {
+          cell.assignedPort = null;
+          cell.sequence = null;
+        }
+        if (patchMode === "power" && cell.assignedPowerPort === activePowerPort) {
+          cell.assignedPowerPort = null;
+          cell.powerSequence = null;
+          cell.powerManual = false;
+        }
+      });
       return next;
     });
   };
 
-  const toDisplayX = (x: number) => (isFlippedView ? flipX(x, cols) : x);
-  const fromDisplayX = (displayX: number) => (isFlippedView ? flipX(displayX, cols) : displayX);
-
-  const svgW = cols * cellW + (cols - 1) * GRID_GAP;
-  const svgH = rows * cellH + (rows - 1) * GRID_GAP;
+  // Workspace pixel size (bbox + padding at the current zoom).
+  const svgW = Math.max(1, Math.round(mmToPx(workspaceSizeMm.w)));
+  const svgH = Math.max(1, Math.round(mmToPx(workspaceSizeMm.h)));
+  // Human-friendly row/column labels for a panel (grid-ish when aligned).
+  const panelRowLabel = (cell: Cell) => (bandIndexById.get(cell.id) ?? 0) + 1;
+  const panelColLabel = (cell: Cell) => {
+    const col = (cellRect(cell).x - wallBBox.x) / MODULE_MM + 1;
+    return Number.isInteger(col) ? String(col) : col.toFixed(1);
+  };
 
   return (
     <div className="min-h-screen bg-[#0f172a] p-6 text-white print-container">
@@ -2678,7 +2817,7 @@ const exportJson = () => {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
-                  <div>Panels: {cols} × {rows} grid, {totalPanels} active panels</div>
+                  <div>Panels: {totalPanels} active across {panelBands.length} row band{panelBands.length === 1 ? "" : "s"}</div>
                   <div>Size: {wallWidthM}m × {wallHeightM}m</div>
                   <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
                   <div>Resolution: {wallPixelW} × {wallPixelH}</div>
@@ -2824,21 +2963,84 @@ const exportJson = () => {
               <Button
                 intent="secondary"
                 size="sm"
-                active={panelSelectMode}
+                active={editMode === "patch"}
+                activeAccent="sky"
+                onClick={() => setEditMode("patch")}
+                title="Click or drag panels to patch the active signal port / power plug"
+              >
+                Patch
+              </Button>
+              <Button
+                intent="secondary"
+                size="sm"
+                active={editMode === "select"}
                 activeAccent="emerald"
                 onClick={() => {
-                  setPanelSelectMode((prev) => {
-                    if (prev) {
+                  setEditMode((prev) => {
+                    if (prev === "select") {
                       setSelectedId(null);
                       setSelectedCells(new Set());
+                      return "patch";
                     }
-                    return !prev;
+                    return "select";
                   });
                 }}
+                title="Click panels or drag a box to select (Shift adds)"
               >
-                {panelSelectMode ? "Select Mode (on)" : "Enable Select Mode"}
+                Select
+              </Button>
+              <Button
+                intent="secondary"
+                size="sm"
+                active={editMode === "move"}
+                activeAccent="amber"
+                onClick={() => setEditMode((prev) => (prev === "move" ? "patch" : "move"))}
+                title="Drag panels to reposition them freely; edges snap together"
+              >
+                Move
               </Button>
               <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
+              {editMode === "move" ? (
+                <>
+                  <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                    <input type="checkbox" checked={snapEnabled} onChange={() => setSnapEnabled((prev) => !prev)} />
+                    <span>Snap</span>
+                  </label>
+                  <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                    <input type="checkbox" checked={moveJoinedGroup} onChange={() => setMoveJoinedGroup((prev) => !prev)} />
+                    <span>Move joined group</span>
+                  </label>
+                  <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1" title="Permit intentional panel overlaps">
+                    <input type="checkbox" checked={allowOverlaps} onChange={() => setAllowOverlaps((prev) => !prev)} />
+                    <span>Allow overlaps</span>
+                  </label>
+                </>
+              ) : null}
+              <select
+                className="rounded-lg border border-slate-500 bg-white p-1.5 text-xs text-black"
+                value={String(zoom)}
+                onChange={(e) => setZoom(Number(e.target.value))}
+                title="Workspace zoom"
+              >
+                <option value="0.5">50%</option>
+                <option value="0.75">75%</option>
+                <option value="1">100%</option>
+                <option value="1.5">150%</option>
+              </select>
+              <Button
+                intent="secondary"
+                size="sm"
+                onClick={() => {
+                  commitGridUpdate((prev) => [
+                    ...prev,
+                    makePanelAt(wallBBox.x, wallBBox.y + wallBBox.h + MODULE_MM, panelType),
+                  ]);
+                  setEditMode("move");
+                }}
+                title="Add a new panel below the wall, ready to move into place"
+              >
+                + Add Panel
+              </Button>
               <select
                 className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
                 disabled={selectedCount === 0}
@@ -2867,15 +3069,59 @@ const exportJson = () => {
               <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
               <Button intent="ghost" size="sm" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="h-4 w-4" />Redo</Button>
             </div>
-            <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 pt-6 pl-8 select-none">
-              <div className="relative" style={{ width: svgW, height: svgH }}>
-                <div className="absolute left-0 top-[-20px] grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateColumns: `repeat(${cols}, ${cellW}px)`, gap: GRID_GAP }}>
-                  {Array.from({ length: cols }).map((_, index) => <div key={`col-${index}`} className="text-center">{isFlippedView ? cols - index : index + 1}</div>)}
-                </div>
-
-                <div className="absolute left-[-30px] top-0 grid text-xs text-white [text-shadow:0_0_2px_black]" style={{ gridTemplateRows: `repeat(${rows}, ${cellH}px)`, gap: GRID_GAP }}>
-                  {Array.from({ length: rows }).map((_, index) => <div key={`row-${index}`} className="flex items-center">{index + 1}</div>)}
-                </div>
+            {overlapNotice ? (
+              <div className="mb-3 rounded-lg border border-amber-400 bg-amber-500/15 px-3 py-2 text-sm text-amber-200 no-print">
+                ⚠ {overlapNotice}
+              </div>
+            ) : null}
+            <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 select-none">
+              <div
+                ref={workspaceRef}
+                className="relative"
+                style={{
+                  width: svgW,
+                  height: svgH,
+                  cursor: moveDrag ? "grabbing" : editMode === "move" ? "grab" : editMode === "select" ? "crosshair" : "pointer",
+                }}
+                onMouseDown={onWorkspaceMouseDown}
+                onMouseMove={onWorkspaceMouseMove}
+                onMouseUp={onWorkspaceMouseUp}
+              >
+                {/* Metre grid + ruler labels (0.5m lines, metre numbers on the wall edges). */}
+                <svg className="absolute inset-0 z-0 pointer-events-none" width={svgW} height={svgH}>
+                  {Array.from({ length: Math.floor(workspaceSizeMm.w / MODULE_MM) + 1 }).map((_, i) => {
+                    const x = mmToPx(i * MODULE_MM);
+                    return <line key={`gv-${i}`} x1={x} y1={0} x2={x} y2={svgH} stroke="rgba(148,163,184,0.12)" strokeWidth="1" />;
+                  })}
+                  {Array.from({ length: Math.floor(workspaceSizeMm.h / MODULE_MM) + 1 }).map((_, i) => {
+                    const y = mmToPx(i * MODULE_MM);
+                    return <line key={`gh-${i}`} x1={0} y1={y} x2={svgW} y2={y} stroke="rgba(148,163,184,0.12)" strokeWidth="1" />;
+                  })}
+                  {Array.from({ length: Math.floor(wallBBox.w / 1000) + 1 }).map((_, m) => (
+                    <text
+                      key={`rx-${m}`}
+                      x={mmToPx(wallBBox.x + m * 1000 - workspaceOrigin.x)}
+                      y={mmToPx(wallBBox.y - workspaceOrigin.y) - 8}
+                      fill="#94a3b8"
+                      fontSize="10"
+                      textAnchor="middle"
+                    >
+                      {m}m
+                    </text>
+                  ))}
+                  {Array.from({ length: Math.floor(wallBBox.h / 1000) + 1 }).map((_, m) => (
+                    <text
+                      key={`ry-${m}`}
+                      x={mmToPx(wallBBox.x - workspaceOrigin.x) - 10}
+                      y={mmToPx(wallBBox.y + m * 1000 - workspaceOrigin.y) + 3}
+                      fill="#94a3b8"
+                      fontSize="10"
+                      textAnchor="end"
+                    >
+                      {m}m
+                    </text>
+                  ))}
+                </svg>
 
                 <svg className="absolute inset-0 z-20 pointer-events-none" width={svgW} height={svgH}>
                   <defs>
@@ -2886,19 +3132,11 @@ const exportJson = () => {
                   {Object.entries(signalPortStats).map(([portId, stat]) => {
                     if (!stat.path || stat.path.length < 2) return null;
                     const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
-
                     return stat.path.map((cell, idx) => {
                       if (idx === 0) return null;
-                      const prev = displayPanelForCabling(stat.path[idx - 1], cols, isFlippedView);
-                      const current = displayPanelForCabling(cell, cols, isFlippedView);
-                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 0, cellW, cellH);
-
-                      if (current.y !== prev.y) {
-                        const sideOffset = GRID_GAP * 0.5;
-                        x1 += isFlippedView ? sideOffset : -sideOffset;
-                        x2 += isFlippedView ? sideOffset : -sideOffset;
-                      }
-
+                      const a = rectToPx(displayRectOf(stat.path[idx - 1]));
+                      const b = rectToPx(displayRectOf(cell));
+                      const { x1, y1, x2, y2 } = getLineEndpointsPx(a, b, -4);
                       return <line key={`sig-${portId}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} style={{ color }} strokeWidth="4" markerEnd="url(#arrow)" />;
                     });
                   })}
@@ -2907,112 +3145,117 @@ const exportJson = () => {
                     const stat = powerPortStats[port.id];
                     const path = stat?.path ?? [];
                     if (path.length < 2) return null;
-
                     return path.map((cell, idx) => {
                       if (idx === 0) return null;
-                      const prev = displayPanelForCabling(path[idx - 1], cols, isFlippedView);
-                      const current = displayPanelForCabling(cell, cols, isFlippedView);
-                      let { x1, y1, x2, y2 } = getLineEndpoints(prev, current, 4, cellW, cellH);
-
-                      if (current.y !== prev.y) {
-                        const sideOffset = GRID_GAP * 0.5;
-                        x1 += isFlippedView ? -sideOffset : sideOffset;
-                        x2 += isFlippedView ? -sideOffset : sideOffset;
-                      }
-
+                      const a = rectToPx(displayRectOf(path[idx - 1]));
+                      const b = rectToPx(displayRectOf(cell));
+                      const { x1, y1, x2, y2 } = getLineEndpointsPx(a, b, 4);
                       return <line key={`pow-${port.id}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={POWER_COLOR} style={{ color: POWER_COLOR }} strokeWidth="4" markerEnd="url(#arrow)" />;
                     });
                   })}
                 </svg>
 
-                <div className="absolute inset-0 z-10 grid" style={{ gridTemplateColumns: `repeat(${cols}, ${cellW}px)`, gap: GRID_GAP }}>
-                  {grid.flat().map((cell) => {
-                    // MT tail modules are drawn as part of their head panel.
-                    if (cell.mtTail) return null;
-                    const span = cellSpanX(cell);
-                    const displayX = toDisplayX(cell.x);
-                    const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
-                    const isEdge = signalStat?.firstKey === cell.id || signalStat?.lastKey === cell.id;
-                    const { signalRing, powerRing } = getPanelIndicators(cell);
-                    const isSelected = selectedCells.has(cell.id) || selectedId === cell.id;
-                    const isRemoved = cell.isRemoved;
-                    const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-                    const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
-                    // Match the canvas/PDF base shapes (and the YES TECH layout
-                    // tool): triangle = right angle at bottom-left at rotation 0;
-                    // curve = quarter disc centred on the bottom-right corner.
-                    const shapeClipPath =
-                      variant.shape === "triangle"
-                        ? "polygon(0 0, 100% 100%, 0 100%)"
-                        : variant.shape === "curve"
-                          ? "circle(farthest-side at 100% 100%)"
-                          : undefined;
-                    const hatch =
-                      variant.shape === "corner"
-                        ? `repeating-linear-gradient(135deg, transparent 0 6px, rgba(15,23,42,0.35) 6px 8px), ${displayColor}`
-                        : displayColor;
+                {grid.map((cell) => {
+                  const rect = rectToPx(displayRectOf(cell));
+                  const isMoving = !!moveDrag && moveDrag.ids.includes(cell.id);
+                  const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
+                  const isEdge = signalStat?.firstKey === cell.id || signalStat?.lastKey === cell.id;
+                  const { signalRing, powerRing } = getPanelIndicators(cell);
+                  const isSelected = selectedCells.has(cell.id) || selectedId === cell.id;
+                  const isRemoved = cell.isRemoved;
+                  const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+                  const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+                  // Match the canvas/PDF base shapes (and the YES TECH layout
+                  // tool): triangle = right angle at bottom-left at rotation 0;
+                  // curve = quarter disc centred on the bottom-right corner.
+                  const shapeClipPath =
+                    variant.shape === "triangle"
+                      ? "polygon(0 0, 100% 100%, 0 100%)"
+                      : variant.shape === "curve"
+                        ? "circle(farthest-side at 100% 100%)"
+                        : undefined;
+                  const hatch =
+                    variant.shape === "corner"
+                      ? `repeating-linear-gradient(135deg, transparent 0 6px, rgba(15,23,42,0.35) 6px 8px), ${displayColor}`
+                      : displayColor;
 
+                  return (
+                    <div
+                      key={cell.id}
+                      onMouseDown={(event) => {
+                        event.stopPropagation();
+                        onPanelMouseDown(cell, event);
+                      }}
+                      onMouseEnter={() => onPanelMouseEnter(cell)}
+                      style={{
+                        position: "absolute",
+                        left: rect.x,
+                        top: rect.y,
+                        width: rect.w,
+                        height: rect.h,
+                        zIndex: isMoving ? 30 : 10,
+                        opacity: isMoving ? 0.85 : 1,
+                        background: "transparent",
+                        border: `2px ${isRemoved ? "dashed" : "solid"} ${isMoving ? "#fbbf24" : isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
+                        boxShadow: "none",
+                        color: isRemoved ? "#94a3b8" : "#020617",
+                      }}
+                      className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
+                    >
+                      {isRemoved ? (
+                        null
+                      ) : (
+                        <>
+                          <div
+                            className="absolute inset-0"
+                            style={{
+                              background: hatch,
+                              border: `2px solid ${isEdge ? "black" : "#334155"}`,
+                              clipPath: shapeClipPath,
+                              transform: `rotate(${cell.rotation ?? 0}deg)`,
+                              transformOrigin: "center",
+                            }}
+                          />
+                          {/* Chain-start indicators, drawn on top of the panel fill/border without replacing it. */}
+                          {signalRing ? (
+                            <div
+                              className="pointer-events-none absolute inset-0 z-[5]"
+                              style={{ border: `3px solid ${SIGNAL_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
+                            />
+                          ) : null}
+                          {powerRing ? (
+                            <div
+                              className="pointer-events-none absolute z-[6]"
+                              style={{ inset: 3, border: `3px solid ${POWER_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
+                            />
+                          ) : null}
+                          <div className="relative z-10">{`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`}</div>
+                          {cell.assignedPort ? <div className="relative z-10 whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                          {cell.assignedPowerPort ? <div className="relative z-10 whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                          {getPanelSymbol(cell) ? <div className="relative z-10 text-[11px]">{getPanelSymbol(cell)}</div> : null}
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+
+                {/* Marquee rectangle while box-selecting. */}
+                {isSelectingPanels && selectionStart && selectionEnd ? (
+                  (() => {
+                    const marquee = rectToPx({
+                      x: Math.min(selectionStart.x, selectionEnd.x),
+                      y: Math.min(selectionStart.y, selectionEnd.y),
+                      w: Math.abs(selectionStart.x - selectionEnd.x),
+                      h: Math.abs(selectionStart.y - selectionEnd.y),
+                    });
                     return (
                       <div
-                        key={cell.id}
-                        onMouseDown={() => startDrag(fromDisplayX(displayX), cell.y)}
-                        onMouseEnter={() => continueDrag(fromDisplayX(displayX), cell.y)}
-                        onClick={() => {
-                          if (isSelectingPanels) return;
-                          if (!panelSelectMode) return;
-                          setSelectedId(cell.id);
-                          setSelectedCells(new Set([cell.id]));
-                        }}
-                        style={{
-                          width: span * cellW + (span - 1) * GRID_GAP,
-                          height: cellH,
-                          background: "transparent",
-                          border: `2px ${isRemoved ? "dashed" : "solid"} ${isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
-                          boxShadow: "none",
-                          color: isRemoved ? "#94a3b8" : "#020617",
-                          gridColumnStart: (isFlippedView ? displayX - (span - 1) : displayX) + 1,
-                          gridColumnEnd: `span ${span}`,
-                          gridRowStart: cell.y + 1,
-                        }}
-                        className="relative flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
-                      >
-                        {isRemoved ? (
-                          null
-                        ) : (
-                          <>
-                            <div
-                              className="absolute inset-0"
-                              style={{
-                                background: hatch,
-                                border: `2px solid ${isEdge ? "black" : "#334155"}`,
-                                clipPath: shapeClipPath,
-                                transform: `rotate(${cell.rotation ?? 0}deg)`,
-                                transformOrigin: "center",
-                              }}
-                            />
-                            {/* Chain-start indicators, drawn on top of the panel fill/border without replacing it. */}
-                            {signalRing ? (
-                              <div
-                                className="pointer-events-none absolute inset-0 z-[5]"
-                                style={{ border: `3px solid ${SIGNAL_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
-                              />
-                            ) : null}
-                            {powerRing ? (
-                              <div
-                                className="pointer-events-none absolute z-[6]"
-                                style={{ inset: 3, border: `3px solid ${POWER_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
-                              />
-                            ) : null}
-                            <div className="relative z-10">{`↓ ${cell.y + 1} → ${displayX + 1}`}</div>
-                            {cell.assignedPort ? <div className="relative z-10 whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                            {cell.assignedPowerPort ? <div className="relative z-10 whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
-                            {getPanelSymbol(cell) ? <div className="relative z-10 text-[11px]">{getPanelSymbol(cell)}</div> : null}
-                          </>
-                        )}
-                      </div>
+                        className="pointer-events-none absolute z-40 border-2 border-emerald-300 bg-emerald-300/10"
+                        style={{ left: marquee.x, top: marquee.y, width: marquee.w, height: marquee.h }}
+                      />
                     );
-                  })}
-                </div>
+                  })()
+                ) : null}
               </div>
             </div>
 
@@ -3203,5 +3446,6 @@ const exportJson = () => {
 // Basic sanity checks for core helpers
 console.assert(gcd(4032, 1344) === 1344, "gcd should reduce 4032 and 1344 correctly");
 console.assert(`${4032 / gcd(4032, 1344)}:${1344 / gcd(4032, 1344)}` === "3:1", "ratio reduction should produce 3:1");
-console.assert(makeGrid(2, 3).length === 3 && makeGrid(2, 3)[0].length === 2, "makeGrid should build correct dimensions");
+console.assert(makeGridPanels(2, 3).length === 6, "makeGridPanels should build cols*rows panels");
+console.assert(makeGridPanels(2, 3)[1].x === MODULE_MM, "grid panels should be on a 500mm pitch");
 
