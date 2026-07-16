@@ -1044,6 +1044,9 @@ export default function App() {
   const [selectionEnd, setSelectionEnd] = useState<{ x: number; y: number } | null>(null);
   // Free-move gesture: which panels are moving and the live mm delta.
   const [moveDrag, setMoveDrag] = useState<{ ids: string[]; startX: number; startY: number; dx: number; dy: number } | null>(null);
+  // Live snap/join preview shown while dragging: display-px outlines of where the
+  // moving panels will land, plus the shared edges they will join along.
+  const [snapGuide, setSnapGuide] = useState<{ ghosts: RectMm[]; edges: { x1: number; y1: number; x2: number; y2: number }[] } | null>(null);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [allowOverlaps, setAllowOverlaps] = useState(false);
   const [moveJoinedGroup, setMoveJoinedGroup] = useState(false);
@@ -1153,6 +1156,7 @@ export default function App() {
       // Releasing outside the workspace cancels an in-flight move (the
       // workspace's own mouseup commits it first when released inside).
       setMoveDrag(null);
+      setSnapGuide(null);
     };
     window.addEventListener("mouseup", stop);
     return () => window.removeEventListener("mouseup", stop);
@@ -2329,25 +2333,30 @@ const exportJson = () => {
     setSelectedCells(ids);
   };
 
+  // Resolve a drag (display-space dx/dy) into the final true-space snapped delta,
+  // reused by the live guide preview and the committed move.
+  const resolveMoveSnap = (dragDx: number, dragDy: number, ids: string[]) => {
+    const trueDx = isFlippedView ? -dragDx : dragDx;
+    const trueDy = dragDy;
+    const movingIds = new Set(ids);
+    const moving = grid.filter((p) => movingIds.has(p.id) && !p.isRemoved);
+    const movingRects = moving.map((p) => {
+      const r = cellRect(p);
+      return { ...r, x: r.x + trueDx, y: r.y + trueDy };
+    });
+    const otherPanels = grid.filter((p) => !movingIds.has(p.id) && !p.isRemoved);
+    const otherRects = otherPanels.map(cellRect);
+    const snap = computeSnapDelta(movingRects, otherRects, snapEnabled);
+    return { movingIds, trueDx: trueDx + snap.dx, trueDy: trueDy + snap.dy, snappedTo: snap.snappedTo, otherPanels };
+  };
+
   const commitMoveDrag = () => {
     const drag = moveDrag;
     setMoveDrag(null);
+    setSnapGuide(null);
     if (!drag) return;
     if (Math.abs(drag.dx) < 1 && Math.abs(drag.dy) < 1) return;
-    // Display-space delta -> true mm delta (front view mirrors x).
-    const trueDx = isFlippedView ? -drag.dx : drag.dx;
-    const trueDy = drag.dy;
-    const movingIds = new Set(drag.ids);
-    const movingRects = grid
-      .filter((p) => movingIds.has(p.id) && !p.isRemoved)
-      .map((p) => {
-        const r = cellRect(p);
-        return { ...r, x: r.x + trueDx, y: r.y + trueDy };
-      });
-    const otherRects = grid.filter((p) => !movingIds.has(p.id) && !p.isRemoved).map(cellRect);
-    const snap = computeSnapDelta(movingRects, otherRects, snapEnabled);
-    const dx = trueDx + snap.dx;
-    const dy = trueDy + snap.dy;
+    const { movingIds, trueDx: dx, trueDy: dy } = resolveMoveSnap(drag.dx, drag.dy, drag.ids);
     const nextPanels = grid.map((p) => (movingIds.has(p.id) ? { ...p, x: p.x + dx, y: p.y + dy } : { ...p }));
     const overlaps = findOverlaps(nextPanels, cellRect);
     if (overlaps.length && !allowOverlaps) {
@@ -2366,7 +2375,48 @@ const exportJson = () => {
     if (moveDrag) {
       const mm = eventToDisplayMm(event);
       if (!mm) return;
-      setMoveDrag((prev) => (prev ? { ...prev, dx: mm.x - prev.startX, dy: mm.y - prev.startY } : prev));
+      const dx = mm.x - moveDrag.startX;
+      const dy = mm.y - moveDrag.startY;
+      setMoveDrag((prev) => (prev ? { ...prev, dx, dy } : prev));
+      // Live snap/join guide: outline where the panels will land and highlight
+      // the edges they will join along (only when a real edge-snap is found).
+      const { movingIds, trueDx, trueDy, snappedTo, otherPanels } = resolveMoveSnap(dx, dy, moveDrag.ids);
+      if (snappedTo === "panel") {
+        const ghostTrue = grid
+          .filter((p) => movingIds.has(p.id) && !p.isRemoved)
+          .map((p) => {
+            const r = cellRect(p);
+            return { ...r, x: r.x + trueDx, y: r.y + trueDy };
+          });
+        const otherRects = otherPanels.map(cellRect);
+        const edges: { x1: number; y1: number; x2: number; y2: number }[] = [];
+        ghostTrue.forEach((g) => {
+          otherRects.forEach((o) => {
+            if (!rectsJoined(g, o)) return;
+            const gd = rectToPx(isFlippedView ? mirrorRectX(g, wallBBox) : g);
+            const od = rectToPx(isFlippedView ? mirrorRectX(o, wallBBox) : o);
+            // Shared vertical edge?
+            const shX = Math.min(gd.x + gd.w, od.x + od.w) - Math.max(gd.x, od.x);
+            if (Math.abs(gd.x - (od.x + od.w)) < 3 || Math.abs(od.x - (gd.x + gd.w)) < 3) {
+              const ex = Math.abs(gd.x - (od.x + od.w)) < 3 ? gd.x : gd.x + gd.w;
+              const y1 = Math.max(gd.y, od.y);
+              const y2 = Math.min(gd.y + gd.h, od.y + od.h);
+              edges.push({ x1: ex, y1, x2: ex, y2 });
+            } else if (shX > 0) {
+              const ey = Math.abs(gd.y - (od.y + od.h)) < 3 ? gd.y : gd.y + gd.h;
+              const x1 = Math.max(gd.x, od.x);
+              const x2 = Math.min(gd.x + gd.w, od.x + od.w);
+              edges.push({ x1, y1: ey, x2, y2: ey });
+            }
+          });
+        });
+        setSnapGuide({
+          ghosts: ghostTrue.map((g) => rectToPx(isFlippedView ? mirrorRectX(g, wallBBox) : g)),
+          edges,
+        });
+      } else {
+        setSnapGuide(null);
+      }
       return;
     }
     if (editMode === "select" && isSelectingPanels && selectionStart) {
@@ -2393,6 +2443,7 @@ const exportJson = () => {
 
   const onWorkspaceMouseUp = () => {
     if (moveDrag) commitMoveDrag();
+    setSnapGuide(null);
     setIsSelectingPanels(false);
     setSelectionStart(null);
     setSelectionEnd(null);
@@ -3571,6 +3622,24 @@ const exportJson = () => {
                     </div>
                   );
                 })}
+
+                {/* Live snap/join guide: ghost of the snapped landing position + join edges. */}
+                {snapGuide ? (
+                  <>
+                    {snapGuide.ghosts.map((g, i) => (
+                      <div
+                        key={`ghost-${i}`}
+                        className="pointer-events-none absolute z-40 rounded-sm border-2 border-dashed border-emerald-300"
+                        style={{ left: g.x, top: g.y, width: g.w, height: g.h, background: "rgba(52,211,153,0.12)" }}
+                      />
+                    ))}
+                    <svg className="pointer-events-none absolute inset-0 z-40" width={svgW} height={svgH}>
+                      {snapGuide.edges.map((e, i) => (
+                        <line key={`edge-${i}`} x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2} stroke="#34d399" strokeWidth="4" strokeLinecap="round" />
+                      ))}
+                    </svg>
+                  </>
+                ) : null}
 
                 {/* Marquee rectangle while box-selecting. */}
                 {isSelectingPanels && selectionStart && selectionEnd ? (
