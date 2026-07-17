@@ -5,12 +5,15 @@ import { HelpCircle, Redo2, Undo2 } from "lucide-react";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
 import {
   type RectMm,
+  type PanelAnchorSpec,
+  type PanelShape,
   activeBBox,
   bandPanels,
-  computeSnapDelta,
-  connectedGroups,
+  computeAnchorSnapDelta,
+  connectedGroupsByGeom,
   findOverlaps,
-  joinedGroupIds,
+  joinedGroupIdsByGeom,
+  panelsAnchorJoined,
   rectsJoined,
   MODULE_MM,
 } from "./model/panels";
@@ -367,6 +370,21 @@ const cellRect = (cell: Cell): RectMm => {
   return { x: cell.x, y: cell.y, w: wMm, h: hMm };
 };
 
+// Connector-anchor descriptor for a panel: centre + unrotated base half extents
+// + rotation + shape. Drives snapping and join detection (see model/panels.ts).
+const cellGeom = (cell: Cell): PanelAnchorSpec => {
+  const spec = PANEL_TYPES[cellPanelType(cell)];
+  const { wMm, hMm } = cellSizeMm(cell);
+  return {
+    cx: cell.x + wMm / 2,
+    cy: cell.y + hMm / 2,
+    halfW: (spec.w * 1000) / 2,
+    halfH: (spec.h * 1000) / 2,
+    rotation: cell.rotation ?? 0,
+    shape: (PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape as PanelShape),
+  };
+};
+
 // The old grid model called real panels "heads" (vs MT tail modules). In the
 // free model every active record is a panel; keep the name for call sites.
 const isPanelHead = (cell: Cell | null | undefined): cell is Cell => isActiveCell(cell);
@@ -624,12 +642,13 @@ const mirrorRectX = (rect: RectMm, bbox: RectMm): RectMm => ({
 const orderLetterBottomUp = (cells: Cell[]): Cell[] => {
   if (cells.length <= 1) return [...cells];
   const rectOf = new Map(cells.map((c) => [c.id, cellRect(c)]));
+  const geomOf = new Map(cells.map((c) => [c.id, cellGeom(c)]));
   const byId = new Map(cells.map((c) => [c.id, c]));
   const adj = new Map<string, string[]>();
   cells.forEach((c) => adj.set(c.id, []));
   for (let i = 0; i < cells.length; i += 1) {
     for (let j = i + 1; j < cells.length; j += 1) {
-      if (rectsJoined(rectOf.get(cells[i].id)!, rectOf.get(cells[j].id)!)) {
+      if (panelsAnchorJoined(geomOf.get(cells[i].id)!, geomOf.get(cells[j].id)!)) {
         adj.get(cells[i].id)!.push(cells[j].id);
         adj.get(cells[j].id)!.push(cells[i].id);
       }
@@ -670,7 +689,7 @@ const orderLetterBottomUp = (cells: Cell[]): Cell[] => {
 const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
   const active = panels.filter((c) => isActiveCell(c));
   if (!active.length) return [];
-  const groups = connectedGroups(active, cellRect);
+  const groups = connectedGroupsByGeom(active, cellGeom);
   const byGroup = new Map<number, Cell[]>();
   active.forEach((c) => {
     const g = groups.get(c.id);
@@ -1585,10 +1604,10 @@ export default function App() {
     let cornerToCorner = 0;
     const corners = activeCells.filter((cell) => cell.panelVariant === "CORNER");
     corners.forEach((cell) => {
-      const rect = cellRect(cell);
+      const geom = cellGeom(cell);
       activeCells.forEach((other) => {
         if (other.id === cell.id) return;
-        if (!rectsJoined(rect, cellRect(other))) return;
+        if (!panelsAnchorJoined(geom, cellGeom(other))) return;
         if (other.panelVariant === "CORNER") {
           if (other.id > cell.id) cornerToCorner += 1;
         } else {
@@ -2392,13 +2411,17 @@ const exportJson = () => {
     const trueDy = dragDy;
     const movingIds = new Set(ids);
     const moving = grid.filter((p) => movingIds.has(p.id) && !p.isRemoved);
-    const movingRects = moving.map((p) => {
-      const r = cellRect(p);
-      return { ...r, x: r.x + trueDx, y: r.y + trueDy };
+    // Anchor-based snap (ported from the layout tool): shift the moved panels so
+    // a connector anchor meets a stationary panel's anchor. Shaped panels only
+    // snap on their real edges, so incompatible edges never join.
+    const firstRect = moving[0] ? { ...cellRect(moving[0]), x: cellRect(moving[0]).x + trueDx, y: cellRect(moving[0]).y + trueDy } : null;
+    const movingGeoms = moving.map((p) => {
+      const g = cellGeom(p);
+      return { ...g, cx: g.cx + trueDx, cy: g.cy + trueDy };
     });
     const otherPanels = grid.filter((p) => !movingIds.has(p.id) && !p.isRemoved);
-    const otherRects = otherPanels.map(cellRect);
-    const snap = computeSnapDelta(movingRects, otherRects, snapEnabled);
+    const otherGeoms = otherPanels.map(cellGeom);
+    const snap = computeAnchorSnapDelta(movingGeoms, otherGeoms, snapEnabled, firstRect);
     return { movingIds, trueDx: trueDx + snap.dx, trueDy: trueDy + snap.dy, snappedTo: snap.snappedTo, otherPanels };
   };
 
@@ -2570,7 +2593,7 @@ const exportJson = () => {
       if (activeSelectedKeys.has(cell.id) && selectedCount > 1) {
         ids = [...activeSelectedKeys].filter((id) => isActiveCell(findCellById(grid, id)));
       } else if (moveJoinedGroup) {
-        ids = [...joinedGroupIds(grid, cellRect, new Set([cell.id]))];
+        ids = [...joinedGroupIdsByGeom(grid, cellGeom, new Set([cell.id]))];
       } else {
         ids = [cell.id];
       }

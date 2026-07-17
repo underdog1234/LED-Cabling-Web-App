@@ -153,6 +153,165 @@ export const computeSnapDelta = (
   };
 };
 
+// ---------------------------------------------------------------------------
+// Connector-anchor snap/join model, ported from the YES TECH layout tool.
+//
+// Every panel exposes connector anchor points along its *joinable* edges. Two
+// panels snap/join when anchors coincide (within SNAP_DISTANCE_MM). Shaped
+// panels only expose anchors on their straight legs - a triangle has none on
+// its hypotenuse, a quarter-circle none on its curve - so those edges can never
+// join to another panel. Anchors rotate with the panel.
+// ---------------------------------------------------------------------------
+
+export type PanelShape = "rect" | "triangle" | "curve" | "corner";
+export type PanelAnchorSpec = {
+  /** Panel centre in workspace mm. */
+  cx: number;
+  cy: number;
+  /** Half extents of the UNROTATED base footprint. */
+  halfW: number;
+  halfH: number;
+  rotation: number;
+  shape: PanelShape;
+};
+
+// Anchor offsets along an edge, as fractions of the half extent. Every straight
+// edge uses the same pattern so flush edges (rect-rect, rect-to-shaped-leg) share
+// exact anchor positions and join cleanly.
+const EDGE_ANCHORS = [-0.8, -0.4, 0, 0.4, 0.8];
+const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
+
+// Local (centre-relative, unrotated) anchor points for a panel shape. Base
+// orientations match the layout tool: triangle right-angle bottom-left (legs =
+// left + bottom edges); quarter-circle right-angle bottom-right (legs = bottom
+// + right edges); rect/corner = all four edges. Shaped panels expose NO anchors
+// on their hypotenuse / curve, so those edges can never join.
+const localAnchors = (shape: PanelShape, halfW: number, halfH: number): Array<{ x: number; y: number }> => {
+  const pts: Array<{ x: number; y: number }> = [];
+  const left = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: -halfW, y: t * halfH }));
+  const right = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: halfW, y: t * halfH }));
+  const top = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: t * halfW, y: -halfH }));
+  const bottom = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: t * halfW, y: halfH }));
+  if (shape === "triangle") {
+    left();
+    bottom();
+  } else if (shape === "curve") {
+    bottom();
+    right();
+  } else {
+    top();
+    bottom();
+    left();
+    right();
+  }
+  return pts;
+};
+
+/** World-space connector anchors for a panel, rotated by its rotation. */
+export const panelWorldAnchors = (g: PanelAnchorSpec): Array<{ x: number; y: number }> => {
+  const rad = (((Math.round(g.rotation / 90) * 90) % 360) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return localAnchors(g.shape, g.halfW, g.halfH).map((p) => ({
+    x: g.cx + (p.x * cos - p.y * sin),
+    y: g.cy + (p.x * sin + p.y * cos),
+  }));
+};
+
+/**
+ * Anchor snap: find the smallest translation that makes a moving panel anchor
+ * coincide with a stationary panel anchor (within SNAP_DISTANCE_MM), snapping
+ * panels together only along compatible edges. Falls back to the half-module
+ * grid when nothing is in range. `firstRect` is the moving group's reference
+ * rect for the grid fallback.
+ */
+export const computeAnchorSnapDelta = (
+  moving: PanelAnchorSpec[],
+  others: PanelAnchorSpec[],
+  snapEnabled: boolean,
+  firstRect: RectMm | null,
+): { dx: number; dy: number; snappedTo: "panel" | "grid" | null } => {
+  if (!snapEnabled) return { dx: 0, dy: 0, snappedTo: null };
+  const movingAnchors = moving.flatMap(panelWorldAnchors);
+  const otherAnchors = others.flatMap(panelWorldAnchors);
+  let best: { dx: number; dy: number; dist: number } | null = null;
+  for (const am of movingAnchors) {
+    for (const ao of otherAnchors) {
+      const dx = ao.x - am.x;
+      const dy = ao.y - am.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist <= SNAP_DISTANCE_MM && (!best || dist < best.dist)) best = { dx, dy, dist };
+    }
+  }
+  if (best) return { dx: best.dx, dy: best.dy, snappedTo: "panel" };
+  if (!firstRect) return { dx: 0, dy: 0, snappedTo: null };
+  return {
+    dx: snapToIncrement(firstRect.x, HALF_MODULE_MM) - firstRect.x,
+    dy: snapToIncrement(firstRect.y, HALF_MODULE_MM) - firstRect.y,
+    snappedTo: "grid",
+  };
+};
+
+/** Two panels are joined when they share >= 2 coincident connector anchors. */
+export const panelsAnchorJoined = (a: PanelAnchorSpec, b: PanelAnchorSpec): boolean => {
+  const aw = panelWorldAnchors(a);
+  const bw = panelWorldAnchors(b);
+  let shared = 0;
+  for (const pa of aw) {
+    for (const pb of bw) {
+      if (Math.abs(pa.x - pb.x) <= ANCHOR_JOIN_TOL && Math.abs(pa.y - pb.y) <= ANCHOR_JOIN_TOL) {
+        shared += 1;
+        break;
+      }
+    }
+    if (shared >= 2) return true;
+  }
+  return false;
+};
+
+/** Connected components over the anchor-join relation; id -> group index. */
+export const connectedGroupsByGeom = (
+  panels: PanelRecord[],
+  geomOf: (p: PanelRecord) => PanelAnchorSpec,
+): Map<string, number> => {
+  const active = panels.filter((p) => !p.isRemoved);
+  const geoms = active.map(geomOf);
+  const parent = active.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const union = (a: number, b: number) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  };
+  for (let i = 0; i < active.length; i += 1) {
+    for (let j = i + 1; j < active.length; j += 1) {
+      if (panelsAnchorJoined(geoms[i], geoms[j])) union(i, j);
+    }
+  }
+  const groups = new Map<string, number>();
+  active.forEach((p, i) => groups.set(p.id, find(i)));
+  return groups;
+};
+
+/** Ids joined (directly or transitively) to any seed id, by anchor connectivity. */
+export const joinedGroupIdsByGeom = (
+  panels: PanelRecord[],
+  geomOf: (p: PanelRecord) => PanelAnchorSpec,
+  seedIds: Set<string>,
+): Set<string> => {
+  const groups = connectedGroupsByGeom(panels, geomOf);
+  const seedGroups = new Set<number>();
+  seedIds.forEach((id) => {
+    const g = groups.get(id);
+    if (g !== undefined) seedGroups.add(g);
+  });
+  const out = new Set<string>();
+  groups.forEach((g, id) => {
+    if (seedGroups.has(g)) out.add(id);
+  });
+  return out;
+};
+
 /** Shared-edge join test between two rects. */
 export const rectsJoined = (a: RectMm, b: RectMm): boolean => {
   const gapX = Math.max(a.x, b.x) - Math.min(a.x + a.w, b.x + b.w);
