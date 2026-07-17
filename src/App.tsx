@@ -723,6 +723,14 @@ const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null) =
   return selectedId ? new Set([selectedId]) : new Set<string>();
 };
 
+// SVG outline path (in a 0..100 box) matching each variant's on-screen shape,
+// used to draw the signal/power indicator outlines so they follow the panel shape.
+const variantOutlineSvgPath = (shape: string): string => {
+  if (shape === "triangle") return "M0 0 L100 100 L0 100 Z";
+  if (shape === "curve") return "M0 100 A100 100 0 0 1 100 0 L100 100 Z"; // matches circle(farthest-side at 100% 100%)
+  return "M0 0 H100 V100 H0 Z";
+};
+
 const getPanelSymbol = (cell: Cell) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
   const parts = [];
@@ -811,44 +819,49 @@ const drawPanelShape = (
   options: { hatchStep?: number; curveStyle?: "test-pattern"; signalRing?: boolean; powerRing?: boolean; mirrorX?: boolean } = {},
 ) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+  const testPattern = options.curveStyle === "test-pattern";
+  // Trace the panel's true outline (triangle / quarter-circle / rectangle) in the
+  // local 0..w,0..h space so the fill, stroke and indicator rings all share it.
+  const traceShape = () => {
+    ctx.beginPath();
+    if (variant.shape === "triangle") {
+      ctx.moveTo(0, 0);
+      ctx.lineTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+    } else if (variant.shape === "curve") {
+      if (testPattern) {
+        ctx.moveTo(0, 0);
+        ctx.lineTo(w, 0);
+        ctx.quadraticCurveTo(w, h, 0, h);
+      } else {
+        ctx.moveTo(w, 0);
+        ctx.lineTo(w, h);
+        ctx.lineTo(0, h);
+        ctx.quadraticCurveTo(0, 0, w, 0);
+      }
+      ctx.closePath();
+    } else {
+      ctx.rect(0, 0, w, h);
+    }
+  };
+  // Establish the panel's local frame (front view mirrors the shape via scaleX(-1)
+  // without touching its stored rotation).
+  const applyFrame = () => {
+    ctx.translate(x + w / 2, y + h / 2);
+    if (options.mirrorX) ctx.scale(-1, 1);
+    ctx.rotate(((cell.rotation ?? 0) * Math.PI) / 180);
+    ctx.translate(-w / 2, -h / 2);
+  };
+
   ctx.save();
-  ctx.translate(x + w / 2, y + h / 2);
-  // Front view: mirror the whole panel horizontally (walk around the wall)
-  // without altering its stored rotation - scaleX(-1) applied to the rotated shape.
-  if (options.mirrorX) ctx.scale(-1, 1);
-  ctx.rotate(((cell.rotation ?? 0) * Math.PI) / 180);
-  ctx.translate(-w / 2, -h / 2);
+  applyFrame();
   ctx.fillStyle = fill;
   ctx.strokeStyle = stroke;
   ctx.lineWidth = lineWidth;
-
-  if (variant.shape === "triangle") {
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(w, h);
-    ctx.lineTo(0, h);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  } else if (variant.shape === "curve") {
-    ctx.beginPath();
-    if (options.curveStyle === "test-pattern") {
-      ctx.moveTo(0, 0);
-      ctx.lineTo(w, 0);
-      ctx.quadraticCurveTo(w, h, 0, h);
-    } else {
-      ctx.moveTo(w, 0);
-      ctx.lineTo(w, h);
-      ctx.lineTo(0, h);
-      ctx.quadraticCurveTo(0, 0, w, 0);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  } else {
-    ctx.fillRect(0, 0, w, h);
-    ctx.strokeRect(0, 0, w, h);
-  }
+  traceShape();
+  ctx.fill();
+  ctx.stroke();
 
   if (variant.shape === "corner") {
     ctx.strokeStyle = "rgba(2, 6, 23, 0.45)";
@@ -863,28 +876,33 @@ const drawPanelShape = (
       ctx.stroke();
     }
   }
-
-  // Chain-start indicator rings, drawn on top of (and inside) the panel border so
-  // they never replace it. Blue = signal chain start/backup end, orange = power
-  // chain start. When both apply they nest concentrically and stay distinct.
-  const rings: string[] = [];
-  if (options.signalRing) rings.push(SIGNAL_START_COLOR);
-  if (options.powerRing) rings.push(POWER_START_COLOR);
-  if (rings.length) {
-    ctx.restore();
-    ctx.save();
-    ctx.translate(x + w / 2, y + h / 2);
-    ctx.rotate(((cell.rotation ?? 0) * Math.PI) / 180);
-    ctx.translate(-w / 2, -h / 2);
-    const ringW = Math.max(2, Math.round(Math.min(w, h) * 0.06));
-    rings.forEach((color, i) => {
-      const inset = lineWidth + ringW / 2 + i * ringW;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = ringW;
-      ctx.strokeRect(inset, inset, w - inset * 2, h - inset * 2);
-    });
-  }
   ctx.restore();
+
+  // Chain-start indicator rings that FOLLOW the panel shape. Blue = signal chain
+  // start (and backup-loop end), orange = power chain start. Clipping to the
+  // shape and stroking the outline gives a constant-thickness outline that hugs
+  // the true edge; when both apply the wider (power) band is drawn first and the
+  // signal band sits on top, so they nest concentrically and stay distinct.
+  if (options.signalRing || options.powerRing) {
+    const ringW = Math.max(2, Math.round(Math.min(w, h) * 0.06));
+    ctx.save();
+    applyFrame();
+    traceShape();
+    ctx.clip();
+    if (options.powerRing) {
+      ctx.strokeStyle = POWER_START_COLOR;
+      ctx.lineWidth = ringW * 2 * (options.signalRing ? 2 : 1);
+      traceShape();
+      ctx.stroke();
+    }
+    if (options.signalRing) {
+      ctx.strokeStyle = SIGNAL_START_COLOR;
+      ctx.lineWidth = ringW * 2;
+      traceShape();
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
 };
 
 const drawCanvasArrowHead = (
@@ -3658,18 +3676,43 @@ const exportJson = () => {
                               transformOrigin: "center",
                             }}
                           />
-                          {/* Chain-start indicators, drawn on top of the panel fill/border without replacing it. */}
-                          {signalRing ? (
-                            <div
-                              className="pointer-events-none absolute inset-0 z-[5]"
-                              style={{ border: `3px solid ${SIGNAL_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
-                            />
-                          ) : null}
-                          {powerRing ? (
-                            <div
-                              className="pointer-events-none absolute z-[6]"
-                              style={{ inset: 3, border: `3px solid ${POWER_START_COLOR}`, printColorAdjust: "exact", WebkitPrintColorAdjust: "exact" }}
-                            />
+                          {/* Chain-start indicators that follow the true panel shape (triangle /
+                              curve / rect), mirrored with the panel in the front view. Blue =
+                              signal chain start / backup end; orange = power chain start, drawn
+                              just inside so both stay visible together. */}
+                          {signalRing || powerRing ? (
+                            <svg
+                              className="pointer-events-none absolute inset-0 z-[6]"
+                              viewBox="0 0 100 100"
+                              preserveAspectRatio="none"
+                              style={{
+                                overflow: "visible",
+                                transform: `${isFlippedView ? "scaleX(-1) " : ""}rotate(${cell.rotation ?? 0}deg)`,
+                                transformOrigin: "center",
+                                printColorAdjust: "exact",
+                                WebkitPrintColorAdjust: "exact",
+                              }}
+                            >
+                              {powerRing ? (
+                                <path
+                                  d={variantOutlineSvgPath(variant.shape)}
+                                  fill="none"
+                                  stroke={POWER_START_COLOR}
+                                  strokeWidth={6}
+                                  strokeLinejoin="round"
+                                  transform={signalRing ? "translate(50 50) scale(0.78) translate(-50 -50)" : undefined}
+                                />
+                              ) : null}
+                              {signalRing ? (
+                                <path
+                                  d={variantOutlineSvgPath(variant.shape)}
+                                  fill="none"
+                                  stroke={SIGNAL_START_COLOR}
+                                  strokeWidth={6}
+                                  strokeLinejoin="round"
+                                />
+                              ) : null}
+                            </svg>
                           ) : null}
                           <div className="relative z-10">{`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`}</div>
                           {cell.assignedPort ? <div className="relative z-10 whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
