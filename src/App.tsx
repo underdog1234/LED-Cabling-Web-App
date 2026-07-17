@@ -759,6 +759,45 @@ const getLineEndpointsPx = (a: RectMm, b: RectMm, offsetY = 0) => {
   };
 };
 
+// Do two panel rects share an edge (touching, with real overlap)? Used to
+// decide when a cable may run straight between panels vs route around.
+const rectsAdjacentPx = (a: RectMm, b: RectMm, tol = 3) => {
+  const vOverlap = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+  const hOverlap = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+  const touchV = Math.abs(a.x + a.w - b.x) <= tol || Math.abs(b.x + b.w - a.x) <= tol;
+  const touchH = Math.abs(a.y + a.h - b.y) <= tol || Math.abs(b.y + b.h - a.y) <= tol;
+  return (touchV && vOverlap > tol) || (touchH && hOverlap > tol);
+};
+
+// Orthogonal (Manhattan) cable route between two panel rects in px space.
+// Returns a polyline with only horizontal/vertical segments and 90-degree
+// corners. Adjacent panels connect straight through their shared edge; other
+// panels leave the facing edge and turn in the gap between them (never
+// through a panel centre). `offset` shifts the run so signal/power don't overlap.
+const routeCablePx = (a: RectMm, b: RectMm, offset = 0): Array<{ x: number; y: number }> => {
+  const aC = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
+  const bC = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
+  const horizontal = Math.abs(bC.x - aC.x) >= Math.abs(bC.y - aC.y);
+  if (horizontal) {
+    const rightward = bC.x >= aC.x;
+    const ax = rightward ? a.x + a.w : a.x;
+    const bx = rightward ? b.x : b.x + b.w;
+    const ay = aC.y + offset;
+    const by = bC.y + offset;
+    if (Math.abs(ay - by) < 1) return [{ x: ax, y: ay }, { x: bx, y: by }];
+    const midX = (ax + bx) / 2; // in the horizontal gap between the facing edges
+    return [{ x: ax, y: ay }, { x: midX, y: ay }, { x: midX, y: by }, { x: bx, y: by }];
+  }
+  const downward = bC.y >= aC.y;
+  const ay = downward ? a.y + a.h : a.y;
+  const by = downward ? b.y : b.y + b.h;
+  const ax = aC.x + offset;
+  const bx = bC.x + offset;
+  if (Math.abs(ax - bx) < 1) return [{ x: ax, y: ay }, { x: bx, y: by }];
+  const midY = (ay + by) / 2;
+  return [{ x: ax, y: ay }, { x: ax, y: midY }, { x: bx, y: midY }, { x: bx, y: by }];
+};
+
 const drawPanelShape = (
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -1730,6 +1769,35 @@ export default function App() {
         : "MG9";
   const fileSafePanelType = mg9Count > 0 && mtCount > 0 ? "MIX" : mtCount > 0 ? "MT" : "MG9";
 
+  // Draw every signal + power cable route onto a canvas using the shared
+  // orthogonal router, so the layout view, PDF and PNG all match. dispRectPx
+  // maps a panel to its px rect in that canvas's coordinate space.
+  const drawCanvasCableRoutes = (ctx: CanvasRenderingContext2D, dispRectPx: (cell: Cell) => RectMm) => {
+    const drawPath = (path: Cell[] | undefined, color: string, offset: number) => {
+      if (!path || path.length < 2) return;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      for (let idx = 1; idx < path.length; idx += 1) {
+        const pts = routeCablePx(dispRectPx(path[idx - 1]), dispRectPx(path[idx]), offset);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let k = 1; k < pts.length; k += 1) ctx.lineTo(pts[k].x, pts[k].y);
+        ctx.stroke();
+        const last = pts[pts.length - 1];
+        const prev = pts[pts.length - 2];
+        drawCanvasArrowHead(ctx, prev.x, prev.y, last.x, last.y, color);
+      }
+    };
+    Object.entries(signalPortStats).forEach(([portId, stat]) => {
+      drawPath(stat.path, PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length], -4);
+    });
+    powerPorts.forEach((port) => {
+      drawPath(powerPortStats[port.id]?.path, POWER_COLOR, 4);
+    });
+  };
+
   const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
     const scale = 2;
     const px = CELL_SIZE / MODULE_MM; // export scale, independent of on-screen zoom
@@ -1792,40 +1860,7 @@ export default function App() {
       drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalRing, powerRing, mirrorX: flipped });
     });
 
-    Object.entries(signalPortStats).forEach(([portId, stat]) => {
-      if (!stat.path || stat.path.length < 2) return;
-      const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 4;
-      ctx.lineCap = "round";
-      stat.path.forEach((cell, idx) => {
-        if (idx === 0) return;
-        const { x1, y1, x2, y2 } = getLineEndpointsPx(dispRectPx(stat.path[idx - 1]), dispRectPx(cell), -4);
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.stroke();
-        drawCanvasArrowHead(ctx, x1, y1, x2, y2, color);
-      });
-    });
-
-    powerPorts.forEach((port) => {
-      const stat = powerPortStats[port.id];
-      const path = stat?.path ?? [];
-      if (path.length < 2) return;
-      ctx.strokeStyle = POWER_COLOR;
-      ctx.lineWidth = 4;
-      ctx.lineCap = "round";
-      path.forEach((cell, idx) => {
-        if (idx === 0) return;
-        const { x1, y1, x2, y2 } = getLineEndpointsPx(dispRectPx(path[idx - 1]), dispRectPx(cell), 4);
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.stroke();
-        drawCanvasArrowHead(ctx, x1, y1, x2, y2, POWER_COLOR);
-      });
-    });
+    drawCanvasCableRoutes(ctx, dispRectPx);
 
     grid.forEach((cell) => {
       if (!isPanelHead(cell)) return;
@@ -1901,59 +1936,58 @@ const exportJson = () => {
 
   const exportTestPatternPng = () => {
     try {
-      // Front-view pixel map. Each panel uses its own native pixel size (MG9
-      // 168x168, MT 256x64) laid out left-to-right per row band; bands are
-      // top-aligned and as tall as the tallest panel in the band (mixed pitches
-      // aren't a single clean raster). Bands come from the panels' mm positions
-      // and are mirrored for the front view.
-      const rowsHeads = panelBands.map((band) =>
-        band
-          .map((cell) => ({ cell, leftX: mirrorRectX(cellRect(cell), wallBBox).x }))
-          .sort((a, b) => a.leftX - b.leftX),
-      );
-      const rowHeights = rowsHeads.map((heads) => heads.reduce((m, h) => Math.max(m, PANEL_TYPES[cellPanelType(h.cell)].pixH), 0));
-      const rowWidths = rowsHeads.map((heads) => heads.reduce((s, h) => s + PANEL_TYPES[cellPanelType(h.cell)].pixW, 0));
-
+      // Front-view pixel map at each panel's native resolution. Panels are placed
+      // at their TRUE workspace positions (no band-packing, no centring), so the
+      // PNG matches the Panel Layout area exactly - gaps and offsets preserved.
+      // Scale = MG9 native pixels per mm (168px / 500mm); MG9/MG12/MG13 render at
+      // their exact native size and every position/gap is proportional.
+      const pxPerMm = PANEL_TYPES.MG9.pixW / (PANEL_TYPES.MG9.w * 1000);
+      const W = Math.max(1, Math.round(wallBBox.w * pxPerMm));
+      const H = Math.max(1, Math.round(wallBBox.h * pxPerMm));
       const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, ...rowWidths);
-      canvas.height = Math.max(1, rowHeights.reduce((a, b) => a + b, 0));
+      canvas.width = W;
+      canvas.height = H;
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context unavailable");
       ctx.imageSmoothingEnabled = false;
 
       ctx.fillStyle = "#000000";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, W, H);
 
-      let rowTop = 0;
-      rowsHeads.forEach((heads, y) => {
-        let xCursor = 0;
-        heads.forEach(({ cell }) => {
-          const p = PANEL_TYPES[cellPanelType(cell)];
-          const x = xCursor;
-          const yy = rowTop;
-          const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-          const { signalRing, powerRing } = getPanelIndicators(cell);
-          drawPanelShape(ctx, x, yy, p.pixW, p.pixH, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing, mirrorX: true });
+      // Match the current Panel Layout view exactly (same coordinates and same
+      // front/back mirroring) so the PNG lines up with what's on screen.
+      const dispRectPx = (cell: Cell): RectMm => {
+        const d = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
+        return { x: (d.x - wallBBox.x) * pxPerMm, y: (d.y - wallBBox.y) * pxPerMm, w: d.w * pxPerMm, h: d.h * pxPerMm };
+      };
 
-          ctx.fillStyle = "#020617";
-          ctx.textAlign = "center";
-          ctx.font = `bold ${Math.max(12, Math.floor(p.pixH * 0.085))}px Arial`;
-          ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`, x + p.pixW / 2, yy + p.pixH * 0.28);
-          if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, x + p.pixW / 2, yy + p.pixH * 0.5);
-          if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, x + p.pixW / 2, yy + p.pixH * 0.72);
-          const variantSymbol = getPanelSymbol(cell);
-          if (variantSymbol) {
-            ctx.font = `bold ${Math.max(14, Math.floor(p.pixH * 0.12))}px Arial`;
-            ctx.fillText(variantSymbol, x + p.pixW / 2, yy + p.pixH - 8);
-          }
-          xCursor += p.pixW;
-        });
-        rowTop += rowHeights[y];
+      grid.forEach((cell) => {
+        if (!isPanelHead(cell)) return;
+        const r = dispRectPx(cell);
+        const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
+        const { signalRing, powerRing } = getPanelIndicators(cell);
+        drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing, mirrorX: isFlippedView });
+
+        const cx = r.x + r.w / 2;
+        ctx.fillStyle = "#020617";
+        ctx.textAlign = "center";
+        ctx.font = `bold ${Math.max(12, Math.floor(r.h * 0.085))}px Arial`;
+        ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`, cx, r.y + r.h * 0.28);
+        if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, r.y + r.h * 0.5);
+        if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, r.y + r.h * 0.72);
+        const variantSymbol = getPanelSymbol(cell);
+        if (variantSymbol) {
+          ctx.font = `bold ${Math.max(14, Math.floor(r.h * 0.12))}px Arial`;
+          ctx.fillText(variantSymbol, cx, r.y + r.h - 8);
+        }
       });
+
+      // Cable routes (same orthogonal routing as the layout view + PDF).
+      drawCanvasCableRoutes(ctx, dispRectPx);
 
       const link = document.createElement("a");
       link.href = canvas.toDataURL("image/png");
-      link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-${cols}x${rows}-front-test-pattern.png`);
+      link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-${isFlippedView ? "front" : "back"}-test-pattern.png`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -3517,8 +3551,20 @@ const exportJson = () => {
                       if (idx === 0) return null;
                       const a = rectToPx(displayRectOf(stat.path[idx - 1]));
                       const b = rectToPx(displayRectOf(cell));
-                      const { x1, y1, x2, y2 } = getLineEndpointsPx(a, b, -4);
-                      return <line key={`sig-${portId}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={color} style={{ color }} strokeWidth="4" markerEnd="url(#arrow)" />;
+                      const pts = routeCablePx(a, b, -4);
+                      return (
+                        <polyline
+                          key={`sig-${portId}-${idx}`}
+                          points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+                          fill="none"
+                          stroke={color}
+                          style={{ color }}
+                          strokeWidth="4"
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                          markerEnd="url(#arrow)"
+                        />
+                      );
                     });
                   })}
 
@@ -3530,8 +3576,20 @@ const exportJson = () => {
                       if (idx === 0) return null;
                       const a = rectToPx(displayRectOf(path[idx - 1]));
                       const b = rectToPx(displayRectOf(cell));
-                      const { x1, y1, x2, y2 } = getLineEndpointsPx(a, b, 4);
-                      return <line key={`pow-${port.id}-${idx}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={POWER_COLOR} style={{ color: POWER_COLOR }} strokeWidth="4" markerEnd="url(#arrow)" />;
+                      const pts = routeCablePx(a, b, 4);
+                      return (
+                        <polyline
+                          key={`pow-${port.id}-${idx}`}
+                          points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+                          fill="none"
+                          stroke={POWER_COLOR}
+                          style={{ color: POWER_COLOR }}
+                          strokeWidth="4"
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                          markerEnd="url(#arrow)"
+                        />
+                      );
                     });
                   })}
                 </svg>
