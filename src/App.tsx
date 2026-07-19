@@ -979,13 +979,45 @@ function HelpModal({ onClose }: { onClose: () => void }) {
           </div>
           <div className="space-y-2">
             <div className="font-semibold text-sky-200">Shortcuts</div>
-            <div><b>Ctrl+Z</b>: Undo</div>
-            <div><b>Ctrl+Y</b> or <b>Ctrl+Shift+Z</b>: Redo</div>
-            <div><b>Delete</b>: Delete selected panels</div>
+            <div><b>S</b>: Select mode</div>
+            <div><b>M</b>: Move mode</div>
+            <div><b>P</b>: Patch mode</div>
             <div><b>R</b>: Rotate selected panels</div>
             <div><b>C</b>: Clear selected panel patching</div>
+            <div><b>Delete</b>: Delete selected panels (Remove / Mark Inactive)</div>
+            <div><b>Ctrl+Z</b>: Undo</div>
+            <div><b>Ctrl+Y</b> or <b>Ctrl+Shift+Z</b>: Redo</div>
             <div><b>Escape</b>: Clear selection or leave the current mode</div>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DeleteConfirmModal({
+  count,
+  onRemove,
+  onMarkInactive,
+  onCancel,
+}: {
+  count: number;
+  onRemove: () => void;
+  onMarkInactive: () => void;
+  onCancel: () => void;
+}) {
+  const label = count === 1 ? "this panel" : `these ${count} panels`;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onCancel}>
+      <div className="max-w-md rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="mb-2 text-lg font-bold">Delete {label}?</div>
+        <div className="mb-4 text-sm text-slate-300">
+          Choose how to handle {label}. Inactive panels stay in position but are excluded from totals, patching and exported outputs.
+        </div>
+        <div className="flex flex-col gap-2">
+          <Button intent="danger" onClick={onRemove}>Remove Panel{count === 1 ? "" : "s"}</Button>
+          <Button intent="secondary" onClick={onMarkInactive}>Mark as Inactive</Button>
+          <Button intent="ghost" onClick={onCancel}>Cancel</Button>
         </div>
       </div>
     </div>
@@ -1131,6 +1163,7 @@ export default function App() {
   const [undoStack, setUndoStack] = useState<LayoutSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<LayoutSnapshot[]>([]);
   const [showHelp, setShowHelp] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
@@ -1809,21 +1842,55 @@ export default function App() {
   // Draw every signal + power cable route onto a canvas using the shared
   // orthogonal router, so the layout view, PDF and PNG all match. dispRectPx
   // maps a panel to its px rect in that canvas's coordinate space.
-  const drawCanvasCableRoutes = (ctx: CanvasRenderingContext2D, dispRectPx: (cell: Cell) => RectMm) => {
+  // Cable LINES only, with a thin black outline (drawn under the colour). Meant
+  // to be painted BEHIND the panels.
+  const drawCanvasCableLines = (ctx: CanvasRenderingContext2D, dispRectPx: (cell: Cell) => RectMm) => {
     const drawPath = (path: Cell[] | undefined, color: string, offset: number) => {
       if (!path || path.length < 2) return;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 4;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
       for (let idx = 1; idx < path.length; idx += 1) {
         const pts = routeCablePx(dispRectPx(path[idx - 1]), dispRectPx(path[idx]), offset);
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let k = 1; k < pts.length; k += 1) ctx.lineTo(pts[k].x, pts[k].y);
+        const trace = () => {
+          ctx.beginPath();
+          ctx.moveTo(pts[0].x, pts[0].y);
+          for (let k = 1; k < pts.length; k += 1) ctx.lineTo(pts[k].x, pts[k].y);
+        };
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 6;
+        trace();
         ctx.stroke();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 4;
+        trace();
+        ctx.stroke();
+      }
+    };
+    Object.entries(signalPortStats).forEach(([portId, stat]) => {
+      drawPath(stat.path, PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length], -4);
+    });
+    powerPorts.forEach((port) => {
+      drawPath(powerPortStats[port.id]?.path, POWER_COLOR, 4);
+    });
+  };
+
+  // Cable ARROWHEADS only (black-outlined), painted IN FRONT of the panels so the
+  // signal/power direction stays visible.
+  const drawCanvasCableArrows = (ctx: CanvasRenderingContext2D, dispRectPx: (cell: Cell) => RectMm) => {
+    const drawPath = (path: Cell[] | undefined, color: string, offset: number) => {
+      if (!path || path.length < 2) return;
+      for (let idx = 1; idx < path.length; idx += 1) {
+        const ra = dispRectPx(path[idx - 1]);
+        const rb = dispRectPx(path[idx]);
+        const pts = routeCablePx(ra, rb, offset);
         const last = pts[pts.length - 1];
-        const prev = pts[pts.length - 2];
+        let prev = pts[pts.length - 2];
+        // Touching panels collapse the last segment to a point; fall back to the
+        // source->destination centre direction so the arrow still points the
+        // right way (up/down/left/right).
+        if (Math.hypot(last.x - prev.x, last.y - prev.y) < 1) {
+          prev = { x: last.x - ((rb.x + rb.w / 2) - (ra.x + ra.w / 2)), y: last.y - ((rb.y + rb.h / 2) - (ra.y + ra.h / 2)) };
+        }
         drawCanvasArrowHead(ctx, prev.x, prev.y, last.x, last.y, color);
       }
     };
@@ -1889,18 +1956,19 @@ export default function App() {
       if (m % 1 === 0) ctx.fillText(`${m}m`, -16, y + 4);
     }
 
+    // Cable lines first so they sit behind the panels.
+    drawCanvasCableLines(ctx, dispRectPx);
+
     grid.forEach((cell) => {
-      if (!isPanelHead(cell)) return;
+      if (!isPanelHead(cell) || cell.isRemoved) return;
       const r = dispRectPx(cell);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
       const { signalRing, powerRing } = getPanelIndicators(cell);
       drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalRing, powerRing, mirrorX: flipped });
     });
 
-    drawCanvasCableRoutes(ctx, dispRectPx);
-
     grid.forEach((cell) => {
-      if (!isPanelHead(cell)) return;
+      if (!isPanelHead(cell) || cell.isRemoved) return;
       const r = dispRectPx(cell);
       const cx = r.x + r.w / 2;
       ctx.fillStyle = "#020617";
@@ -1912,6 +1980,9 @@ export default function App() {
       const variantSymbol = getPanelSymbol(cell);
       if (variantSymbol) ctx.fillText(variantSymbol, cx, r.y + r.h - 6);
     });
+
+    // Arrowheads last so the signal/power direction stays visible in front.
+    drawCanvasCableArrows(ctx, dispRectPx);
 
     ctx.restore();
     return canvas;
@@ -1991,19 +2062,21 @@ const exportJson = () => {
       ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, W, H);
 
-      // Match the current Panel Layout view exactly (same coordinates and same
-      // front/back mirroring) so the PNG lines up with what's on screen.
+      // The PNG ALWAYS renders the front view (what an observer sees standing in
+      // front of the finished wall): the whole wall is mirrored horizontally
+      // (mirrorRectX for position) and each panel shape is mirrored with it
+      // (mirrorX below), independent of the on-screen Front/Back toggle.
       const dispRectPx = (cell: Cell): RectMm => {
-        const d = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
+        const d = mirrorRectX(cellRect(cell), wallBBox);
         return { x: (d.x - wallBBox.x) * pxPerMm, y: (d.y - wallBBox.y) * pxPerMm, w: d.w * pxPerMm, h: d.h * pxPerMm };
       };
 
       grid.forEach((cell) => {
-        if (!isPanelHead(cell)) return;
+        if (!isPanelHead(cell) || cell.isRemoved) return;
         const r = dispRectPx(cell);
         const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
         const { signalRing, powerRing } = getPanelIndicators(cell);
-        drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing, mirrorX: isFlippedView });
+        drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing, mirrorX: true });
 
         const cx = r.x + r.w / 2;
         ctx.fillStyle = "#020617";
@@ -2019,12 +2092,12 @@ const exportJson = () => {
         }
       });
 
-      // Cable routes (same orthogonal routing as the layout view + PDF).
-      drawCanvasCableRoutes(ctx, dispRectPx);
+      // No signal/power cable-routing lines or arrowheads in the PNG: it is a
+      // clean front-view pixel map of the wall for the observer / processor.
 
       const link = document.createElement("a");
       link.href = canvas.toDataURL("image/png");
-      link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-${isFlippedView ? "front" : "back"}-test-pattern.png`);
+      link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-front-test-pattern.png`);
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -2105,9 +2178,31 @@ const exportJson = () => {
   const applyImport = (result: ImportResult, mode: "replace" | "new") => {
     // Both modes replace the on-screen project; "new" also resets the name to
     // the imported one. The original source file is never modified.
+    //
+    // The Creative Layout Tool designs what the audience sees (the FRONT of the
+    // wall). This app's stored layout is the back/working (wiring) view and the
+    // Front View toggle mirrors it horizontally. So we store the horizontal
+    // mirror of the imported design and switch on Front View: the Front View
+    // then reproduces the original Creative layout exactly (positions, shapes
+    // and rotations), while the back view shows the correct wiring mirror.
+    const IMPORT_W = 500; // MG9-family footprint (mm); the only types imported.
+    let minX = Infinity;
+    let maxX = -Infinity;
+    result.panels.forEach((p) => {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x + IMPORT_W);
+    });
+    // Rotation under a horizontal mirror, per shape, so the mirrored (front)
+    // render matches the source orientation. Squares are symmetric.
+    const mirrorRotation = (variant: string, rotation: number) => {
+      const r = ((Math.round(rotation) % 360) + 360) % 360;
+      if (variant === "TRIANGLE") return (270 - r + 360) % 360;
+      if (variant === "CURVED") return (90 - r + 360) % 360;
+      return r;
+    };
     const panels: Cell[] = result.panels.map((p) => ({
       id: newCellId(),
-      x: p.x,
+      x: minX + maxX - (p.x + IMPORT_W),
       y: p.y,
       assignedPort: null,
       sequence: null,
@@ -2116,7 +2211,7 @@ const exportJson = () => {
       powerManual: false,
       isRemoved: false,
       panelVariant: p.panelVariant,
-      rotation: p.rotation,
+      rotation: mirrorRotation(p.panelVariant, p.rotation),
       panelType: p.panelType,
     }));
     setProjectName(mode === "new" ? result.projectName : result.projectName || projectName);
@@ -2128,6 +2223,7 @@ const exportJson = () => {
     setRedoStack([]);
     setEditMode("patch");
     setPatchMode("signal");
+    setIsFlippedView(true);
     setOverlapNotice(null);
     setImportPreview(null);
   };
@@ -2921,7 +3017,27 @@ const exportJson = () => {
     });
   };
 
+  // Delete now prompts (Remove / Mark Inactive / Cancel); the button and the
+  // Delete key just open the confirmation.
   const deleteSelectedPanel = () => {
+    const keys = getSelectedIds(selectedCells, selectedId);
+    if (!keys.size) return;
+    setShowDeleteConfirm(true);
+  };
+
+  // Permanently remove the selected panels from the layout.
+  const removeSelectedPanels = () => {
+    const keys = getSelectedIds(selectedCells, selectedId);
+    if (!keys.size) return;
+    commitGridUpdate((prev) => cloneGrid(prev).filter((cell) => !keys.has(cell.id)));
+    setSelectedId(null);
+    setSelectedCells(new Set());
+    setShowDeleteConfirm(false);
+  };
+
+  // Keep the selected panels in place but mark them inactive (excluded from
+  // totals, patching and outputs).
+  const markSelectedInactive = () => {
     const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
@@ -2938,6 +3054,7 @@ const exportJson = () => {
       });
       return next;
     });
+    setShowDeleteConfirm(false);
   };
 
   const restoreSelectedPanel = () => {
@@ -3033,9 +3150,75 @@ const exportJson = () => {
     return Number.isInteger(col) ? String(col) : col.toFixed(1);
   };
 
+  // Cable hops (one per adjacent panel pair) in display pixels, shared by the
+  // behind-panels line layer and the in-front arrowhead layer so both stay in
+  // sync. Signal hops are offset -4px, power hops +4px so the two runs separate.
+  type CableHop = { key: string; pts: Array<{ x: number; y: number }>; color: string; dir: { x: number; y: number } };
+  const cableHops: CableHop[] = [];
+  const centerOf = (r: RectMm) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+  Object.entries(signalPortStats).forEach(([portId, stat]) => {
+    if (!stat.path || stat.path.length < 2) return;
+    const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
+    stat.path.forEach((cell, idx) => {
+      if (idx === 0) return;
+      const a = rectToPx(displayRectOf(stat.path[idx - 1]));
+      const b = rectToPx(displayRectOf(cell));
+      const ca = centerOf(a);
+      const cb = centerOf(b);
+      cableHops.push({ key: `sig-${portId}-${idx}`, pts: routeCablePx(a, b, -4), color, dir: { x: cb.x - ca.x, y: cb.y - ca.y } });
+    });
+  });
+  powerPorts.forEach((port) => {
+    const stat = powerPortStats[port.id];
+    const path = stat?.path ?? [];
+    if (path.length < 2) return;
+    path.forEach((cell, idx) => {
+      if (idx === 0) return;
+      const a = rectToPx(displayRectOf(path[idx - 1]));
+      const b = rectToPx(displayRectOf(cell));
+      const ca = centerOf(a);
+      const cb = centerOf(b);
+      cableHops.push({ key: `pow-${port.id}-${idx}`, pts: routeCablePx(a, b, 4), color: POWER_COLOR, dir: { x: cb.x - ca.x, y: cb.y - ca.y } });
+    });
+  });
+  // Arrowhead polygon at the destination end of a hop, pointing along the last
+  // route segment. When adjacent panels touch, that segment collapses to a point,
+  // so fall back to the source->destination centre direction (e.g. a panel wired
+  // to the one above it points the arrow upward).
+  const cableArrowHead = (hop: CableHop, size = 9) => {
+    const pts = hop.pts;
+    const p2 = pts[pts.length - 1];
+    const p1 = pts[pts.length - 2];
+    const segDx = p2.x - p1.x;
+    const segDy = p2.y - p1.y;
+    const ang = Math.hypot(segDx, segDy) < 1 ? Math.atan2(hop.dir.y, hop.dir.x) : Math.atan2(segDy, segDx);
+    const x1 = p2.x - size * Math.cos(ang - Math.PI / 6);
+    const y1 = p2.y - size * Math.sin(ang - Math.PI / 6);
+    const x2 = p2.x - size * Math.cos(ang + Math.PI / 6);
+    const y2 = p2.y - size * Math.sin(ang + Math.PI / 6);
+    return (
+      <polygon
+        key={`ah-${hop.key}`}
+        points={`${p2.x},${p2.y} ${x1},${y1} ${x2},${y2}`}
+        fill={hop.color}
+        stroke="black"
+        strokeWidth={1}
+        strokeLinejoin="round"
+      />
+    );
+  };
+
   return (
     <div className="min-h-screen bg-[#0f172a] p-6 text-white print-container">
       {showHelp ? <HelpModal onClose={() => setShowHelp(false)} /> : null}
+      {showDeleteConfirm ? (
+        <DeleteConfirmModal
+          count={selectedCount}
+          onRemove={removeSelectedPanels}
+          onMarkInactive={markSelectedInactive}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
+      ) : null}
       {importPreview ? (
         <ImportPreviewModal
           result={importPreview}
@@ -3579,59 +3762,33 @@ const exportJson = () => {
                   ))}
                 </svg>
 
-                <svg className="absolute inset-0 z-20 pointer-events-none" width={svgW} height={svgH}>
-                  <defs>
-                    <marker id="arrow" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto" markerUnits="strokeWidth">
-                      <polygon points="0 0, 4 2, 0 4" fill="context-stroke" stroke="black" strokeWidth="0.4" />
-                    </marker>
-                  </defs>
-                  {Object.entries(signalPortStats).map(([portId, stat]) => {
-                    if (!stat.path || stat.path.length < 2) return null;
-                    const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
-                    return stat.path.map((cell, idx) => {
-                      if (idx === 0) return null;
-                      const a = rectToPx(displayRectOf(stat.path[idx - 1]));
-                      const b = rectToPx(displayRectOf(cell));
-                      const pts = routeCablePx(a, b, -4);
-                      return (
+                {/* Cable LINES sit behind the panels (z-[1], panels are z-10+) so they
+                    never obscure panel labels. Each line is drawn twice: a wider black
+                    stroke underneath for a thin outline, then the coloured stroke on top.
+                    Arrowheads are drawn separately in front of the panels (below). */}
+                <svg className="absolute inset-0 z-[1] pointer-events-none" width={svgW} height={svgH}>
+                  {cableHops.map((hop) => {
+                    const pointStr = hop.pts.map((p) => `${p.x},${p.y}`).join(" ");
+                    return (
+                      <g key={`line-${hop.key}`}>
                         <polyline
-                          key={`sig-${portId}-${idx}`}
-                          points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+                          points={pointStr}
                           fill="none"
-                          stroke={color}
-                          style={{ color }}
+                          stroke="black"
+                          strokeWidth="6"
+                          strokeLinejoin="round"
+                          strokeLinecap="round"
+                        />
+                        <polyline
+                          points={pointStr}
+                          fill="none"
+                          stroke={hop.color}
                           strokeWidth="4"
                           strokeLinejoin="round"
                           strokeLinecap="round"
-                          markerEnd="url(#arrow)"
                         />
-                      );
-                    });
-                  })}
-
-                  {powerPorts.map((port) => {
-                    const stat = powerPortStats[port.id];
-                    const path = stat?.path ?? [];
-                    if (path.length < 2) return null;
-                    return path.map((cell, idx) => {
-                      if (idx === 0) return null;
-                      const a = rectToPx(displayRectOf(path[idx - 1]));
-                      const b = rectToPx(displayRectOf(cell));
-                      const pts = routeCablePx(a, b, 4);
-                      return (
-                        <polyline
-                          key={`pow-${port.id}-${idx}`}
-                          points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
-                          fill="none"
-                          stroke={POWER_COLOR}
-                          style={{ color: POWER_COLOR }}
-                          strokeWidth="4"
-                          strokeLinejoin="round"
-                          strokeLinecap="round"
-                          markerEnd="url(#arrow)"
-                        />
-                      );
-                    });
+                      </g>
+                    );
                   })}
                 </svg>
 
@@ -3673,7 +3830,7 @@ const exportJson = () => {
                         top: rect.y,
                         width: rect.w,
                         height: rect.h,
-                        zIndex: isMoving ? 30 : 10,
+                        zIndex: isMoving ? 30 : isSelected ? 25 : 10,
                         opacity: isMoving ? 0.85 : 1,
                         background: "transparent",
                         border: `2px ${isRemoved ? "dashed" : "solid"} ${isMoving ? "#fbbf24" : isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
@@ -3746,6 +3903,12 @@ const exportJson = () => {
                     </div>
                   );
                 })}
+
+                {/* Cable ARROWHEADS sit in front of the panels (z-[35]) so the signal /
+                    power direction stays visible even over a selected panel. */}
+                <svg className="pointer-events-none absolute inset-0 z-[35]" width={svgW} height={svgH}>
+                  {cableHops.map((hop) => cableArrowHead(hop))}
+                </svg>
 
                 {/* Live snap/join guide: ghost of the snapped landing position + join edges. */}
                 {snapGuide ? (
