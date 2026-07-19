@@ -1,18 +1,54 @@
 # LED Cabling Web App
 
-Version `0.15.0`
+Version `0.16.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
 
 ## What It Does
 
-- Build LED walls by rows and columns
-- Switch between `MG9` and `MT` panel profiles
-- Patch signal and power manually or with auto-snake routing
+- Build LED walls by rows and columns, or place panels freely (non-uniform layouts) with drag, edge-snap and joining
+- Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
+- Import projects from the Creative Layout Tool
+- Patch signal and power manually or with auto-snake / automatic letter-patching routing
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages plus both layout views in landscape
-- Save and reopen settings as JSON
+- Export a native-resolution PNG test pattern
+- Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.16.0
+
+Non-uniform layout overhaul (Stages 2-4) plus a round of fixes and new editing features, delivered as staged local commits:
+
+**Free panel placement + import**
+- Panels are no longer a fixed grid: place, drag, rotate, snap, join and multi-select panels freely, with overlap warnings and a live snap/join guide
+- Import projects from the Creative Layout Tool, with a preview (name, panel mix, wall size) before replacing or adding as a new project
+- Imported projects are interpreted and displayed as **Front View**, matching the original Creative Layout Tool design exactly (position, shape and rotation), instead of the app's default back/wiring view
+- New save format v2 (free mm-positioned panel list); legacy grid-format settings files still open and migrate automatically
+- Automatic letter-shaped patching (bottom-up, fork-aware) for text/logo-shaped layouts
+
+**Editing and safety**
+- Deleting panels now prompts with **Remove Panel**, **Mark as Inactive**, or **Cancel** — inactive panels stay visible (dashed) in place but are excluded from totals, patching and exports
+- Keyboard shortcuts `S` (Select), `M` (Move), `P` (Patch) documented in Help, alongside the existing shortcuts
+
+**Signal/power cable rendering**
+- Cable lines now draw behind panels with a thin black outline; arrowheads draw in front, also black-outlined, and always point in the true signal/power direction (including when adjacent panels touch edge-to-edge)
+- A selected panel is brought to the front, above cable lines, so its info stays readable
+- Orthogonal (90°) cable routing everywhere: on-screen, PDF and PNG test pattern
+- Snap/join logic ported from the Creative Layout Tool (connector-anchor based, shape/rotation aware)
+- Signal/power chain-start indicator outlines now follow the true panel shape (triangle/curve/rect) at any rotation
+
+**PNG test pattern export**
+- Always renders Front View regardless of the on-screen toggle, matching what an observer sees standing in front of the finished wall
+- No longer includes cable-routing lines or arrowheads
+- Fixed panel alignment (true mm positions, no band-packing offset) and rotation accuracy
+- Excludes inactive panels
+
+**UI**
+- New design-system `Button` component with clear active/selected states across all toolbar controls
+- Panel Type control moved above Apply Grid Size; added Clear All Panels
+- Renamed the import button to "Import Project from Creative Layout Tool"
+- Dashed, wall-aligned background grid (1m major / 0.5m minor lines)
 
 ## Recent Changes In v0.15.0
 

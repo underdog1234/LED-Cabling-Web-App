@@ -31,7 +31,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.15.0";
+const APP_VERSION = "0.16.0";
 
 const PANEL_TYPES = {
   MG9: {
