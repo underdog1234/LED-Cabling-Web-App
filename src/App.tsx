@@ -32,7 +32,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.19.1";
+const APP_VERSION = "0.19.2";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -829,11 +829,13 @@ const routeCablePx = (a: RectMm, b: RectMm, offset = 0): Array<{ x: number; y: n
 
 // Trace a panel's true outline (triangle / quarter-circle / rectangle) in the
 // local 0..w,0..h space, so fills, strokes, indicator rings and any other
-// consumer (e.g. the animated test pattern) all share one implementation.
-// `testPattern` selects the curve's control-point order used by the PNG/video
-// test-pattern renderers (kept distinct from the on-screen curve for legacy
-// visual reasons - both are geometrically the same quarter-circle).
-export const tracePanelShapePath = (ctx: CanvasRenderingContext2D, w: number, h: number, shape: PanelShape, testPattern = false) => {
+// consumer (on-screen, PDF, PNG, animated test pattern) all share ONE
+// implementation and therefore agree on where a panel's rotation actually
+// puts its cut corner. (The PNG exporter used to trace a curve with its
+// right-angle corner at the opposite corner from every other renderer via a
+// since-removed `testPattern` path variant - that was the source of curved
+// panels appearing incorrectly rotated in the PNG relative to the PDF.)
+export const tracePanelShapePath = (ctx: CanvasRenderingContext2D, w: number, h: number, shape: PanelShape) => {
   ctx.beginPath();
   if (shape === "triangle") {
     ctx.moveTo(0, 0);
@@ -841,16 +843,10 @@ export const tracePanelShapePath = (ctx: CanvasRenderingContext2D, w: number, h:
     ctx.lineTo(0, h);
     ctx.closePath();
   } else if (shape === "curve") {
-    if (testPattern) {
-      ctx.moveTo(0, 0);
-      ctx.lineTo(w, 0);
-      ctx.quadraticCurveTo(w, h, 0, h);
-    } else {
-      ctx.moveTo(w, 0);
-      ctx.lineTo(w, h);
-      ctx.lineTo(0, h);
-      ctx.quadraticCurveTo(0, 0, w, 0);
-    }
+    ctx.moveTo(w, 0);
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.quadraticCurveTo(0, 0, w, 0);
     ctx.closePath();
   } else {
     ctx.rect(0, 0, w, h);
@@ -877,11 +873,10 @@ const drawPanelShape = (
   fill: string,
   stroke: string,
   lineWidth = 2,
-  options: { hatchStep?: number; curveStyle?: "test-pattern"; signalRing?: boolean; powerRing?: boolean; mirrorX?: boolean } = {},
+  options: { hatchStep?: number; signalRing?: boolean; powerRing?: boolean; mirrorX?: boolean } = {},
 ) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
-  const testPattern = options.curveStyle === "test-pattern";
-  const traceShape = () => tracePanelShapePath(ctx, w, h, variant.shape, testPattern);
+  const traceShape = () => tracePanelShapePath(ctx, w, h, variant.shape);
   const applyFrame = () => applyPanelFrame(ctx, x, y, w, h, cell.rotation ?? 0, options.mirrorX);
 
   ctx.save();
@@ -2099,16 +2094,15 @@ const exportJson = () => {
         const r = dispRectPx(cell);
         const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
         const { signalRing, powerRing } = getPanelIndicators(cell);
-        drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#ffffff", 1, { hatchStep: 24, curveStyle: "test-pattern", signalRing, powerRing, mirrorX: true });
+        drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#ffffff", 1, { hatchStep: 24, signalRing, powerRing, mirrorX: true });
 
         const cx = r.x + r.w / 2;
         ctx.fillStyle = "#020617";
         ctx.textAlign = "center";
         ctx.font = `bold ${Math.max(12, Math.floor(r.h * 0.085))}px Arial`;
-        ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`, cx, r.y + r.h * 0.28);
-        if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, r.y + r.h * 0.5);
-        if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, r.y + r.h * 0.72);
-        const variantSymbol = getPanelSymbol(cell);
+        ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`, cx, r.y + r.h * 0.4);
+        // Shape symbol only (△/◜/Corner) - no rotate icon, no signal/power port info.
+        const variantSymbol = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].symbol;
         if (variantSymbol) {
           ctx.font = `bold ${Math.max(14, Math.floor(r.h * 0.12))}px Arial`;
           ctx.fillText(variantSymbol, cx, r.y + r.h - 8);
@@ -3356,7 +3350,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0191"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0192"
                 target="_blank"
                 rel="noreferrer"
               >
