@@ -32,7 +32,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.18.0";
+const APP_VERSION = "0.19.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -272,6 +272,7 @@ type LegacyGridCell = {
 type OpenJsonPayload = {
   formatVersion?: number;
   projectName?: string;
+  surfaceName?: string;
   panelType?: PanelTypeKey;
   powerDistro?: PowerDistroKey;
   backupSignalLoop?: boolean;
@@ -1133,6 +1134,7 @@ export default function App() {
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
 
   const [projectName, setProjectName] = useState("Untitled Project");
+  const [surfaceName, setSurfaceName] = useState("");
   const [panelType, setPanelType] = useState<PanelTypeKey>("MG9");
   const [includeFlyBar, setIncludeFlyBar] = useState(false);
   const [includeSling, setIncludeSling] = useState(false);
@@ -2015,6 +2017,7 @@ const exportJson = () => {
       formatVersion: 2,
       appVersion: APP_VERSION,
       projectName: safeProjectName,
+      surfaceName,
       panelType,
       powerDistro,
       backupSignalLoop,
@@ -2133,7 +2136,7 @@ const exportJson = () => {
   // renders TestPatternView - just the LED canvas, no page chrome.
   const openVideoTestPatternTab = () => {
     try {
-      const payload = { formatVersion: 1, projectName: safeProjectName, panelType, panels: grid };
+      const payload = { formatVersion: 1, projectName: safeProjectName, surfaceName, panelType, panels: grid };
       localStorage.setItem("ledCablingTestPattern:v1", JSON.stringify(payload));
       window.open(`${location.pathname}?testpattern=1`, "_blank");
     } catch (err) {
@@ -2164,7 +2167,7 @@ const exportJson = () => {
       alert("This browser can't record video (no WebM/MediaRecorder support). Try Chrome, Edge or Firefox.");
       return;
     }
-    const project: TestPatternProject = { projectName: safeProjectName, panelType, panels: grid };
+    const project: TestPatternProject = { projectName: safeProjectName, surfaceName, panelType, panels: grid };
     const layout = computeTestPatternLayout(project);
     if (layout.W <= 0 || layout.H <= 0) {
       alert("No active panels to render a test pattern from.");
@@ -2240,6 +2243,7 @@ const exportJson = () => {
         }
 
         if (data.projectName) setProjectName(data.projectName);
+        setSurfaceName(data.surfaceName ?? "");
         if (data.panelType && PANEL_TYPES[data.panelType]) setPanelType(data.panelType);
         if (data.powerDistro && POWER_DISTROS[data.powerDistro]) setPowerDistro(data.powerDistro);
         setBackupSignalLoop(data.backupSignalLoop ?? true);
@@ -3352,7 +3356,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0180"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0190"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -3405,6 +3409,10 @@ const exportJson = () => {
                 <div className="space-y-1 md:col-span-2">
                   <label className="text-xs text-slate-300">Project Name</label>
                   <Input className="bg-white text-black" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Enter project name" />
+                </div>
+                <div className="space-y-1 md:col-span-2">
+                  <label className="text-xs text-slate-300">LED Surface / Sub-Screen Name</label>
+                  <Input className="bg-white text-black" type="text" value={surfaceName} onChange={(e) => setSurfaceName(e.target.value)} placeholder="e.g. Main Screen, IMAG Left (optional)" />
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs text-slate-300">Columns</label>

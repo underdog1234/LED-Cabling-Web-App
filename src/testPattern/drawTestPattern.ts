@@ -20,7 +20,6 @@ import {
   PANEL_TYPES,
   PANEL_VARIANTS,
   cellRect,
-  cellPanelType,
   mirrorRectX,
   isPanelHead,
   applyPanelFrame,
@@ -30,6 +29,8 @@ import { activeBBox, bandPanels, MODULE_MM, type RectMm } from "../model/panels"
 
 export type TestPatternProject = {
   projectName: string;
+  /** Name of this LED surface/sub-screen, if the project defines one. */
+  surfaceName?: string;
   panelType: PanelTypeKey;
   panels: Cell[];
 };
@@ -46,8 +47,22 @@ export type TestPatternLayout = {
   wallWidthM: number;
   wallHeightM: number;
   projectName: string;
+  surfaceName: string;
   rowLabel: (cell: Cell) => number;
   colLabel: (cell: Cell) => string;
+};
+
+// Pixel rect in canvas/output space (post front-view mirror). Snap both edges
+// to the integer pixel grid - not just the width/height - so adjacent panels'
+// rounded edges stay consistent with each other (no accumulating gaps) and a
+// 1px stroke along that edge lands crisply on one pixel row/column instead of
+// straddling two.
+const snapRectPx = (r: RectMm): RectMm => {
+  const x0 = Math.round(r.x);
+  const y0 = Math.round(r.y);
+  const x1 = Math.round(r.x + r.w);
+  const y1 = Math.round(r.y + r.h);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
 };
 
 // One full loop of the animation, in seconds. Both the RGB slide and the
@@ -163,7 +178,8 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     activeRowsCount: panelBands.length,
     wallWidthM: wallBBox.w / 1000,
     wallHeightM: wallBBox.h / 1000,
-    projectName: project.projectName,
+    projectName: (project.projectName || "").trim(),
+    surfaceName: (project.surfaceName || "").trim(),
     rowLabel: (cell) => (bandIndexById.get(cell.id) ?? 0) + 1,
     colLabel: (cell) => {
       const col = (cellRect(cell).x - wallBBox.x) / MODULE_MM + 1;
@@ -184,35 +200,147 @@ const dispRectPx = (layout: TestPatternLayout, cell: Cell): RectMm => {
   };
 };
 
-// Wall info text: centred in the middle of the wall, no background box. Each
-// line is stroked in dark then filled in white so it stays readable over
-// whatever colour/brightness happens to be underneath.
+// Wall info text: centred in the middle of the wall, plain white, no
+// background box and no outline - just the project name and/or LED surface
+// name (only when defined) plus the wall stats.
 const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
   const { W, H } = layout;
   const fontPx = Math.max(14, Math.min(30, Math.round(W * 0.014)));
   const lineH = Math.round(fontPx * 1.4);
-  const lines = [
+  const lines: string[] = [];
+  if (layout.projectName) lines.push(layout.projectName);
+  if (layout.surfaceName) lines.push(layout.surfaceName);
+  lines.push(
     `Resolution: ${layout.W} x ${layout.H} px`,
     `Physical Size: ${layout.wallWidthM.toFixed(1)} x ${layout.wallHeightM.toFixed(1)} m`,
     `Panels: ${layout.totalPanels}`,
     `Grid: ${layout.activeColsCount} columns x ${layout.activeRowsCount} rows`,
-  ];
+  );
   const cx = W / 2;
   const startY = H / 2 - (lineH * (lines.length - 1)) / 2;
   ctx.save();
   ctx.font = `bold ${fontPx}px Arial`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.lineJoin = "round";
-  ctx.lineWidth = Math.max(2, Math.round(fontPx * 0.14));
-  ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
   ctx.fillStyle = "#ffffff";
-  lines.forEach((line, i) => {
-    const y = startY + i * lineH;
-    ctx.strokeText(line, cx, y);
-    ctx.fillText(line, cx, y);
-  });
+  lines.forEach((line, i) => ctx.fillText(line, cx, startY + i * lineH));
   ctx.restore();
+};
+
+// Double 1px white outline around the TRUE outer extremity of the whole
+// assembled LED surface (not per-panel): render every active panel's true
+// (rotated/mirrored) shape as a solid fill into one silhouette - adjacent/
+// touching panels naturally fuse into a single region with no internal seam
+// lines - then peel off two 1px rings INSET from that silhouette's own edge
+// (erosion, not dilation: growing the rings OUTWARD would put them past the
+// wall's own bounding canvas - since the wall's bbox has zero margin by
+// definition, an outward ring is entirely clipped off-canvas and invisible
+// for the common rectangular-wall case). Erosion is implemented as
+// invert -> dilate -> invert (dilation = stamping 8 one-pixel-offset copies,
+// a standard binary-mask dilate). Cached per layout (keyed by object
+// identity) since the wall's geometry doesn't change frame to frame.
+const outerOutlineCache = new WeakMap<TestPatternLayout, HTMLCanvasElement>();
+const DILATE_OFFSETS: Array<[number, number]> = [
+  [-1, -1], [0, -1], [1, -1],
+  [-1, 0], [1, 0],
+  [-1, 1], [0, 1], [1, 1],
+];
+
+// Erosion here is implemented as invert -> dilate -> invert, which only
+// works if there's real "background" around the shape for the inverted
+// region to dilate into. The wall's silhouette always touches its own
+// canvas on every side by definition (the canvas IS the wall's tight
+// bounding box), so with no margin the inverted region is empty right at
+// the edges and erosion silently no-ops there - the outline would be
+// invisible on every straight wall. Working in a padded canvas (the
+// silhouette drawn inset by PAD on all sides) gives the algorithm real
+// background to erode from; the result is cropped back to the true W x H
+// canvas at the end by drawing it at a -PAD offset.
+const OUTLINE_PAD = 6;
+
+const buildOuterExtremityOutline = (layout: TestPatternLayout): HTMLCanvasElement => {
+  const cached = outerOutlineCache.get(layout);
+  if (cached) return cached;
+
+  const { W, H } = layout;
+  const PW = W + OUTLINE_PAD * 2;
+  const PH = H + OUTLINE_PAD * 2;
+  const makeCanvas = () => {
+    const c = document.createElement("canvas");
+    c.width = PW;
+    c.height = PH;
+    return c;
+  };
+  const dilateInto = (dstCtx: CanvasRenderingContext2D, src: HTMLCanvasElement) => {
+    dstCtx.clearRect(0, 0, PW, PH);
+    dstCtx.drawImage(src, 0, 0);
+    DILATE_OFFSETS.forEach(([dx, dy]) => dstCtx.drawImage(src, dx, dy));
+  };
+  const subtractInto = (dstCtx: CanvasRenderingContext2D, minuend: HTMLCanvasElement, subtrahend: HTMLCanvasElement) => {
+    dstCtx.clearRect(0, 0, PW, PH);
+    dstCtx.drawImage(minuend, 0, 0);
+    dstCtx.globalCompositeOperation = "destination-out";
+    dstCtx.drawImage(subtrahend, 0, 0);
+    dstCtx.globalCompositeOperation = "source-over";
+  };
+
+  // Silhouette: union of every active panel's true shape, solid white,
+  // offset by PAD so it sits inset from the padded canvas's own edges.
+  const silhouette = makeCanvas();
+  const sCtx = silhouette.getContext("2d")!;
+  sCtx.fillStyle = "#ffffff";
+  layout.activePanels.forEach((cell) => {
+    const r = snapRectPx(dispRectPx(layout, cell));
+    const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
+    sCtx.save();
+    applyPanelFrame(sCtx, r.x + OUTLINE_PAD, r.y + OUTLINE_PAD, r.w, r.h, cell.rotation ?? 0, true);
+    tracePanelShapePath(sCtx, r.w, r.h, shape);
+    sCtx.fill();
+    sCtx.restore();
+  });
+
+  const fullWhite = makeCanvas();
+  const fCtx = fullWhite.getContext("2d")!;
+  fCtx.fillStyle = "#ffffff";
+  fCtx.fillRect(0, 0, PW, PH);
+
+  const scratchA = makeCanvas();
+  const scratchB = makeCanvas();
+  const aCtx = scratchA.getContext("2d")!;
+  const bCtx = scratchB.getContext("2d")!;
+  // erode(src) -> dst = fullWhite - dilate(fullWhite - src), using A/B as scratch.
+  const erodeInto = (dstCtx: CanvasRenderingContext2D, src: HTMLCanvasElement) => {
+    subtractInto(aCtx, fullWhite, src); // A = invert(src)
+    dilateInto(bCtx, scratchA); // B = dilate(A)
+    subtractInto(dstCtx, fullWhite, scratchB); // dst = fullWhite - B
+  };
+
+  const e1 = makeCanvas();
+  const e1Ctx = e1.getContext("2d")!;
+  erodeInto(e1Ctx, silhouette); // e1 = silhouette eroded by 1px
+
+  const ringsPadded = makeCanvas();
+  const ringsCtx = ringsPadded.getContext("2d")!;
+  subtractInto(ringsCtx, silhouette, e1); // ring1 = the silhouette's own 1px inner edge
+
+  const e2 = makeCanvas();
+  const e2Ctx = e2.getContext("2d")!;
+  erodeInto(e2Ctx, e1); // e2 = eroded by 2px total
+
+  sCtx.clearRect(0, 0, PW, PH); // silhouette buffer no longer needed - reuse it for e3
+  erodeInto(sCtx, e2); // silhouette-canvas now holds "eroded by 3px total"
+
+  subtractInto(aCtx, e2, silhouette); // A = ring2 (2px..3px in, leaving a 1px gap after ring1)
+  ringsCtx.drawImage(scratchA, 0, 0); // ringsPadded = ring1 + ring2
+
+  // Crop back to the true wall resolution.
+  const out = document.createElement("canvas");
+  out.width = W;
+  out.height = H;
+  out.getContext("2d")!.drawImage(ringsPadded, -OUTLINE_PAD, -OUTLINE_PAD);
+
+  outerOutlineCache.set(layout, out);
+  return out;
 };
 
 // Corner-to-corner alignment cross + a centre circle as tall as the wall -
@@ -292,7 +420,11 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   ctx.fillRect(0, 0, W, H);
 
   layout.activePanels.forEach((cell) => {
-    const r = dispRectPx(layout, cell);
+    // Snap to the integer pixel grid so a 1px stroke lands crisply on one
+    // pixel row/column (not straddling two, which anti-aliases into a soft
+    // >1px-looking line), and so neighbouring panels' rounded edges agree
+    // with each other rather than drifting apart.
+    const r = snapRectPx(dispRectPx(layout, cell));
     const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
     const rotation = cell.rotation ?? 0;
 
@@ -308,26 +440,40 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     ctx.drawImage(layerCanvas, 0, 0);
     ctx.restore();
 
-    // 1px white outline, following the true shape.
+    // 1px white outline, following the true shape. Rect/corner panels are
+    // axis-aligned at every supported rotation (0/90/180/270 just swap the
+    // already-baked w/h) and mirror-symmetric, so draw a plain strokeRect
+    // offset by 0.5px - the standard crisp-1px-line trick - instead of
+    // going through the rotate/mirror path, which can leave the line
+    // sitting across a pixel boundary. Triangle/curve panels keep the true
+    // traced path; their straight legs still land on this same snapped
+    // rect, only the hypotenuse/arc is inherently anti-aliased.
     ctx.save();
-    applyPanelFrame(ctx, r.x, r.y, r.w, r.h, rotation, true);
-    tracePanelShapePath(ctx, r.w, r.h, shape);
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 1;
-    ctx.stroke();
+    if (shape === "rect" || shape === "corner") {
+      ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
+    } else {
+      applyPanelFrame(ctx, r.x, r.y, r.w, r.h, rotation, true);
+      tracePanelShapePath(ctx, r.w, r.h, shape);
+      ctx.stroke();
+    }
     ctx.restore();
 
-    // Labels: always axis-aligned/white, matching the PNG exporter's convention.
-    const cx = r.x + r.w / 2;
+    // Location label: top-left corner, two lines (row then column), always
+    // axis-aligned/white/upright regardless of the panel's own rotation.
+    const pad = Math.max(3, Math.round(Math.min(r.w, r.h) * 0.06));
+    const fontPx = Math.max(11, Math.floor(Math.min(r.w, r.h) * 0.16));
+    const lineH = Math.round(fontPx * 1.15);
     ctx.fillStyle = "#ffffff";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "alphabetic";
-    ctx.font = `bold ${Math.max(11, Math.floor(r.h * 0.085))}px Arial`;
-    ctx.fillText(`↓${layout.rowLabel(cell)} →${layout.colLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, r.y + r.h * 0.28);
-    if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort}`, cx, r.y + r.h * 0.52);
-    if (cell.assignedPowerPort) ctx.fillText(`⚡ ${cell.assignedPowerPort}`, cx, r.y + r.h * 0.76);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = `bold ${fontPx}px Arial`;
+    ctx.fillText(`↓${layout.rowLabel(cell)}`, r.x + pad, r.y + pad);
+    ctx.fillText(`→${layout.colLabel(cell)}`, r.x + pad, r.y + pad + lineH);
   });
 
+  ctx.drawImage(buildOuterExtremityOutline(layout), 0, 0);
   drawAlignmentOverlay(ctx, layout);
   drawInfoText(ctx, layout);
 };
