@@ -1,6 +1,6 @@
 ﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ImageDown } from "lucide-react";
+import { ImageDown, Video } from "lucide-react";
 import { HelpCircle, Redo2, Undo2 } from "lucide-react";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
 import {
@@ -31,9 +31,9 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.16.0";
+const APP_VERSION = "0.17.0";
 
-const PANEL_TYPES = {
+export const PANEL_TYPES = {
   MG9: {
     name: "MG9",
     w: 0.5,
@@ -131,7 +131,7 @@ const STOCK_CATALOG = {
   cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 160 },
 } as const;
 
-const PANEL_VARIANTS = {
+export const PANEL_VARIANTS = {
   STANDARD: { id: "STANDARD", label: "Standard MG9", symbol: "", stockItem: null, shape: "rect" },
   TRIANGLE: { id: "TRIANGLE", label: "MG12 Triangle Panel", symbol: "△", stockItem: STOCK_CATALOG.mg12Triangle, shape: "triangle" },
   CURVED: { id: "CURVED", label: "MG13 1/4 Curved Panel", symbol: "◜", stockItem: STOCK_CATALOG.mg13Curved, shape: "curve" },
@@ -188,8 +188,8 @@ const PORT_COLORS = [
   "#f35c64",
 ];
 
-type PanelTypeKey = keyof typeof PANEL_TYPES;
-type PanelVariantKey = keyof typeof PANEL_VARIANTS;
+export type PanelTypeKey = keyof typeof PANEL_TYPES;
+export type PanelVariantKey = keyof typeof PANEL_VARIANTS;
 type PowerDistroKey = keyof typeof POWER_DISTROS;
 type DeploymentType = (typeof DEPLOYMENT_TYPES)[keyof typeof DEPLOYMENT_TYPES];
 
@@ -208,7 +208,7 @@ type StockRow = {
 // millimetres - panels are no longer bound to a rows x cols grid (the grid
 // generator just emits panels on a 500mm pitch). MT is a plain 1000x500mm
 // record; the old head/tail module pairing exists only in legacy migration.
-type Cell = {
+export type Cell = {
   /** Stable identity - selection, patching stats and joins key off this. */
   id: string;
   /** Top-left, workspace millimetres. */
@@ -354,10 +354,10 @@ const makeGridPanels = (cols: number, rows: number, panelType: PanelTypeKey = "M
   return panels;
 };
 
-const cellPanelType = (cell: Cell): PanelTypeKey => cell.panelType ?? "MG9";
+export const cellPanelType = (cell: Cell): PanelTypeKey => cell.panelType ?? "MG9";
 
 // Footprint in workspace mm, honouring rotation (90/270 swaps width/height).
-const cellSizeMm = (cell: Cell) => {
+export const cellSizeMm = (cell: Cell) => {
   const spec = PANEL_TYPES[cellPanelType(cell)];
   const rot = ((Math.round((cell.rotation ?? 0) / 90) * 90) % 360 + 360) % 360;
   const wMm = spec.w * 1000;
@@ -365,7 +365,7 @@ const cellSizeMm = (cell: Cell) => {
   return rot === 90 || rot === 270 ? { wMm: hMm, hMm: wMm } : { wMm, hMm };
 };
 
-const cellRect = (cell: Cell): RectMm => {
+export const cellRect = (cell: Cell): RectMm => {
   const { wMm, hMm } = cellSizeMm(cell);
   return { x: cell.x, y: cell.y, w: wMm, h: hMm };
 };
@@ -387,12 +387,12 @@ const cellGeom = (cell: Cell): PanelAnchorSpec => {
 
 // The old grid model called real panels "heads" (vs MT tail modules). In the
 // free model every active record is a panel; keep the name for call sites.
-const isPanelHead = (cell: Cell | null | undefined): cell is Cell => isActiveCell(cell);
+export const isPanelHead = (cell: Cell | null | undefined): cell is Cell => isActiveCell(cell);
 
 const cloneGrid = (panels: Cell[]): Cell[] => panels.map((cell) => ({ ...cell }));
 
 // Validate/repair a v2 panel list from a file.
-const normalizePanels = (raw: unknown): Cell[] => {
+export const normalizePanels = (raw: unknown): Cell[] => {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
   const panels: Cell[] = [];
@@ -629,7 +629,7 @@ const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAltern
 };
 
 // Mirror a mm rect horizontally inside the wall bbox (front view).
-const mirrorRectX = (rect: RectMm, bbox: RectMm): RectMm => ({
+export const mirrorRectX = (rect: RectMm, bbox: RectMm): RectMm => ({
   ...rect,
   x: 2 * bbox.x + bbox.w - rect.x - rect.w,
 });
@@ -825,6 +825,46 @@ const routeCablePx = (a: RectMm, b: RectMm, offset = 0): Array<{ x: number; y: n
   return [{ x: ax, y: ay }, { x: ax, y: midY }, { x: bx, y: midY }, { x: bx, y: by }];
 };
 
+// Trace a panel's true outline (triangle / quarter-circle / rectangle) in the
+// local 0..w,0..h space, so fills, strokes, indicator rings and any other
+// consumer (e.g. the animated test pattern) all share one implementation.
+// `testPattern` selects the curve's control-point order used by the PNG/video
+// test-pattern renderers (kept distinct from the on-screen curve for legacy
+// visual reasons - both are geometrically the same quarter-circle).
+export const tracePanelShapePath = (ctx: CanvasRenderingContext2D, w: number, h: number, shape: PanelShape, testPattern = false) => {
+  ctx.beginPath();
+  if (shape === "triangle") {
+    ctx.moveTo(0, 0);
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+  } else if (shape === "curve") {
+    if (testPattern) {
+      ctx.moveTo(0, 0);
+      ctx.lineTo(w, 0);
+      ctx.quadraticCurveTo(w, h, 0, h);
+    } else {
+      ctx.moveTo(w, 0);
+      ctx.lineTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.quadraticCurveTo(0, 0, w, 0);
+    }
+    ctx.closePath();
+  } else {
+    ctx.rect(0, 0, w, h);
+  }
+};
+
+// Establish a panel's local frame at (x,y,w,h): front view mirrors the shape
+// via scaleX(-1) without touching its stored rotation. Shared by drawPanelShape
+// and any other consumer that needs to clip/draw in a panel's true footprint.
+export const applyPanelFrame = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, rotation: number, mirrorX = false) => {
+  ctx.translate(x + w / 2, y + h / 2);
+  if (mirrorX) ctx.scale(-1, 1);
+  ctx.rotate((rotation * Math.PI) / 180);
+  ctx.translate(-w / 2, -h / 2);
+};
+
 const drawPanelShape = (
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -839,39 +879,8 @@ const drawPanelShape = (
 ) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
   const testPattern = options.curveStyle === "test-pattern";
-  // Trace the panel's true outline (triangle / quarter-circle / rectangle) in the
-  // local 0..w,0..h space so the fill, stroke and indicator rings all share it.
-  const traceShape = () => {
-    ctx.beginPath();
-    if (variant.shape === "triangle") {
-      ctx.moveTo(0, 0);
-      ctx.lineTo(w, h);
-      ctx.lineTo(0, h);
-      ctx.closePath();
-    } else if (variant.shape === "curve") {
-      if (testPattern) {
-        ctx.moveTo(0, 0);
-        ctx.lineTo(w, 0);
-        ctx.quadraticCurveTo(w, h, 0, h);
-      } else {
-        ctx.moveTo(w, 0);
-        ctx.lineTo(w, h);
-        ctx.lineTo(0, h);
-        ctx.quadraticCurveTo(0, 0, w, 0);
-      }
-      ctx.closePath();
-    } else {
-      ctx.rect(0, 0, w, h);
-    }
-  };
-  // Establish the panel's local frame (front view mirrors the shape via scaleX(-1)
-  // without touching its stored rotation).
-  const applyFrame = () => {
-    ctx.translate(x + w / 2, y + h / 2);
-    if (options.mirrorX) ctx.scale(-1, 1);
-    ctx.rotate(((cell.rotation ?? 0) * Math.PI) / 180);
-    ctx.translate(-w / 2, -h / 2);
-  };
+  const traceShape = () => tracePanelShapePath(ctx, w, h, variant.shape, testPattern);
+  const applyFrame = () => applyPanelFrame(ctx, x, y, w, h, cell.rotation ?? 0, options.mirrorX);
 
   ctx.save();
   applyFrame();
@@ -2107,6 +2116,19 @@ const exportJson = () => {
     }
   };
 
+  // Open the animated test pattern in its own tab. There's no router, so the
+  // project is handed off through localStorage and the new tab (booted with
+  // ?testpattern=1, see main.jsx) reads it back and renders TestPatternView.
+  const openAnimatedTestPatternTab = () => {
+    try {
+      const payload = { formatVersion: 1, projectName: safeProjectName, panelType, panels: grid };
+      localStorage.setItem("ledCablingTestPattern:v1", JSON.stringify(payload));
+      window.open(`${location.pathname}?testpattern=1`, "_blank");
+    } catch (err) {
+      console.error("Animated test pattern failed", err);
+      alert("Could not open the animated test pattern - check console");
+    }
+  };
 
   const openJson = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -3246,7 +3268,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0150"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0170"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -3261,6 +3283,9 @@ const exportJson = () => {
               </Button>
               <Button intent="primary" onClick={exportTestPatternPng}>
                 <ImageDown className="h-4 w-4" />PNG Test Pattern
+              </Button>
+              <Button intent="primary" onClick={openAnimatedTestPatternTab}>
+                <Video className="h-4 w-4" />Animated Test Pattern
               </Button>
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">

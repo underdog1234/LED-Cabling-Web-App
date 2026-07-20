@@ -1,8 +1,8 @@
 # LED Cabling Web App
 
-Version `0.16.0`
+Version `0.17.0`
 
-Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings exports.
+Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
 ## What It Does
 
@@ -12,9 +12,23 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages plus both layout views in landscape
-- Export a native-resolution PNG test pattern
+- Export a native-resolution PNG test pattern, or an animated RGB/greyscale test pattern (live preview tab + downloadable looping WebM video)
 - Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.17.0
+
+Added an animated LED wall test pattern for spotting orientation, patching and alignment errors that a static swatch can't reveal:
+
+- New "Animated Test Pattern" button opens a live, looping canvas view in its own tab, rendered at the wall's exact configured pixel resolution
+- RGB checkerboard: every panel shows a solid red, green or blue test colour in a diagonally staggered arrangement (never a blended rainbow), sliding smoothly left-to-right and cycling red -> green -> blue -> red
+- A moving diagonal greyscale brightness sweep plays across the whole wall at the same time, continuous across every panel boundary (not restarting inside each panel), without introducing colour or making panels hard to identify
+- 1px white outlines follow each panel's true shape (rectangle/triangle/curve) and rotation
+- Every panel is labelled (row/column, signal port, power port) in white, correctly positioned even on rotated or shaped panels
+- A small on-canvas info panel shows resolution, physical size, panel count, grid size and the active test description
+- The whole animation loops seamlessly every 20 seconds (verified bit-for-bit identical at the loop boundary) and always renders Front View, matching the PNG test pattern's convention
+- "Download Video (WebM)" records exactly one loop as a native WebM file (no extra dependencies - browser MediaRecorder/canvas.captureStream) that plays back looped with no visible seam
+- Works for uniform grids and freely placed/imported non-uniform layouts, including mixed MG9/MT and rotated/shaped panels, by defining the animation in wall pixel-coordinate space and revealing it through each panel's own clip mask
 
 ## Recent Changes In v0.16.0
 
