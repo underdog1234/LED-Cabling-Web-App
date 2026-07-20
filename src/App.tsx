@@ -32,7 +32,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.19.2";
+const APP_VERSION = "0.20.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -3350,7 +3350,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0192"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0200"
                 target="_blank"
                 rel="noreferrer"
               >

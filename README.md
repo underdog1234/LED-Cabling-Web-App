@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.19.2`
+Version `0.20.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -15,6 +15,10 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
 - Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.20.0
+
+Consolidates and confirms the PNG shape-rendering fix: verified consistent between the PNG test pattern and the PDF's front view across triangle panels at all four rotations (0/90/180/270) and the corner panel's hatch pattern, in addition to the curved-panel fix already in v0.19.2.
 
 ## Recent Changes In v0.19.2
 
