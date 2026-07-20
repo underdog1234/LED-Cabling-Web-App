@@ -58,15 +58,19 @@ export const LOOP_SECONDS = 20;
 // not a smooth video, and a lower rate keeps hundreds of panels responsive.
 export const DRAW_FPS = 24;
 
-// One RGB/greyscale tile = one MG9 module footprint at native pixel pitch
-// (matches the PNG test-pattern exporter's pxPerMm exactly, see below), so
-// checkerboard cells land on real module boundaries for snap-placed layouts.
-const TILE_PX = Math.round(PANEL_TYPES.MG9.pixW); // 168
-const SUPERCELL_PX = TILE_PX * 3; // 504 - one full stagger + slide period
+// RGB tile = one MG9 module footprint at native pixel pitch (matches the PNG
+// test-pattern exporter's pxPerMm exactly, see below), so checkerboard cells
+// land on real module boundaries for snap-placed layouts. Kept as a literal
+// (not read from PANEL_TYPES.MG9.pixW) so this module has no import-time
+// dependency on App.tsx - App.tsx also imports FROM this module for the
+// in-app video recorder, and a live top-level read here would race against
+// that circular import's module-initialisation order.
+const TILE_PX = 168; // must match PANEL_TYPES.MG9.pixW in App.tsx
+const RGB_PERIOD_PX = TILE_PX * 3; // 504 - one full stagger + slide period
 const RGB_COLORS = ["#ff0000", "#00ff00", "#0000ff"];
 
 let cachedRgbTile: HTMLCanvasElement | null = null;
-let cachedGreyTile: HTMLCanvasElement | null = null;
+let cachedGreyTile: { period: number; canvas: HTMLCanvasElement } | null = null;
 let cachedPatternLayer: { w: number; h: number; canvas: HTMLCanvasElement } | null = null;
 
 // Staggered diagonal R/G/B supercell: row R, col C -> colour (R+C) mod 3. This
@@ -75,8 +79,8 @@ let cachedPatternLayer: { w: number; h: number; canvas: HTMLCanvasElement } | nu
 // the tile size - no per-panel logic needed.
 const buildRgbTile = (): HTMLCanvasElement => {
   const c = document.createElement("canvas");
-  c.width = SUPERCELL_PX;
-  c.height = SUPERCELL_PX;
+  c.width = RGB_PERIOD_PX;
+  c.height = RGB_PERIOD_PX;
   const ctx = c.getContext("2d")!;
   for (let row = 0; row < 3; row += 1) {
     for (let col = 0; col < 3; col += 1) {
@@ -87,35 +91,38 @@ const buildRgbTile = (): HTMLCanvasElement => {
   return c;
 };
 
-// Seamless diagonal greyscale ramp: brightness is a function of (x+y) mod
-// SUPERCELL_PX folded into a black->white->black triangle wave, which is
-// exactly what a diagonal linear gradient from (0,0) to (SUPERCELL_PX,
-// SUPERCELL_PX) with a black/white/black stop produces - and because the tile
-// is periodic in (x+y), it repeats seamlessly with no visible seam.
-const buildGreyTile = (): HTMLCanvasElement => {
+// Seamless diagonal greyscale sweep: a single band travels corner-to-corner
+// across the WHOLE wall (period = the canvas diagonal, not a small repeating
+// cell), so only one bright band is ever visible at a time, at wall scale.
+// Brightness is a function of (x+y) mod `period` folded into a
+// black->white->black triangle wave, which is exactly what a diagonal linear
+// gradient from (0,0) to (period,period) with alternating floor/peak stops
+// produces - periodic in (x+y), so it still repeats with no seam as it slides
+// through a full loop.
+const buildGreyTile = (period: number): HTMLCanvasElement => {
   const c = document.createElement("canvas");
-  c.width = SUPERCELL_PX;
-  c.height = SUPERCELL_PX;
+  c.width = period;
+  c.height = period;
   const ctx = c.getContext("2d")!;
-  // A gradient from corner (0,0) to (SUPERCELL_PX,SUPERCELL_PX) spans an (x+y)
-  // sum of 2*SUPERCELL_PX. For the tile to repeat with NO seam at its own
-  // edges (period = SUPERCELL_PX, matching the RGB tile), the black/white
-  // triangle wave must complete exactly TWO cycles across that full span -
-  // one 0..0.5..1 cycle per SUPERCELL_PX of (x+y) - not one cycle stretched
-  // across the whole diagonal (which would mismatch at the x=SUPERCELL_PX
-  // and y=SUPERCELL_PX seams).
   // Floor of #404040 (not black): with a 'multiply' blend, a black stop would
   // briefly extinguish a panel's colour entirely. A dim floor keeps the
   // brightness sweep clearly visible while every panel stays identifiable.
-  const grad = ctx.createLinearGradient(0, 0, SUPERCELL_PX, SUPERCELL_PX);
+  const grad = ctx.createLinearGradient(0, 0, period, period);
   grad.addColorStop(0, "#404040");
   grad.addColorStop(0.25, "#ffffff");
   grad.addColorStop(0.5, "#404040");
   grad.addColorStop(0.75, "#ffffff");
   grad.addColorStop(1, "#404040");
   ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, SUPERCELL_PX, SUPERCELL_PX);
+  ctx.fillRect(0, 0, period, period);
   return c;
+};
+
+const getGreyTile = (period: number): HTMLCanvasElement => {
+  if (cachedGreyTile && cachedGreyTile.period === period) return cachedGreyTile.canvas;
+  const canvas = buildGreyTile(period);
+  cachedGreyTile = { period, canvas };
+  return canvas;
 };
 
 const getPatternLayer = (w: number, h: number): HTMLCanvasElement => {
@@ -177,31 +184,54 @@ const dispRectPx = (layout: TestPatternLayout, cell: Cell): RectMm => {
   };
 };
 
-const drawInfoPanel = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
-  const { W } = layout;
-  const fontPx = Math.max(12, Math.min(20, Math.round(W * 0.012)));
-  const pad = Math.round(fontPx * 0.7);
-  const lineH = Math.round(fontPx * 1.35);
+// Wall info text: centred in the middle of the wall, no background box. Each
+// line is stroked in dark then filled in white so it stays readable over
+// whatever colour/brightness happens to be underneath.
+const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  const { W, H } = layout;
+  const fontPx = Math.max(14, Math.min(30, Math.round(W * 0.014)));
+  const lineH = Math.round(fontPx * 1.4);
   const lines = [
     `Resolution: ${layout.W} x ${layout.H} px`,
     `Physical Size: ${layout.wallWidthM.toFixed(1)} x ${layout.wallHeightM.toFixed(1)} m`,
     `Panels: ${layout.totalPanels}`,
     `Grid: ${layout.activeColsCount} columns x ${layout.activeRowsCount} rows`,
-    `Test: RGB Checkerboard Slide + Moving Greyscale Gradient`,
   ];
-  ctx.font = `bold ${fontPx}px Arial`;
-  const boxW = Math.min(W * 0.32, Math.max(...lines.map((l) => ctx.measureText(l).width)) + pad * 2);
-  const boxH = lineH * lines.length + pad * 2;
+  const cx = W / 2;
+  const startY = H / 2 - (lineH * (lines.length - 1)) / 2;
   ctx.save();
-  ctx.fillStyle = "rgba(2, 6, 23, 0.72)";
-  ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(8, 8, boxW, boxH, 6);
-  else ctx.rect(8, 8, boxW, boxH);
-  ctx.fill();
+  ctx.font = `bold ${fontPx}px Arial`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Math.max(2, Math.round(fontPx * 0.14));
+  ctx.strokeStyle = "rgba(0, 0, 0, 0.85)";
   ctx.fillStyle = "#ffffff";
-  ctx.textAlign = "left";
-  ctx.textBaseline = "top";
-  lines.forEach((line, i) => ctx.fillText(line, 8 + pad, 8 + pad + i * lineH));
+  lines.forEach((line, i) => {
+    const y = startY + i * lineH;
+    ctx.strokeText(line, cx, y);
+    ctx.fillText(line, cx, y);
+  });
+  ctx.restore();
+};
+
+// Corner-to-corner alignment cross + a centre circle as tall as the wall -
+// classic geometry/alignment references for spotting warped, offset or
+// stretched panels across the whole assembled surface.
+const drawAlignmentOverlay = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  const { W, H } = layout;
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+  ctx.lineWidth = Math.max(2, Math.round(Math.min(W, H) * 0.0035));
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(W, H);
+  ctx.moveTo(W, 0);
+  ctx.lineTo(0, H);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(W / 2, H / 2, H / 2, 0, Math.PI * 2);
+  ctx.stroke();
   ctx.restore();
 };
 
@@ -217,10 +247,15 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   ctx.imageSmoothingEnabled = false;
 
   if (!cachedRgbTile) cachedRgbTile = buildRgbTile();
-  if (!cachedGreyTile) cachedGreyTile = buildGreyTile();
+  // Grey period = the wall's own diagonal, so exactly one bright band sweeps
+  // corner-to-corner across the whole wall at a time (not several small
+  // repeats), scaled to each project's actual size.
+  const greyPeriod = Math.max(1, Math.round(Math.hypot(W, H)));
+  const greyTile = getGreyTile(greyPeriod);
 
   const phase = ((timeSeconds % LOOP_SECONDS) + LOOP_SECONDS) % LOOP_SECONDS;
-  const slidePx = (phase / LOOP_SECONDS) * SUPERCELL_PX;
+  const rgbSlidePx = (phase / LOOP_SECONDS) * RGB_PERIOD_PX;
+  const greySlidePx = (phase / LOOP_SECONDS) * greyPeriod;
 
   // Build the world-space pattern layer once per frame (two full-wall draws,
   // O(1) regardless of panel count), then reveal it through each panel's clip.
@@ -234,7 +269,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   layerCtx.imageSmoothingEnabled = false;
 
   const rgbPattern = layerCtx.createPattern(cachedRgbTile, "repeat")!;
-  rgbPattern.setTransform(new DOMMatrix().translate(slidePx, 0));
+  rgbPattern.setTransform(new DOMMatrix().translate(rgbSlidePx, 0));
   layerCtx.fillStyle = rgbPattern;
   layerCtx.fillRect(0, 0, W, H);
 
@@ -245,8 +280,8 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   // leaves zero channels at zero, so brightness visibly sweeps across each
   // panel without ever introducing a new hue.
   layerCtx.globalCompositeOperation = "multiply";
-  const greyPattern = layerCtx.createPattern(cachedGreyTile, "repeat")!;
-  greyPattern.setTransform(new DOMMatrix().translate(slidePx, slidePx));
+  const greyPattern = layerCtx.createPattern(greyTile, "repeat")!;
+  greyPattern.setTransform(new DOMMatrix().translate(greySlidePx, greySlidePx));
   layerCtx.fillStyle = greyPattern;
   layerCtx.fillRect(0, 0, W, H);
   layerCtx.restore();
@@ -293,5 +328,6 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     if (cell.assignedPowerPort) ctx.fillText(`⚡ ${cell.assignedPowerPort}`, cx, r.y + r.h * 0.76);
   });
 
-  drawInfoPanel(ctx, layout);
+  drawAlignmentOverlay(ctx, layout);
+  drawInfoText(ctx, layout);
 };

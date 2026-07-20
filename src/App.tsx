@@ -18,6 +18,7 @@ import {
   MODULE_MM,
 } from "./model/panels";
 import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
+import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame } from "./testPattern/drawTestPattern";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -31,7 +32,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.17.0";
+const APP_VERSION = "0.18.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -1173,6 +1174,8 @@ export default function App() {
   const [redoStack, setRedoStack] = useState<LayoutSnapshot[]>([]);
   const [showHelp, setShowHelp] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isRecordingVideo, setIsRecordingVideo] = useState(false);
+  const [videoRecordSeconds, setVideoRecordSeconds] = useState(0);
   const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
@@ -1291,6 +1294,14 @@ export default function App() {
     window.addEventListener("click", clearPatchTarget);
     return () => window.removeEventListener("click", clearPatchTarget);
   }, []);
+
+  // Recording progress ticker (display only - the actual stop is a setTimeout
+  // inside downloadVideoTestPattern).
+  useEffect(() => {
+    if (!isRecordingVideo) return;
+    const id = window.setInterval(() => setVideoRecordSeconds((s) => Math.min(LOOP_SECONDS, s + 0.25)), 250);
+    return () => window.clearInterval(id);
+  }, [isRecordingVideo]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2116,18 +2127,91 @@ const exportJson = () => {
     }
   };
 
-  // Open the animated test pattern in its own tab. There's no router, so the
-  // project is handed off through localStorage and the new tab (booted with
-  // ?testpattern=1, see main.jsx) reads it back and renders TestPatternView.
-  const openAnimatedTestPatternTab = () => {
+  // Open the full-screen, canvas-only live test pattern in its own tab.
+  // There's no router, so the project is handed off through localStorage and
+  // the new tab (booted with ?testpattern=1, see main.jsx) reads it back and
+  // renders TestPatternView - just the LED canvas, no page chrome.
+  const openVideoTestPatternTab = () => {
     try {
       const payload = { formatVersion: 1, projectName: safeProjectName, panelType, panels: grid };
       localStorage.setItem("ledCablingTestPattern:v1", JSON.stringify(payload));
       window.open(`${location.pathname}?testpattern=1`, "_blank");
     } catch (err) {
-      console.error("Animated test pattern failed", err);
-      alert("Could not open the animated test pattern - check console");
+      console.error("Video test pattern failed", err);
+      alert("Could not open the video test pattern - check console");
     }
+  };
+
+  const pickVideoMimeType = (): string | null => {
+    if (typeof MediaRecorder === "undefined") return null;
+    const candidates = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+    for (const candidate of candidates) {
+      if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(candidate)) return candidate;
+    }
+    return null;
+  };
+
+  // Record and download exactly one loop of the animated test pattern,
+  // without ever showing a tab/window - draws into a detached canvas (never
+  // added to the DOM) and captures it directly. A generous resolution-scaled
+  // bitrate avoids the blocky compression artifacts a codec's low default
+  // bitrate would produce on this pattern's large flat colour fields and
+  // sharp edges/text.
+  const downloadVideoTestPattern = () => {
+    if (isRecordingVideo) return;
+    const mimeType = pickVideoMimeType();
+    if (!mimeType) {
+      alert("This browser can't record video (no WebM/MediaRecorder support). Try Chrome, Edge or Firefox.");
+      return;
+    }
+    const project: TestPatternProject = { projectName: safeProjectName, panelType, panels: grid };
+    const layout = computeTestPatternLayout(project);
+    if (layout.W <= 0 || layout.H <= 0) {
+      alert("No active panels to render a test pattern from.");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = layout.W;
+    canvas.height = layout.H;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      alert("Could not create a recording canvas - check console");
+      return;
+    }
+
+    const loopStart = performance.now();
+    const drawId = window.setInterval(() => {
+      drawTestPatternFrame(ctx, layout, (performance.now() - loopStart) / 1000);
+    }, 1000 / DRAW_FPS);
+
+    // ~6 bits/pixel of total resolution, floor 8Mbps / cap 80Mbps: MediaRecorder's
+    // default bitrate is far too low for this pattern's sharp edges and text,
+    // producing visible VP9 blocking - this scales generously with wall size
+    // instead of leaving every export at one low fixed rate.
+    const videoBitsPerSecond = Math.min(80_000_000, Math.max(8_000_000, Math.round(layout.W * layout.H * 6)));
+    const stream = canvas.captureStream(DRAW_FPS);
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond });
+    const chunks: BlobPart[] = [];
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) chunks.push(event.data);
+    };
+    recorder.onstop = () => {
+      window.clearInterval(drawId);
+      const blob = new Blob(chunks, { type: mimeType });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `${fileSafeProjectName}-front-test-pattern.webm`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+      setIsRecordingVideo(false);
+    };
+    recorder.start();
+    setVideoRecordSeconds(0);
+    setIsRecordingVideo(true);
+    setTimeout(() => recorder.stop(), LOOP_SECONDS * 1000);
   };
 
   const openJson = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -3268,7 +3352,7 @@ const exportJson = () => {
               <h1 className="text-3xl font-semibold text-white [text-shadow:0_0_2px_black]">LED Port Mapper</h1>
               <a
                 className="rounded-full border border-slate-500 bg-slate-800 px-3 py-1 text-xs font-semibold text-slate-200 hover:bg-slate-700"
-                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0170"
+                href="https://github.com/underdog1234/LED-Cabling-Web-App#recent-changes-in-v0180"
                 target="_blank"
                 rel="noreferrer"
               >
@@ -3284,8 +3368,12 @@ const exportJson = () => {
               <Button intent="primary" onClick={exportTestPatternPng}>
                 <ImageDown className="h-4 w-4" />PNG Test Pattern
               </Button>
-              <Button intent="primary" onClick={openAnimatedTestPatternTab}>
-                <Video className="h-4 w-4" />Animated Test Pattern
+              <Button intent="primary" onClick={openVideoTestPatternTab}>
+                <Video className="h-4 w-4" />Video Test Pattern
+              </Button>
+              <Button intent="primary" onClick={downloadVideoTestPattern} disabled={isRecordingVideo}>
+                <Download className="h-4 w-4" />
+                {isRecordingVideo ? `Recording… ${videoRecordSeconds.toFixed(0)}/${LOOP_SECONDS}s` : "Download Video Test Pattern"}
               </Button>
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">

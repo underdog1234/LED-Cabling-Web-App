@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.17.0`
+Version `0.18.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -12,9 +12,19 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages plus both layout views in landscape
-- Export a native-resolution PNG test pattern, or an animated RGB/greyscale test pattern (live preview tab + downloadable looping WebM video)
+- Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
 - Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.18.0
+
+Animated test pattern tweaks:
+
+- Split into two dedicated buttons: **Video Test Pattern** opens a pure full-screen canvas in a new tab - no header, no buttons, no text outside the LED canvas itself; **Download Video Test Pattern** records and downloads the WebM directly from the main app, no tab required
+- The moving greyscale gradient is now a single large sweep spanning the whole wall corner-to-corner, instead of several smaller repeating bands
+- Removed the info panel's background box and the "Test: ..." description line; the remaining wall info (resolution, physical size, panel count, grid) is now centred on the wall
+- Added a corner-to-corner alignment cross and a centre circle (diameter equal to the wall's height) as a geometry reference for spotting warped, offset or stretched panels
+- Fixed washed-out/blocky WebM exports by giving the recorder a much higher, resolution-scaled video bitrate instead of the codec's low default
 
 ## Recent Changes In v0.17.0
 
