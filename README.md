@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.19.0`
+Version `0.19.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -15,6 +15,10 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
 - Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.19.1
+
+- The outer-extremity outline is now a single, thicker white line (3px) instead of two separate 1px lines with a gap between them
 
 ## Recent Changes In v0.19.0
 

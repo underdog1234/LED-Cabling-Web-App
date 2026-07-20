@@ -227,24 +227,26 @@ const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) 
   ctx.restore();
 };
 
-// Double 1px white outline around the TRUE outer extremity of the whole
+// Single, thicker white outline around the TRUE outer extremity of the whole
 // assembled LED surface (not per-panel): render every active panel's true
 // (rotated/mirrored) shape as a solid fill into one silhouette - adjacent/
 // touching panels naturally fuse into a single region with no internal seam
-// lines - then peel off two 1px rings INSET from that silhouette's own edge
-// (erosion, not dilation: growing the rings OUTWARD would put them past the
+// lines - then peel off one band INSET from that silhouette's own edge
+// (erosion, not dilation: growing the band OUTWARD would put it past the
 // wall's own bounding canvas - since the wall's bbox has zero margin by
-// definition, an outward ring is entirely clipped off-canvas and invisible
+// definition, an outward band is entirely clipped off-canvas and invisible
 // for the common rectangular-wall case). Erosion is implemented as
 // invert -> dilate -> invert (dilation = stamping 8 one-pixel-offset copies,
-// a standard binary-mask dilate). Cached per layout (keyed by object
-// identity) since the wall's geometry doesn't change frame to frame.
+// a standard binary-mask dilate), applied ERODE_PX times for a band that
+// thick. Cached per layout (keyed by object identity) since the wall's
+// geometry doesn't change frame to frame.
 const outerOutlineCache = new WeakMap<TestPatternLayout, HTMLCanvasElement>();
 const DILATE_OFFSETS: Array<[number, number]> = [
   [-1, -1], [0, -1], [1, -1],
   [-1, 0], [1, 0],
   [-1, 1], [0, 1], [1, 1],
 ];
+const ERODE_PX = 3; // outline thickness, visibly heavier than the 1px panel outlines
 
 // Erosion here is implemented as invert -> dilate -> invert, which only
 // works if there's real "background" around the shape for the inverted
@@ -256,7 +258,7 @@ const DILATE_OFFSETS: Array<[number, number]> = [
 // silhouette drawn inset by PAD on all sides) gives the algorithm real
 // background to erode from; the result is cropped back to the true W x H
 // canvas at the end by drawing it at a -PAD offset.
-const OUTLINE_PAD = 6;
+const OUTLINE_PAD = ERODE_PX + 3;
 
 const buildOuterExtremityOutline = (layout: TestPatternLayout): HTMLCanvasElement => {
   const cached = outerOutlineCache.get(layout);
@@ -315,29 +317,25 @@ const buildOuterExtremityOutline = (layout: TestPatternLayout): HTMLCanvasElemen
     subtractInto(dstCtx, fullWhite, scratchB); // dst = fullWhite - B
   };
 
-  const e1 = makeCanvas();
-  const e1Ctx = e1.getContext("2d")!;
-  erodeInto(e1Ctx, silhouette); // e1 = silhouette eroded by 1px
+  // Erode repeatedly to reach the full band thickness.
+  const eroded = makeCanvas();
+  erodeInto(eroded.getContext("2d")!, silhouette);
+  let current = eroded;
+  for (let i = 1; i < ERODE_PX; i += 1) {
+    const next = makeCanvas();
+    erodeInto(next.getContext("2d")!, current);
+    current = next;
+  }
 
-  const ringsPadded = makeCanvas();
-  const ringsCtx = ringsPadded.getContext("2d")!;
-  subtractInto(ringsCtx, silhouette, e1); // ring1 = the silhouette's own 1px inner edge
-
-  const e2 = makeCanvas();
-  const e2Ctx = e2.getContext("2d")!;
-  erodeInto(e2Ctx, e1); // e2 = eroded by 2px total
-
-  sCtx.clearRect(0, 0, PW, PH); // silhouette buffer no longer needed - reuse it for e3
-  erodeInto(sCtx, e2); // silhouette-canvas now holds "eroded by 3px total"
-
-  subtractInto(aCtx, e2, silhouette); // A = ring2 (2px..3px in, leaving a 1px gap after ring1)
-  ringsCtx.drawImage(scratchA, 0, 0); // ringsPadded = ring1 + ring2
+  const bandPadded = makeCanvas();
+  const bandCtx = bandPadded.getContext("2d")!;
+  subtractInto(bandCtx, silhouette, current); // silhouette minus the fully-eroded core = the outline band
 
   // Crop back to the true wall resolution.
   const out = document.createElement("canvas");
   out.width = W;
   out.height = H;
-  out.getContext("2d")!.drawImage(ringsPadded, -OUTLINE_PAD, -OUTLINE_PAD);
+  out.getContext("2d")!.drawImage(bandPadded, -OUTLINE_PAD, -OUTLINE_PAD);
 
   outerOutlineCache.set(layout, out);
   return out;
