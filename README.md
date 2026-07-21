@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.20.1`
+Version `0.20.2`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -15,6 +15,10 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
 - Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.20.2
+
+- Fixed the on-screen signal/power chain-start ring indicator rendering as a square on MT (or any non-square) panels instead of following the panel's true rectangle. The ring's SVG had no explicit width/height, so browsers fell back to its viewBox's 1:1 intrinsic aspect ratio when sizing it as an absolutely-positioned element, overriding the intended stretch-to-fill. Now explicit, always matches the panel's actual shape
 
 ## Recent Changes In v0.20.1
 
