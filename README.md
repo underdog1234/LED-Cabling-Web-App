@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.21.0`
+Version `0.21.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -15,6 +15,12 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
 - Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
 - Check stock levels, shortfalls, and deployment hardware requirements
+
+## Recent Changes In v0.21.1
+
+- Quick Panel Layout: added a `Clear` button (resets to 1×1 MG9), metre rulers along the top and left of the preview, and up/down buttons to nudge the centred 16:9 content-area box vertically within any available slack
+- Quick Panel Layout: added Width (m) / Height (m) inputs alongside the Columns/Rows counters, kept in sync both ways - width steps in 0.5m increments for MG9 / 1m for MT, height always steps in 0.5m (both panel types are 0.5m tall)
+- Quick Panel Layout: reworded the preview caption from "Dashed box = centred 16:9 content area" to "Dashed box = 16:9"
 
 ## Recent Changes In v0.21.0
 

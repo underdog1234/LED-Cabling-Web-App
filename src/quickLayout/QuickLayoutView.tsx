@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { ChevronUp, ChevronDown } from "lucide-react";
 import { PANEL_TYPES, type PanelTypeKey } from "../App";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, Select } from "../components/ui";
 
@@ -13,6 +14,24 @@ const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
 
 const formatM = (n: number) => `${n.toFixed(2)} m`;
 
+// How far apart to space ruler marks along an axis so a large wall doesn't
+// end up with dozens of overlapping labels - grows through "nice" round
+// metre steps until at most ~12 marks are needed.
+const RULER_STEPS = [0.5, 1, 2, 5, 10, 20, 25, 50, 100, 200, 500];
+const pickRulerStep = (totalM: number) => RULER_STEPS.find((step) => totalM / step <= 12) ?? RULER_STEPS[RULER_STEPS.length - 1];
+const rulerMarks = (totalM: number) => {
+  if (totalM <= 0) return [0];
+  const step = pickRulerStep(totalM);
+  const marks: number[] = [];
+  for (let m = 0; m <= totalM + 1e-6; m += step) marks.push(Math.round(m * 100) / 100);
+  const last = marks[marks.length - 1];
+  if (Math.abs(last - totalM) > 1e-6) marks.push(Math.round(totalM * 100) / 100);
+  return marks;
+};
+
+// How far the centred 16:9 box can be nudged up/down per click.
+const FIT_SHIFT_STEP = 0.15;
+
 // Standalone panel-count calculator: opened in its own tab (see App.tsx's
 // "Quick Panel Layout" button and main.jsx's ?quicklayout=1 route), with no
 // dependency on the main app ever having been mounted - it always starts at
@@ -21,6 +40,9 @@ export default function QuickLayoutView() {
   const [panelType, setPanelType] = useState<PanelTypeKey>("MG9");
   const [cols, setCols] = useState(1);
   const [rows, setRows] = useState(1);
+  // -1 (top) .. 0 (centred) .. 1 (bottom); only has visible effect when the
+  // wall has vertical slack around the 16:9 box (see fitSlackY below).
+  const [fitShift, setFitShift] = useState(0);
 
   const panel = PANEL_TYPES[panelType];
   const wallWidthM = cols * panel.w;
@@ -33,20 +55,35 @@ export default function QuickLayoutView() {
   const ratioDivisor = gcd(pixelW, pixelH) || 1;
   const ratioLabel = `${pixelW / ratioDivisor}:${pixelH / ratioDivisor}`;
 
-  // Largest 16:9 rect centred inside the wall's pixel resolution.
+  // Largest 16:9 rect that fits inside the wall's pixel resolution, nudged
+  // up/down within whatever vertical slack is available (fitShift).
   const fitsWide = pixelW / pixelH > 16 / 9;
   const fitW = fitsWide ? (pixelH * 16) / 9 : pixelW;
   const fitH = fitsWide ? pixelH : (pixelW * 9) / 16;
   const fitOffsetX = (pixelW - fitW) / 2;
-  const fitOffsetY = (pixelH - fitH) / 2;
+  const fitSlackY = pixelH - fitH;
+  const fitOffsetY = (fitSlackY / 2) * (1 + fitShift);
 
   const wallBelowFullHd = pixelW < 1920 || pixelH < 1080;
   const contentBelowFullHd = fitW < 1920 || fitH < 1080;
+
+  const setWidthM = (valueM: number) => setCols(clampCells(Math.round(valueM / panel.w)));
+  const setHeightM = (valueM: number) => setRows(clampCells(Math.round(valueM / panel.h)));
+
+  const clearAll = () => {
+    setPanelType("MG9");
+    setCols(1);
+    setRows(1);
+    setFitShift(0);
+  };
 
   const sendToMainTool = () => {
     localStorage.setItem(QUICK_LAYOUT_TRANSFER_KEY, JSON.stringify({ panelType, cols, rows }));
     window.location.href = window.location.pathname;
   };
+
+  const topMarks = rulerMarks(wallWidthM);
+  const sideMarks = rulerMarks(wallHeightM);
 
   return (
     <div className="min-h-screen bg-[#0f172a] p-6 text-white">
@@ -61,9 +98,10 @@ export default function QuickLayoutView() {
               </a>
             </div>
           </div>
-          <Button intent="primary" onClick={sendToMainTool}>
-            Send to Main Layout Tool
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button intent="secondary" onClick={clearAll}>Clear</Button>
+            <Button intent="primary" onClick={sendToMainTool}>Send to Main Layout Tool</Button>
+          </div>
         </div>
 
         <div className="grid gap-4 md:grid-cols-[1fr_1.3fr]">
@@ -78,6 +116,31 @@ export default function QuickLayoutView() {
                   <option value="MG9">MG9 (0.5m × 0.5m)</option>
                   <option value="MT">MT (1m × 0.5m)</option>
                 </Select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Width (m)</div>
+                  <Input
+                    type="number"
+                    min={panel.w}
+                    step={panel.w}
+                    value={wallWidthM}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWidthM(Number(e.target.value))}
+                    className="text-center"
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Height (m)</div>
+                  <Input
+                    type="number"
+                    min={panel.h}
+                    step={panel.h}
+                    value={wallHeightM}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setHeightM(Number(e.target.value))}
+                    className="text-center"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -135,7 +198,7 @@ export default function QuickLayoutView() {
               ) : null}
               {!wallBelowFullHd && contentBelowFullHd ? (
                 <div className="rounded-lg border border-amber-500 bg-amber-500/15 p-2 text-xs text-amber-200">
-                  ⚠ The centred 16:9 content area is below 1920×1080 (Full HD).
+                  ⚠ The 16:9 content area is below 1920×1080 (Full HD).
                 </div>
               ) : null}
             </CardContent>
@@ -146,27 +209,71 @@ export default function QuickLayoutView() {
               <CardTitle>Preview</CardTitle>
             </CardHeader>
             <CardContent>
-              <div
-                className="relative mx-auto w-full overflow-hidden rounded-lg border border-slate-600 bg-slate-950"
-                style={{
-                  maxWidth: 640,
-                  aspectRatio: `${pixelW} / ${pixelH}`,
-                  backgroundImage:
-                    "linear-gradient(to right, rgba(148,163,184,0.45) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.45) 1px, transparent 1px)",
-                  backgroundSize: `${100 / cols}% ${100 / rows}%`,
-                }}
-              >
+              <div className="mx-auto grid" style={{ maxWidth: 640, gridTemplateColumns: "28px 1fr", gridTemplateRows: "20px 1fr" }}>
+                <div />
+                <div className="relative">
+                  {topMarks.map((m) => (
+                    <span
+                      key={`t-${m}`}
+                      className="absolute -translate-x-1/2 whitespace-nowrap text-[10px] text-slate-400"
+                      style={{ left: `${wallWidthM > 0 ? (m / wallWidthM) * 100 : 0}%` }}
+                    >
+                      {m}m
+                    </span>
+                  ))}
+                </div>
+                <div className="relative">
+                  {sideMarks.map((m) => (
+                    <span
+                      key={`s-${m}`}
+                      className="absolute -translate-y-1/2 whitespace-nowrap text-[10px] text-slate-400"
+                      style={{ top: `${wallHeightM > 0 ? (m / wallHeightM) * 100 : 0}%` }}
+                    >
+                      {m}m
+                    </span>
+                  ))}
+                </div>
                 <div
-                  className="absolute border-2 border-dashed border-amber-400/90 bg-amber-400/10"
+                  className="relative overflow-hidden rounded-lg border border-slate-600 bg-slate-950"
                   style={{
-                    left: `${(fitOffsetX / pixelW) * 100}%`,
-                    top: `${(fitOffsetY / pixelH) * 100}%`,
-                    width: `${(fitW / pixelW) * 100}%`,
-                    height: `${(fitH / pixelH) * 100}%`,
+                    aspectRatio: `${pixelW} / ${pixelH}`,
+                    backgroundImage:
+                      "linear-gradient(to right, rgba(148,163,184,0.45) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.45) 1px, transparent 1px)",
+                    backgroundSize: `${100 / cols}% ${100 / rows}%`,
                   }}
-                />
+                >
+                  <div
+                    className="absolute border-2 border-dashed border-amber-400/90 bg-amber-400/10"
+                    style={{
+                      left: `${(fitOffsetX / pixelW) * 100}%`,
+                      top: `${(fitOffsetY / pixelH) * 100}%`,
+                      width: `${(fitW / pixelW) * 100}%`,
+                      height: `${(fitH / pixelH) * 100}%`,
+                    }}
+                  />
+                </div>
               </div>
-              <div className="mt-2 text-center text-xs text-slate-400">Dashed box = centred 16:9 content area</div>
+              <div className="mt-2 flex items-center justify-center gap-2 text-xs text-slate-400">
+                <span>Dashed box = 16:9</span>
+                <Button
+                  size="sm"
+                  intent="secondary"
+                  disabled={fitSlackY <= 0 || fitShift <= -1}
+                  onClick={() => setFitShift((f) => Math.max(-1, f - FIT_SHIFT_STEP))}
+                  title="Move 16:9 area up"
+                >
+                  <ChevronUp className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  size="sm"
+                  intent="secondary"
+                  disabled={fitSlackY <= 0 || fitShift >= 1}
+                  onClick={() => setFitShift((f) => Math.min(1, f + FIT_SHIFT_STEP))}
+                  title="Move 16:9 area down"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>
