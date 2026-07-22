@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronUp, ChevronDown } from "lucide-react";
+import { ChevronUp, ChevronDown, FileText } from "lucide-react";
 import { PANEL_TYPES, type PanelTypeKey } from "../App";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, Select } from "../components/ui";
 
@@ -82,6 +82,105 @@ export default function QuickLayoutView() {
     window.location.href = window.location.pathname;
   };
 
+  // One-page summary: stats on the left, a to-scale wall diagram (grid lines,
+  // ruler marks and the 16:9 overlay) on the right - a PDF twin of the
+  // on-screen Preview card, not the main app's full per-panel report.
+  const exportPdf = async () => {
+    try {
+      const jsPDF = (await import("jspdf")).default;
+      const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
+      const pageW = pdf.internal.pageSize.getWidth();
+      const pageH = pdf.internal.pageSize.getHeight();
+
+      pdf.setFontSize(18);
+      pdf.setTextColor(15, 23, 42);
+      pdf.text("Quick Panel Layout", 10, 14);
+      pdf.setFontSize(9);
+      pdf.setTextColor(100, 116, 139);
+      pdf.text(`Printed ${new Date().toLocaleString()}`, pageW - 10, 14, { align: "right" });
+
+      let statsY = 28;
+      const stat = (label: string, value: string) => {
+        pdf.setFontSize(9);
+        pdf.setTextColor(100, 116, 139);
+        pdf.text(label, 10, statsY);
+        pdf.setFontSize(12);
+        pdf.setTextColor(15, 23, 42);
+        pdf.text(value, 10, statsY + 6);
+        statsY += 14;
+      };
+      stat("Panel Type", panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)");
+      stat("Grid", `${cols} columns x ${rows} rows (${totalPanels} panels)`);
+      stat("Wall Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`);
+      stat("Resolution", `${pixelW} x ${pixelH} px (${totalPixels.toLocaleString()} px total)`);
+      stat("Aspect Ratio", ratioLabel);
+      stat("16:9 Content Area", `${Math.round(fitW)} x ${Math.round(fitH)} px`);
+
+      const warnings: string[] = [];
+      if (wallBelowFullHd) warnings.push("Wall resolution is below 1920x1080 (Full HD).");
+      if (!wallBelowFullHd && contentBelowFullHd) warnings.push("The 16:9 content area is below 1920x1080 (Full HD).");
+      if (warnings.length) {
+        pdf.setFontSize(9);
+        pdf.setTextColor(180, 83, 9);
+        warnings.forEach((line, i) => pdf.text(`⚠ ${line}`, 10, statsY + i * 6));
+        pdf.setTextColor(15, 23, 42);
+      }
+
+      // Diagram, scaled to fit its reserved area (small top/left margin for
+      // the ruler labels) while preserving the wall's true aspect ratio.
+      const diagAreaX = 110;
+      const diagAreaY = 34;
+      const diagAreaW = pageW - diagAreaX - 12;
+      const diagAreaH = pageH - diagAreaY - 16;
+      const scale = Math.min(diagAreaW / pixelW, diagAreaH / pixelH);
+      const boxX = diagAreaX;
+      const boxY = diagAreaY;
+      const boxW = pixelW * scale;
+      const boxH = pixelH * scale;
+
+      pdf.setDrawColor(100, 116, 139);
+      pdf.setLineWidth(0.3);
+      pdf.rect(boxX, boxY, boxW, boxH);
+
+      pdf.setDrawColor(203, 213, 225);
+      pdf.setLineWidth(0.1);
+      for (let c = 1; c < cols; c += 1) {
+        const x = boxX + (c / cols) * boxW;
+        pdf.line(x, boxY, x, boxY + boxH);
+      }
+      for (let r = 1; r < rows; r += 1) {
+        const y = boxY + (r / rows) * boxH;
+        pdf.line(boxX, y, boxX + boxW, y);
+      }
+
+      const rectX = boxX + (fitOffsetX / pixelW) * boxW;
+      const rectY = boxY + (fitOffsetY / pixelH) * boxH;
+      const rectW = (fitW / pixelW) * boxW;
+      const rectH = (fitH / pixelH) * boxH;
+      pdf.setDrawColor(245, 158, 11);
+      pdf.setLineWidth(0.5);
+      pdf.setLineDashPattern([1.5, 1], 0);
+      pdf.rect(rectX, rectY, rectW, rectH);
+      pdf.setLineDashPattern([], 0);
+
+      pdf.setFontSize(7);
+      pdf.setTextColor(100, 116, 139);
+      rulerMarks(wallWidthM).forEach((m) => {
+        const x = boxX + (wallWidthM > 0 ? (m / wallWidthM) * boxW : 0);
+        pdf.text(`${m}m`, x, boxY - 2, { align: "center" });
+      });
+      rulerMarks(wallHeightM).forEach((m) => {
+        const y = boxY + (wallHeightM > 0 ? (m / wallHeightM) * boxH : 0);
+        pdf.text(`${m}m`, boxX - 2, y + 1, { align: "right" });
+      });
+
+      pdf.save(`quick-panel-layout-${panelType}-${cols}x${rows}.pdf`);
+    } catch (err) {
+      console.error("Quick Panel Layout PDF export failed", err);
+      alert("PDF export failed - check console");
+    }
+  };
+
   const topMarks = rulerMarks(wallWidthM);
   const sideMarks = rulerMarks(wallHeightM);
 
@@ -100,6 +199,9 @@ export default function QuickLayoutView() {
           </div>
           <div className="flex items-center gap-2">
             <Button intent="secondary" onClick={clearAll}>Clear</Button>
+            <Button intent="secondary" onClick={exportPdf}>
+              <FileText className="h-4 w-4" />Export PDF
+            </Button>
             <Button intent="primary" onClick={sendToMainTool}>Send to Main Layout Tool</Button>
           </div>
         </div>
