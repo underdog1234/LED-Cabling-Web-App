@@ -1,6 +1,6 @@
 ﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ImageDown, Video } from "lucide-react";
+import { ImageDown, Video, LayoutGrid } from "lucide-react";
 import { HelpCircle, Redo2, Undo2 } from "lucide-react";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
 import {
@@ -32,7 +32,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.20.2";
+const APP_VERSION = "0.21.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -231,6 +231,12 @@ type LayoutSnapshot = {
   panels: Cell[];
 };
 
+// Hand-off payload from the standalone Quick Panel Layout tab (see
+// src/quickLayout/QuickLayoutView.tsx), written to localStorage right before
+// it navigates this same tab back to the plain app URL.
+const QUICK_LAYOUT_TRANSFER_KEY = "ledCablingQuickLayoutTransfer:v1";
+type QuickLayoutTransfer = { panelType: PanelTypeKey; cols: number; rows: number };
+
 type SignalPortStat = {
   panels: number;
   path: Cell[];
@@ -344,7 +350,7 @@ const makePanelAt = (xMm: number, yMm: number, panelType: PanelTypeKey = "MG9"):
 
 // Grid generator: cols x rows of the given type on its own pitch (MG9 500mm,
 // MT 1000mm wide). After generation every panel is freely movable.
-const makeGridPanels = (cols: number, rows: number, panelType: PanelTypeKey = "MG9"): Cell[] => {
+export const makeGridPanels = (cols: number, rows: number, panelType: PanelTypeKey = "MG9"): Cell[] => {
   const wMm = PANEL_TYPES[panelType].w * 1000;
   const hMm = PANEL_TYPES[panelType].h * 1000;
   const panels: Cell[] = [];
@@ -1121,12 +1127,42 @@ function ImportPreviewModal({
   );
 }
 
+function QuickLayoutTransferModal({
+  payload,
+  onCancel,
+  onReplace,
+  onAdd,
+}: {
+  payload: QuickLayoutTransfer;
+  onCancel: () => void;
+  onReplace: () => void;
+  onAdd: () => void;
+}) {
+  const typeLabel = payload.panelType === "MT" ? "MT" : "MG9";
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onCancel}>
+      <div className="w-full max-w-md rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="mb-3 text-lg font-bold">Quick Panel Layout</div>
+        <p className="text-sm text-slate-300">
+          Bring in {payload.cols}×{payload.rows} {typeLabel} panels from Quick Panel Layout. This project already has panels on it - replace the current layout, or add the new grid alongside it?
+        </p>
+        <div className="mt-4 flex flex-wrap justify-end gap-2">
+          <Button variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button intent="secondary" onClick={onAdd}>Add to canvas</Button>
+          <Button intent="primary" onClick={onReplace}>Replace current</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const signalPorts = useMemo(() => makeSignalPorts(), []);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
+  const [pendingQuickLayoutTransfer, setPendingQuickLayoutTransfer] = useState<QuickLayoutTransfer | null>(null);
 
   const [projectName, setProjectName] = useState("Untitled Project");
   const [surfaceName, setSurfaceName] = useState("");
@@ -1141,7 +1177,7 @@ export default function App() {
   const [rows, setRows] = useState(8);
   const [draftCols, setDraftCols] = useState("24");
   const [draftRows, setDraftRows] = useState("8");
-  const [grid, setGrid] = useState<Cell[]>(() => makeGridPanels(24, 8));
+  const [grid, setGrid] = useState<Cell[]>(() => []);
   const [activePort, setActivePort] = useState(1);
   const [activePowerPort, setActivePowerPort] = useState(1);
   const [patchMode, setPatchMode] = useState<"signal" | "power">("signal");
@@ -1355,6 +1391,63 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+
+  // Pick up a grid handed off from the standalone Quick Panel Layout tab. If
+  // this tab's canvas is empty (including the app's own empty-on-load
+  // default) there's nothing to lose, so apply it immediately; otherwise ask
+  // via pendingQuickLayoutTransfer -> QuickLayoutTransferModal. The key is
+  // removed as soon as it's read so a refresh never re-triggers this, even
+  // under StrictMode's double-invoke in dev.
+  useEffect(() => {
+    let payload: QuickLayoutTransfer | null = null;
+    try {
+      const raw = localStorage.getItem(QUICK_LAYOUT_TRANSFER_KEY);
+      if (raw) payload = JSON.parse(raw) as QuickLayoutTransfer;
+    } catch (err) {
+      console.error("Quick Panel Layout transfer payload was invalid", err);
+    }
+    if (!payload) return;
+    localStorage.removeItem(QUICK_LAYOUT_TRANSFER_KEY);
+    if (grid.length === 0) {
+      pushUndoSnapshot();
+      setCols(payload.cols);
+      setRows(payload.rows);
+      setPanelType(payload.panelType);
+      setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
+      setSelectedId(null);
+      setSelectedCells(new Set());
+    } else {
+      setPendingQuickLayoutTransfer(payload);
+    }
+    // Mount-only: this reads a one-shot hand-off, not something to react to.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const applyQuickLayoutTransfer = (mode: "replace" | "add") => {
+    const payload = pendingQuickLayoutTransfer;
+    if (!payload) return;
+    pushUndoSnapshot();
+    if (mode === "replace") {
+      setCols(payload.cols);
+      setRows(payload.rows);
+      setPanelType(payload.panelType);
+      setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
+      setSelectedId(null);
+      setSelectedCells(new Set());
+    } else {
+      const bbox = activeBBox(activePanels.map(cellRect));
+      const GAP_MM = 500;
+      const offsetX = bbox.w > 0 ? bbox.x + bbox.w + GAP_MM : 0;
+      const offsetY = bbox.w > 0 ? bbox.y : 0;
+      const added = makeGridPanels(payload.cols, payload.rows, payload.panelType).map((cell) => ({
+        ...cell,
+        x: cell.x + offsetX,
+        y: cell.y + offsetY,
+      }));
+      setGrid((prev) => [...prev, ...added]);
+    }
+    setPendingQuickLayoutTransfer(null);
+  };
 
   const maxAllowedPowerPanels = 21;
   const safePanelsPerPowerOutlet = Math.min(Math.max(panelsPerPowerOutlet, 1), maxAllowedPowerPanels);
@@ -2138,6 +2231,12 @@ const exportJson = () => {
       console.error("Video test pattern failed", err);
       alert("Could not open the video test pattern - check console");
     }
+  };
+
+  // Standalone panel-count calculator, opened with no hand-off data so it
+  // always starts at its own neutral 1x1 MG9 default (see QuickLayoutView).
+  const openQuickPanelLayoutTab = () => {
+    window.open(`${location.pathname}?quicklayout=1`, "_blank");
   };
 
   const pickVideoMimeType = (): string | null => {
@@ -3332,6 +3431,14 @@ const exportJson = () => {
           onApply={applyImport}
         />
       ) : null}
+      {pendingQuickLayoutTransfer ? (
+        <QuickLayoutTransferModal
+          payload={pendingQuickLayoutTransfer}
+          onCancel={() => setPendingQuickLayoutTransfer(null)}
+          onReplace={() => applyQuickLayoutTransfer("replace")}
+          onAdd={() => applyQuickLayoutTransfer("add")}
+        />
+      ) : null}
       <style>{`
         @media print {
           @page { size: landscape; margin: 12mm; }
@@ -3384,6 +3491,9 @@ const exportJson = () => {
               </Button>
               <Button intent="secondary" onClick={() => importInputRef.current?.click()} title="Import a project from the Creative Layout Tool">
                 <Upload className="h-4 w-4" />Import Project from Creative Layout Tool
+              </Button>
+              <Button intent="secondary" onClick={openQuickPanelLayoutTab} title="Open a standalone panel-count calculator in a new tab">
+                <LayoutGrid className="h-4 w-4" />Quick Panel Layout
               </Button>
               <Button intent="ghost" onClick={() => setShowHelp(true)}>
                 <HelpCircle className="h-4 w-4" />Help
