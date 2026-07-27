@@ -20,6 +20,7 @@ import {
   PANEL_TYPES,
   PANEL_VARIANTS,
   cellRect,
+  cellPanelType,
   mirrorRectX,
   isPanelHead,
   applyPanelFrame,
@@ -48,6 +49,10 @@ export type TestPatternLayout = {
   wallHeightM: number;
   projectName: string;
   surfaceName: string;
+  /** RGB checkerboard cell size, in canvas px - one full panel footprint for
+   * the project's panel type (see buildRgbTile). */
+  tileWidthPx: number;
+  tileHeightPx: number;
   rowLabel: (cell: Cell) => number;
   colLabel: (cell: Cell) => string;
 };
@@ -73,37 +78,42 @@ export const LOOP_SECONDS = 20;
 // not a smooth video, and a lower rate keeps hundreds of panels responsive.
 export const DRAW_FPS = 24;
 
-// RGB tile = one MG9 module footprint at native pixel pitch (matches the PNG
-// test-pattern exporter's pxPerMm exactly, see below), so checkerboard cells
-// land on real module boundaries for snap-placed layouts. Kept as a literal
-// (not read from PANEL_TYPES.MG9.pixW) so this module has no import-time
-// dependency on App.tsx - App.tsx also imports FROM this module for the
-// in-app video recorder, and a live top-level read here would race against
-// that circular import's module-initialisation order.
-const TILE_PX = 168; // must match PANEL_TYPES.MG9.pixW in App.tsx
-const RGB_PERIOD_PX = TILE_PX * 3; // 504 - one full stagger + slide period
+// RGB tile = one full panel footprint (of the project's own panel type) at
+// the wall's native pixel pitch, so checkerboard cells land on real panel
+// boundaries and each panel reads as a single solid colour - MG9 is a 500mm
+// square module; MT is 1000x500mm (twice as wide), so its tile is twice as
+// wide too (see computeTestPatternLayout's tileWidthPx/tileHeightPx).
 const RGB_COLORS = ["#ff0000", "#00ff00", "#0000ff"];
 
-let cachedRgbTile: HTMLCanvasElement | null = null;
+let cachedRgbTile: { tileW: number; tileH: number; canvas: HTMLCanvasElement } | null = null;
 let cachedGreyTile: { period: number; canvas: HTMLCanvasElement } | null = null;
 let cachedPatternLayer: { w: number; h: number; canvas: HTMLCanvasElement } | null = null;
 
 // Staggered diagonal R/G/B supercell: row R, col C -> colour (R+C) mod 3. This
 // makes adjacent panels differ AND makes each row offset from the one above,
 // and tiles seamlessly in both axes because the pattern's own period matches
-// the tile size - no per-panel logic needed.
-const buildRgbTile = (): HTMLCanvasElement => {
+// the tile size - no per-panel logic needed. Tile cells are `tileW x tileH`
+// (one full panel footprint), not necessarily square - MT panels are twice
+// as wide as they are tall.
+const buildRgbTile = (tileW: number, tileH: number): HTMLCanvasElement => {
   const c = document.createElement("canvas");
-  c.width = RGB_PERIOD_PX;
-  c.height = RGB_PERIOD_PX;
+  c.width = tileW * 3;
+  c.height = tileH * 3;
   const ctx = c.getContext("2d")!;
   for (let row = 0; row < 3; row += 1) {
     for (let col = 0; col < 3; col += 1) {
       ctx.fillStyle = RGB_COLORS[(row + col) % 3];
-      ctx.fillRect(col * TILE_PX, row * TILE_PX, TILE_PX, TILE_PX);
+      ctx.fillRect(col * tileW, row * tileH, tileW, tileH);
     }
   }
   return c;
+};
+
+const getRgbTile = (tileW: number, tileH: number): HTMLCanvasElement => {
+  if (cachedRgbTile && cachedRgbTile.tileW === tileW && cachedRgbTile.tileH === tileH) return cachedRgbTile.canvas;
+  const canvas = buildRgbTile(tileW, tileH);
+  cachedRgbTile = { tileW, tileH, canvas };
+  return canvas;
 };
 
 // Seamless diagonal greyscale sweep: a single band travels corner-to-corner
@@ -167,6 +177,29 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     const last = Math.ceil((r.x + r.w - wallBBox.x) / MODULE_MM) - 1;
     for (let i = first; i <= last; i += 1) occupiedCols.add(i);
   });
+
+  // RGB tile size = one full panel footprint, so each panel shows a single
+  // solid colour (MT is physically twice as wide as MG9, so its tile is
+  // twice as wide too). Derived from the panels actually on the wall (most
+  // common type wins) rather than the project's panelType default, which
+  // can go stale if panels were changed individually after the fact.
+  const typeCounts = new Map<PanelTypeKey, number>();
+  activePanels.forEach((cell) => {
+    const type = cellPanelType(cell);
+    typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
+  });
+  let dominantType: PanelTypeKey = project.panelType;
+  let dominantCount = -1;
+  typeCounts.forEach((count, type) => {
+    if (count > dominantCount) {
+      dominantCount = count;
+      dominantType = type;
+    }
+  });
+  const tileSpec = PANEL_TYPES[dominantType] ?? PANEL_TYPES.MG9;
+  const tileWidthPx = Math.max(1, Math.round(tileSpec.w * 1000 * pxPerMm));
+  const tileHeightPx = Math.max(1, Math.round(tileSpec.h * 1000 * pxPerMm));
+
   return {
     activePanels,
     wallBBox,
@@ -180,6 +213,8 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     wallHeightM: wallBBox.h / 1000,
     projectName: (project.projectName || "").trim(),
     surfaceName: (project.surfaceName || "").trim(),
+    tileWidthPx,
+    tileHeightPx,
     rowLabel: (cell) => (bandIndexById.get(cell.id) ?? 0) + 1,
     colLabel: (cell) => {
       const col = (cellRect(cell).x - wallBBox.x) / MODULE_MM + 1;
@@ -200,12 +235,12 @@ const dispRectPx = (layout: TestPatternLayout, cell: Cell): RectMm => {
   };
 };
 
-// Wall info text: centred in the middle of the wall, plain white, no
-// background box and no outline - just the project name and/or LED surface
-// name (only when defined) plus the wall stats.
+// Wall info text: centred in the middle of the wall - right where the
+// alignment overlay's diagonal lines and circle cross - so a thin black
+// stroke behind the white fill keeps it legible there too.
 const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
   const { W, H } = layout;
-  const fontPx = Math.max(14, Math.min(30, Math.round(W * 0.014)));
+  const fontPx = Math.max(28, Math.min(70, Math.round(W * 0.028)));
   const lineH = Math.round(fontPx * 1.4);
   const lines: string[] = [];
   if (layout.projectName) lines.push(layout.projectName);
@@ -222,8 +257,15 @@ const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) 
   ctx.font = `bold ${fontPx}px Arial`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = Math.max(2, Math.round(fontPx * 0.12));
   ctx.fillStyle = "#ffffff";
-  lines.forEach((line, i) => ctx.fillText(line, cx, startY + i * lineH));
+  lines.forEach((line, i) => {
+    const ly = startY + i * lineH;
+    ctx.strokeText(line, cx, ly);
+    ctx.fillText(line, cx, ly);
+  });
   ctx.restore();
 };
 
@@ -347,7 +389,7 @@ const buildOuterExtremityOutline = (layout: TestPatternLayout): HTMLCanvasElemen
 const drawAlignmentOverlay = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
   const { W, H } = layout;
   ctx.save();
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
   ctx.lineWidth = Math.max(2, Math.round(Math.min(W, H) * 0.0035));
   ctx.beginPath();
   ctx.moveTo(0, 0);
@@ -372,7 +414,8 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   if (W <= 0 || H <= 0) return;
   ctx.imageSmoothingEnabled = false;
 
-  if (!cachedRgbTile) cachedRgbTile = buildRgbTile();
+  const rgbTile = getRgbTile(layout.tileWidthPx, layout.tileHeightPx);
+  const rgbPeriodPx = layout.tileWidthPx * 3;
   // Grey period = the wall's own diagonal, so exactly one bright band sweeps
   // corner-to-corner across the whole wall at a time (not several small
   // repeats), scaled to each project's actual size.
@@ -380,7 +423,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   const greyTile = getGreyTile(greyPeriod);
 
   const phase = ((timeSeconds % LOOP_SECONDS) + LOOP_SECONDS) % LOOP_SECONDS;
-  const rgbSlidePx = (phase / LOOP_SECONDS) * RGB_PERIOD_PX;
+  const rgbSlidePx = (phase / LOOP_SECONDS) * rgbPeriodPx;
   const greySlidePx = (phase / LOOP_SECONDS) * greyPeriod;
 
   // Build the world-space pattern layer once per frame (two full-wall draws,
@@ -394,7 +437,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   // as the slide reveals the next one, never a blended gradient.
   layerCtx.imageSmoothingEnabled = false;
 
-  const rgbPattern = layerCtx.createPattern(cachedRgbTile, "repeat")!;
+  const rgbPattern = layerCtx.createPattern(rgbTile, "repeat")!;
   rgbPattern.setTransform(new DOMMatrix().translate(rgbSlidePx, 0));
   layerCtx.fillStyle = rgbPattern;
   layerCtx.fillRect(0, 0, W, H);
@@ -461,7 +504,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     // Location label: top-left corner, two lines (row then column), always
     // axis-aligned/white/upright regardless of the panel's own rotation.
     const pad = Math.max(3, Math.round(Math.min(r.w, r.h) * 0.06));
-    const fontPx = Math.max(11, Math.floor(Math.min(r.w, r.h) * 0.16));
+    const fontPx = Math.max(6, Math.floor(Math.min(r.w, r.h) * 0.08));
     const lineH = Math.round(fontPx * 1.15);
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "left";

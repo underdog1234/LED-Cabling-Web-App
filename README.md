@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.22.0`
+Version `0.22.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -18,6 +18,11 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v3 format with sub-screens and output-canvas positioning; v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.22.1
+
+- Fixed the animated/video test pattern's RGB checkerboard: the colour tile was always sized to an MG9 panel's pixel width, so on MT walls each panel (physically twice as wide) showed two colours split down its middle instead of one solid colour. The tile now matches the actual panel footprint on the wall (derived from the most common panel type present), so MT panels correctly show one colour across their full width and MG9 walls are unaffected
+- Reworked the test pattern's text legibility and sizing: the centre info block (project name/stats) now has a black stroke behind its white fill so it stays readable where the alignment cross-hatch overlay crosses it, is much larger, and the per-panel row/column corner labels are now half their previous size. The alignment cross-hatch overlay itself is now more transparent
 
 ## Recent Changes In v0.22.0
 
