@@ -1,4 +1,5 @@
 import React from "react";
+import { ChevronDown } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Shared design-system UI primitives.
@@ -71,16 +72,52 @@ export const Button = ({
 // Cards & sections
 // ---------------------------------------------------------------------------
 
-export const Card = ({ children, className = "", ...props }: any) => (
-  <div className={`rounded-xl border border-slate-700 bg-slate-800/80 p-4 shadow-sm ${className}`} {...props}>
-    {children}
-  </div>
-);
+// Collapse state for a Card is shared with its CardHeader/CardContent via
+// context, so every existing call site (Card > CardHeader > CardTitle,
+// Card > CardContent) keeps working unchanged - only the Card itself needs
+// `collapsible` to opt in.
+const CardCollapseContext = React.createContext<{ open: boolean; toggle: () => void; collapsible: boolean } | null>(null);
 
-export const CardHeader = ({ children, className = "" }: any) => (
-  <div className={`mb-3 ${className}`}>{children}</div>
-);
-export const CardContent = ({ children, className = "" }: any) => <div className={className}>{children}</div>;
+export const Card = ({ children, className = "", collapsible = false, defaultOpen = true, ...props }: any) => {
+  const [open, setOpen] = React.useState(defaultOpen);
+  return (
+    <div className={`rounded-xl border border-slate-700 bg-slate-800/80 p-4 shadow-sm ${className}`} {...props}>
+      <CardCollapseContext.Provider value={{ open, toggle: () => setOpen((prev: boolean) => !prev), collapsible }}>
+        {children}
+      </CardCollapseContext.Provider>
+    </div>
+  );
+};
+
+export const CardHeader = ({ children, className = "" }: any) => {
+  const ctx = React.useContext(CardCollapseContext);
+  if (!ctx?.collapsible) {
+    return <div className={`mb-3 ${className}`}>{children}</div>;
+  }
+  return (
+    <div
+      className={`mb-3 flex cursor-pointer items-start gap-2 no-print ${className}`}
+      onClick={ctx.toggle}
+      role="button"
+      tabIndex={0}
+      aria-expanded={ctx.open}
+      onKeyDown={(event: React.KeyboardEvent) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          ctx.toggle();
+        }
+      }}
+    >
+      <ChevronDown className={`mt-1 h-4 w-4 shrink-0 text-slate-300 transition-transform ${ctx.open ? "" : "-rotate-90"}`} />
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
+};
+export const CardContent = ({ children, className = "" }: any) => {
+  const ctx = React.useContext(CardCollapseContext);
+  if (ctx?.collapsible && !ctx.open) return null;
+  return <div className={className}>{children}</div>;
+};
 export const CardTitle = ({ children, className = "" }: any) => (
   <div className={`text-base font-semibold text-white [text-shadow:0_0_2px_black] ${className}`}>{children}</div>
 );

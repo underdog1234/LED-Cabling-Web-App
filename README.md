@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.21.2`
+Version `0.22.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -8,13 +8,26 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 
 - Build LED walls by rows and columns, or place panels freely (non-uniform layouts) with drag, edge-snap and joining
 - Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
+- Group panels into named **Sub-Screens**, edit/patch each one in isolation (other sub-screens stay visible but dimmed and locked), and view the complete assembled layout in Canvas View
+- Position the whole layout or individual sub-screens within a configurable-resolution **Output Canvas** (drag, numeric entry, align/snap tools, boundary/overlap warnings) for multi-processor / media-server mapping
 - Import projects from the Creative Layout Tool
-- Patch signal and power manually or with auto-snake / automatic letter-patching routing
+- Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected
 - Flip the panel layout between `Back View` and `Front View`
-- Export a PDF report with portrait detail pages plus both layout views in landscape
+- Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape
 - Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
-- Save and reopen settings as JSON (v2 free-panel format, with legacy grid migration)
+- Save and reopen settings as JSON (v3 format with sub-screens and output-canvas positioning; v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
+- Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.22.0
+
+- Added **Sub-Screens**: create/rename/delete named panel groupings, assign/reassign/remove panels, select-all-in-screen, and a Canvas View showing the whole layout at once. Selecting a sub-screen dims and locks every panel outside it and scopes all calculations (panel count, resolution, weight, power, stock, port usage), manual/auto patching, and PDF/PNG/video exports to just that screen. A labelled boundary outline is drawn in the workspace for each sub-screen. Projects with no sub-screens behave exactly as before, and old save files load unchanged
+- Added **Output Canvas Positioning**: configurable output resolution (common presets plus custom width/height), per-sub-screen (or whole-layout) placement via numeric X/Y entry, dragging, arrow-key nudging, or align/centre/snap-to-edge tools, a scaled live preview, and warnings for out-of-bounds or overlapping screens. Each panel's final canvas-space X/Y is computed from its sub-screen's position plus its own placement, independently of the physical millimetre layout
+- Auto-patching, manual patching, and the clear/match-power actions now operate only on the active sub-screen's panels (shared signal/power port pools are respected, and other sub-screens' patching is never touched or reset)
+- PDF export gains a per-sub-screen summary page (name, resolution, physical size, canvas position, panel count, ports in use) whenever sub-screens exist
+- Fixed sub-screen creation jumping straight into the new (empty) sub-screen, which visually collapsed the workspace and dimmed every existing panel until something was assigned to it - creating a sub-screen now leaves the current view untouched
+- Reorganised the layout: removed the legacy "LED Surface / Sub-Screen Name" field, moved the Sub-Screens panel below Wall Summary, moved Output Canvas below Power Outputs (and made it always visible, no longer behind a toggle), and moved panel-to-sub-screen assignment controls next to Undo/Redo with a live selection count
+- Every major section of the UI is now collapsible via its header
 
 ## Recent Changes In v0.21.2
 

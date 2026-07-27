@@ -18,6 +18,11 @@ import {
   MODULE_MM,
 } from "./model/panels";
 import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
+import SubScreenPanel from "./subScreens/SubScreenPanel";
+import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
+import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
+import { finalCanvasPositionOf, subScreenResolutionOf } from "./canvasView/canvasModel";
+import { subScreenPanelCount } from "./subScreens/subScreenModel";
 import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame } from "./testPattern/drawTestPattern";
 
 const SIGNAL_PORT_COUNT = 20;
@@ -32,7 +37,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.21.2";
+const APP_VERSION = "0.22.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -166,7 +171,7 @@ const getShapeOrientation = (variant: PanelVariantKey, rotation: number | undefi
   return null;
 };
 
-const PORT_COLORS = [
+export const PORT_COLORS = [
   "#48d7d2",
   "#d58cff",
   "#69d54c",
@@ -225,10 +230,42 @@ export type Cell = {
   panelVariant: PanelVariantKey;
   rotation: number;
   panelType: PanelTypeKey;
+  /** Sub-screen membership - null = unassigned. */
+  subScreenId: string | null;
 };
+
+// A named grouping of panels ("Centre Screen", "Stage Left Tower", ...).
+// Resolution/physical size is intentionally NOT stored here - it's always
+// derived from the sub-screen's member panels, same as the whole-layout
+// stats, so there's only ever one source of truth.
+export type SubScreen = {
+  id: string;
+  name: string;
+  /** Output-canvas position, top-left origin, canvas pixels. */
+  canvasX: number;
+  canvasY: number;
+  /** Stable insertion-order sort key. */
+  createdAt: number;
+};
+
+export type OutputCanvasPreset = { w: number; h: number };
+export const OUTPUT_CANVAS_PRESETS: OutputCanvasPreset[] = [
+  { w: 1920, h: 1080 },
+  { w: 2560, h: 1440 },
+  { w: 3840, h: 1080 },
+  { w: 3840, h: 2160 },
+  { w: 4096, h: 2160 },
+  { w: 7680, h: 2160 },
+  { w: 7680, h: 4320 },
+];
 
 type LayoutSnapshot = {
   panels: Cell[];
+  subScreens: SubScreen[];
+  outputCanvasW: number;
+  outputCanvasH: number;
+  wholeLayoutCanvasX: number;
+  wholeLayoutCanvasY: number;
 };
 
 // Hand-off payload from the standalone Quick Panel Layout tab (see
@@ -273,6 +310,7 @@ type LegacyGridCell = {
   panelType?: PanelTypeKey;
   mtTail?: boolean;
   id?: string;
+  subScreenId?: string | null;
 };
 
 type OpenJsonPayload = {
@@ -294,6 +332,12 @@ type OpenJsonPayload = {
   patching?: {
     grid?: LegacyGridCell[][];
   };
+  /** v3: named sub-screen groupings. */
+  subScreens?: SubScreen[];
+  /** v3: output-canvas resolution. */
+  outputCanvas?: { w?: number; h?: number };
+  /** v3: whole-layout canvas position, used only when subScreens is empty. */
+  wholeLayoutCanvasPos?: { x?: number; y?: number };
 };
 
 const gcd = (a: number, b: number): number => {
@@ -333,7 +377,7 @@ const findCellById = (panels: Cell[], id: string | null | undefined): Cell | nul
   return panels.find((cell) => cell.id === id) ?? null;
 };
 
-const makePanelAt = (xMm: number, yMm: number, panelType: PanelTypeKey = "MG9"): Cell => ({
+const makePanelAt = (xMm: number, yMm: number, panelType: PanelTypeKey = "MG9", subScreenId: string | null = null): Cell => ({
   id: newCellId(),
   x: xMm,
   y: yMm,
@@ -346,17 +390,20 @@ const makePanelAt = (xMm: number, yMm: number, panelType: PanelTypeKey = "MG9"):
   panelVariant: "STANDARD",
   rotation: 0,
   panelType,
+  subScreenId,
 });
 
 // Grid generator: cols x rows of the given type on its own pitch (MG9 500mm,
-// MT 1000mm wide). After generation every panel is freely movable.
-export const makeGridPanels = (cols: number, rows: number, panelType: PanelTypeKey = "MG9"): Cell[] => {
+// MT 1000mm wide). After generation every panel is freely movable. New panels
+// join whichever sub-screen is currently being edited (null = unassigned,
+// e.g. Canvas View or no sub-screens created yet).
+export const makeGridPanels = (cols: number, rows: number, panelType: PanelTypeKey = "MG9", subScreenId: string | null = null): Cell[] => {
   const wMm = PANEL_TYPES[panelType].w * 1000;
   const hMm = PANEL_TYPES[panelType].h * 1000;
   const panels: Cell[] = [];
   for (let y = 0; y < rows; y += 1) {
     for (let x = 0; x < cols; x += 1) {
-      panels.push(makePanelAt(x * wMm, y * hMm, panelType));
+      panels.push(makePanelAt(x * wMm, y * hMm, panelType, subScreenId));
     }
   }
   return panels;
@@ -423,9 +470,32 @@ export const normalizePanels = (raw: unknown): Cell[] => {
       panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
       rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
       panelType: cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
+      subScreenId: typeof cell.subScreenId === "string" ? cell.subScreenId : null,
     });
   });
   return panels;
+};
+
+// Validate/repair a sub-screen list from a file - drop malformed entries
+// rather than letting a corrupt name/id/position crash the app.
+export const normalizeSubScreens = (raw: unknown): SubScreen[] => {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const subScreens: SubScreen[] = [];
+  raw.forEach((item, index) => {
+    const entry = item as Partial<SubScreen> | null;
+    if (!entry || typeof entry.id !== "string" || !entry.id || typeof entry.name !== "string") return;
+    if (seen.has(entry.id)) return;
+    seen.add(entry.id);
+    subScreens.push({
+      id: entry.id,
+      name: entry.name,
+      canvasX: Number.isFinite(Number(entry.canvasX)) ? Number(entry.canvasX) : 0,
+      canvasY: Number.isFinite(Number(entry.canvasY)) ? Number(entry.canvasY) : 0,
+      createdAt: Number.isFinite(Number(entry.createdAt)) ? Number(entry.createdAt) : index,
+    });
+  });
+  return subScreens;
 };
 
 // A settings file saved before per-cell panel types existed has cells with no
@@ -463,6 +533,7 @@ const gridCellsToPanels = (rawGrid: LegacyGridCell[][], legacyAllType: PanelType
         panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
         rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
         panelType: cellType,
+        subScreenId: null,
       });
     });
   });
@@ -494,7 +565,7 @@ const convertPanelTypeInList = (panels: Cell[], id: string, type: PanelTypeKey):
   }
   // MT -> MG9: shrink in place and backfill the freed right half.
   target.panelType = "MG9";
-  const filler = makePanelAt(target.x + 500, target.y, "MG9");
+  const filler = makePanelAt(target.x + 500, target.y, "MG9", target.subScreenId);
   return [...panels, filler];
 };
 
@@ -512,20 +583,17 @@ const getStatusColor = (percent: number) => {
 
 const clampActivePort = (value: number, max: number) => Math.min(Math.max(value, 1), max);
 
-const clearSignalOnGrid = (panels: Cell[]) =>
-  panels.map((cell) => ({
-    ...cell,
-    assignedPort: null,
-    sequence: null,
-  }));
+const clearSignalOnGrid = (panels: Cell[], scopeIds: Set<string> | null = null) =>
+  panels.map((cell) =>
+    scopeIds && !scopeIds.has(cell.id) ? cell : { ...cell, assignedPort: null, sequence: null },
+  );
 
-const clearPowerOnGrid = (panels: Cell[]) =>
-  panels.map((cell) => ({
-    ...cell,
-    assignedPowerPort: null,
-    powerSequence: null,
-    powerManual: false,
-  }));
+const clearPowerOnGrid = (panels: Cell[], scopeIds: Set<string> | null = null) =>
+  panels.map((cell) =>
+    scopeIds && !scopeIds.has(cell.id)
+      ? cell
+      : { ...cell, assignedPowerPort: null, powerSequence: null, powerManual: false },
+  );
 
 const getNextSequence = (
   panels: Cell[],
@@ -1216,6 +1284,25 @@ export default function App() {
   const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
   const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
 
+  // --- Sub-screens + output-canvas positioning -----------------------------
+  const [subScreens, setSubScreens] = useState<SubScreen[]>([]);
+  // null = "Canvas View" (whole layout). Use resolvedActiveSubScreenId below
+  // for any read - it treats a dangling id (e.g. after undoing a sub-screen
+  // creation) as Canvas View instead of crashing/misbehaving.
+  const [activeSubScreenId, setActiveSubScreenId] = useState<string | null>(null);
+  const [outputCanvasW, setOutputCanvasW] = useState(1920);
+  const [outputCanvasH, setOutputCanvasH] = useState(1080);
+  // Canvas position of the whole layout, used only when no sub-screens exist.
+  const [wholeLayoutCanvasX, setWholeLayoutCanvasX] = useState(0);
+  const [wholeLayoutCanvasY, setWholeLayoutCanvasY] = useState(0);
+  const [canvasSnapEnabled, setCanvasSnapEnabled] = useState(true);
+  // Drag gesture for repositioning a sub-screen (or the whole layout, id=null)
+  // on the output canvas - separate pixel-space analogue of moveDrag.
+  const [canvasDrag, setCanvasDrag] = useState<{ id: string | null; startX: number; startY: number; dx: number; dy: number } | null>(null);
+  // Which sub-screen the "Assign Selected" control (next to Undo/Redo) will
+  // assign the current selection to.
+  const [assignTargetSubScreenId, setAssignTargetSubScreenId] = useState("");
+
   const panel = PANEL_TYPES[panelType];
   // Workspace scale: CELL_SIZE px per 0.5m module at zoom 1.
   const pxPerMm = (CELL_SIZE / MODULE_MM) * zoom;
@@ -1232,15 +1319,51 @@ export default function App() {
   const selectedCount = activeSelectedKeys.size;
   const isPatchTargetActive = patchMode === "signal" ? activePort > 0 : activePowerPort > 0;
 
-  const captureLayout = (): LayoutSnapshot => ({ panels: cloneGrid(grid) });
+  // A dangling activeSubScreenId (e.g. left pointing at a sub-screen an undo
+  // just removed) must behave as Canvas View everywhere, not crash/misscope.
+  const resolvedActiveSubScreenId = useMemo(
+    () => (activeSubScreenId && subScreens.some((s) => s.id === activeSubScreenId) ? activeSubScreenId : null),
+    [activeSubScreenId, subScreens],
+  );
+
+  // A panel is "dimmed" (visible, non-interactive) when a sub-screen is being
+  // edited and the panel isn't part of it. Unassigned panels are dimmed too -
+  // otherwise a scoped edit session could silently reach out and touch a
+  // panel nobody has categorised yet. Forces an explicit assign-to-sub-screen
+  // step (or returning to Canvas View) before it can be selected/patched.
+  const isPanelDimmed = (cell: Cell) =>
+    subScreens.length > 0 && resolvedActiveSubScreenId !== null && cell.subScreenId !== resolvedActiveSubScreenId;
+
+  // The set of panel ids the active sub-screen (if any) is allowed to
+  // touch/patch/reorder, or null for "whole grid" (Canvas View, or no
+  // sub-screens created - i.e. today's exact unscoped behaviour).
+  const currentScopeIds = (): Set<string> | null =>
+    subScreens.length && resolvedActiveSubScreenId !== null
+      ? new Set(grid.filter((c) => c.subScreenId === resolvedActiveSubScreenId).map((c) => c.id))
+      : null;
+
+  const captureLayout = (): LayoutSnapshot => ({
+    panels: cloneGrid(grid),
+    subScreens: subScreens.map((s) => ({ ...s })),
+    outputCanvasW,
+    outputCanvasH,
+    wholeLayoutCanvasX,
+    wholeLayoutCanvasY,
+  });
   const restoreLayout = (snapshot: LayoutSnapshot) => {
     setGrid(cloneGrid(snapshot.panels));
+    setSubScreens(snapshot.subScreens.map((s) => ({ ...s })));
+    setOutputCanvasW(snapshot.outputCanvasW);
+    setOutputCanvasH(snapshot.outputCanvasH);
+    setWholeLayoutCanvasX(snapshot.wholeLayoutCanvasX);
+    setWholeLayoutCanvasY(snapshot.wholeLayoutCanvasY);
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
     setIsDragging(false);
     setIsSelectingPanels(false);
     setMoveDrag(null);
+    setCanvasDrag(null);
   };
   const pushUndoSnapshot = (snapshot = captureLayout()) => {
     setUndoStack((prev) => [...prev.slice(-49), snapshot]);
@@ -1249,6 +1372,19 @@ export default function App() {
   const commitGridUpdate = (updater: (prev: Cell[]) => Cell[]) => {
     const snapshot = captureLayout();
     setGrid((prev) => updater(prev));
+    pushUndoSnapshot(snapshot);
+  };
+  // Sub-screen CRUD (create/rename/delete/assign/...) and output-canvas
+  // position changes route through the same single undo stack as panel
+  // edits - one mental model for "undo", not a second parallel history.
+  const commitSubScreensUpdate = (updater: (prev: SubScreen[]) => SubScreen[]) => {
+    const snapshot = captureLayout();
+    setSubScreens((prev) => updater(prev));
+    pushUndoSnapshot(snapshot);
+  };
+  const commitCanvasUpdate = (updater: () => void) => {
+    const snapshot = captureLayout();
+    updater();
     pushUndoSnapshot(snapshot);
   };
   const undoLayout = () => {
@@ -1432,6 +1568,10 @@ export default function App() {
       setRows(payload.rows);
       setPanelType(payload.panelType);
       setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
+      // Replace wipes the whole project's panels - any existing sub-screens
+      // no longer have valid members, so start clean (same as importing).
+      setSubScreens([]);
+      setActiveSubScreenId(null);
       setSelectedId(null);
       setSelectedCells(new Set());
     } else {
@@ -1439,7 +1579,7 @@ export default function App() {
       const GAP_MM = 500;
       const offsetX = bbox.w > 0 ? bbox.x + bbox.w + GAP_MM : 0;
       const offsetY = bbox.w > 0 ? bbox.y : 0;
-      const added = makeGridPanels(payload.cols, payload.rows, payload.panelType).map((cell) => ({
+      const added = makeGridPanels(payload.cols, payload.rows, payload.panelType, resolvedActiveSubScreenId).map((cell) => ({
         ...cell,
         x: cell.x + offsetX,
         y: cell.y + offsetY,
@@ -1461,9 +1601,47 @@ export default function App() {
   const signalPortPixels = safePanelsPerSignalPort * panelPixels;
   const signalPortPercent = (signalPortPixels / MAX_PIXELS_PER_PORT) * 100;
 
-  const activeCells = useMemo(() => grid.filter((cell) => !cell.isRemoved), [grid]);
+  // Scope: which sub-screen's panels are "live" for editing/calc purposes.
+  // Canvas View (resolvedActiveSubScreenId === null) or "no sub-screens
+  // exist" (legacy projects, or projects that never use the feature) means
+  // the scope is the whole grid - i.e. today's exact behaviour.
+  const scopedGrid = useMemo(() => {
+    if (!subScreens.length || resolvedActiveSubScreenId === null) return grid;
+    return grid.filter((cell) => cell.subScreenId === resolvedActiveSubScreenId);
+  }, [grid, subScreens.length, resolvedActiveSubScreenId]);
+
+  const activeCells = useMemo(() => scopedGrid.filter((cell) => !cell.isRemoved), [scopedGrid]);
   const activePanels = activeCells;
   const totalPanels = activePanels.length;
+  // Per-sub-screen bounding boxes (workspace mm), for the boundary/label
+  // overlay drawn in the live workspace. Always derived from the FULL grid
+  // (not scopedGrid) so every sub-screen's outline is visible regardless of
+  // which one is currently being edited.
+  const subScreenBBoxes = useMemo(() => {
+    const map = new Map<string, RectMm>();
+    subScreens.forEach((screen) => {
+      const bbox = subScreenBBoxOf(grid, screen.id, cellRect);
+      if (bbox.w > 0 && bbox.h > 0) map.set(screen.id, bbox);
+    });
+    return map;
+  }, [grid, subScreens]);
+  // Bbox of the FULL active grid (not scope-filtered), used as the "local mm
+  // origin" for panels not assigned to any sub-screen when computing their
+  // final output-canvas position against the whole-layout canvas placement.
+  const fullGridActiveBBox = useMemo(() => activeBBox(grid.filter((c) => !c.isRemoved).map(cellRect)), [grid]);
+  // A panel's final position on the output canvas: its own sub-screen's
+  // canvas X/Y plus its mm offset within that sub-screen (converted to
+  // canvas pixels), or the whole-layout canvas position for panels that
+  // aren't assigned to any sub-screen. Never writes back into panel x/y -
+  // purely a derived, exported value (see canvasModel.ts).
+  const getFinalCanvasPositionOf = (cell: Cell) => {
+    if (cell.subScreenId) {
+      const screen = subScreens.find((s) => s.id === cell.subScreenId);
+      const bbox = subScreenBBoxes.get(cell.subScreenId);
+      if (screen && bbox) return finalCanvasPositionOf(cell, bbox, screen.canvasX, screen.canvasY);
+    }
+    return finalCanvasPositionOf(cell, fullGridActiveBBox, wholeLayoutCanvasX, wholeLayoutCanvasY);
+  };
   // Wall size = bounding box of all active panels (free layouts included).
   const wallBBox = useMemo(() => activeBBox(activePanels.map(cellRect)), [activePanels]);
   const wallWidthM = wallBBox.w / 1000;
@@ -1568,7 +1746,7 @@ export default function App() {
       signalPorts.map((port) => [port.id, { panels: 0, path: [], firstKey: null, lastKey: null }]),
     );
 
-    for (const cell of grid) {
+    for (const cell of scopedGrid) {
       if (!isActiveCell(cell)) continue;
       if (!cell.assignedPort || !stats[cell.assignedPort]) continue;
       stats[cell.assignedPort].panels += 1;
@@ -1585,7 +1763,7 @@ export default function App() {
     });
 
     return stats;
-  }, [grid, signalPorts]);
+  }, [scopedGrid, signalPorts]);
 
   const powerPortStats = useMemo(() => {
     const stats: Record<number, PowerPortStat> = Object.fromEntries(
@@ -1607,7 +1785,7 @@ export default function App() {
       ]),
     );
 
-    for (const cell of grid) {
+    for (const cell of scopedGrid) {
       if (!isActiveCell(cell)) continue;
       if (!cell.assignedPowerPort || !stats[cell.assignedPowerPort]) continue;
       const stat = stats[cell.assignedPowerPort];
@@ -1631,7 +1809,7 @@ export default function App() {
     });
 
     return stats;
-  }, [grid, powerPorts, powerSpec.maxW, powerSpec.maxA, powerSpec.avgW, powerSpec.avgA]);
+  }, [scopedGrid, powerPorts, powerSpec.maxW, powerSpec.maxA, powerSpec.avgW, powerSpec.avgA]);
 
   // Chain-start indicators for a panel, shared by the live layout and every export.
   // Blue ring: first panel of its signal chain (and the last panel too when the
@@ -2069,16 +2247,19 @@ export default function App() {
     // Cable lines first so they sit behind the panels.
     drawCanvasCableLines(ctx, dispRectPx);
 
-    grid.forEach((cell) => {
-      if (!isPanelHead(cell) || cell.isRemoved) return;
+    activePanels.forEach((cell) => {
+      if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
       const { signalRing, powerRing } = getPanelIndicators(cell);
       drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalRing, powerRing, mirrorX: flipped });
     });
 
-    grid.forEach((cell) => {
-      if (!isPanelHead(cell) || cell.isRemoved) return;
+    // Only clutter the diagram with canvas-position labels once the user has
+    // actually engaged with sub-screens/output-canvas positioning.
+    const showCanvasLabels = subScreens.length > 0 || wholeLayoutCanvasX !== 0 || wholeLayoutCanvasY !== 0;
+    activePanels.forEach((cell) => {
+      if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
       const cx = r.x + r.w / 2;
       ctx.fillStyle = "#020617";
@@ -2089,6 +2270,10 @@ export default function App() {
       if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, r.y + 50);
       const variantSymbol = getPanelSymbol(cell);
       if (variantSymbol) ctx.fillText(variantSymbol, cx, r.y + r.h - 6);
+      if (showCanvasLabels) {
+        const finalPos = getFinalCanvasPositionOf(cell);
+        ctx.fillText(`CX ${finalPos.x} CY ${finalPos.y}`, cx, r.y + r.h - 6 - (variantSymbol ? 14 : 0));
+      }
     });
 
     // Arrowheads last so the signal/power direction stays visible in front.
@@ -2100,9 +2285,10 @@ export default function App() {
 
 const exportJson = () => {
   try {
-    // formatVersion 2: free mm-positioned panel list (v1 grids still open).
+    // formatVersion 3: adds sub-screens + output-canvas positioning (v1/v2
+    // files still open, see openJson).
     const payload = {
-      formatVersion: 2,
+      formatVersion: 3,
       appVersion: APP_VERSION,
       projectName: safeProjectName,
       surfaceName,
@@ -2115,6 +2301,9 @@ const exportJson = () => {
       panels: grid,
       patching: { signalPortsUsed, powerPortsUsed },
       stockRows,
+      subScreens,
+      outputCanvas: { w: outputCanvasW, h: outputCanvasH },
+      wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
@@ -2182,8 +2371,8 @@ const exportJson = () => {
         return { x: (d.x - wallBBox.x) * pxPerMm, y: (d.y - wallBBox.y) * pxPerMm, w: d.w * pxPerMm, h: d.h * pxPerMm };
       };
 
-      grid.forEach((cell) => {
-        if (!isPanelHead(cell) || cell.isRemoved) return;
+      activePanels.forEach((cell) => {
+        if (!isPanelHead(cell)) return;
         const r = dispRectPx(cell);
         const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
         // No signal/power chain-start ring indicators in the PNG - it's a
@@ -2224,7 +2413,7 @@ const exportJson = () => {
   // renders TestPatternView - just the LED canvas, no page chrome.
   const openVideoTestPatternTab = () => {
     try {
-      const payload = { formatVersion: 1, projectName: safeProjectName, surfaceName, panelType, panels: grid };
+      const payload = { formatVersion: 1, projectName: safeProjectName, surfaceName, panelType, panels: activePanels };
       localStorage.setItem("ledCablingTestPattern:v1", JSON.stringify(payload));
       window.open(`${location.pathname}?testpattern=1`, "_blank");
     } catch (err) {
@@ -2261,7 +2450,7 @@ const exportJson = () => {
       alert("This browser can't record video (no WebM/MediaRecorder support). Try Chrome, Edge or Firefox.");
       return;
     }
-    const project: TestPatternProject = { projectName: safeProjectName, surfaceName, panelType, panels: grid };
+    const project: TestPatternProject = { projectName: safeProjectName, surfaceName, panelType, panels: activePanels };
     const layout = computeTestPatternLayout(project);
     if (layout.W <= 0 || layout.H <= 0) {
       alert("No active panels to render a test pattern from.");
@@ -2349,6 +2538,13 @@ const exportJson = () => {
         setDraftCols(String(nextCols));
         setDraftRows(String(nextRows));
         setGrid(nextPanels);
+        setSubScreens(Array.isArray(data.subScreens) ? normalizeSubScreens(data.subScreens) : []);
+        // Never resume mid-edit of a stale sub-screen from a previous session.
+        setActiveSubScreenId(null);
+        setOutputCanvasW(Number(data.outputCanvas?.w) || 1920);
+        setOutputCanvasH(Number(data.outputCanvas?.h) || 1080);
+        setWholeLayoutCanvasX(Number(data.wholeLayoutCanvasPos?.x) || 0);
+        setWholeLayoutCanvasY(Number(data.wholeLayoutCanvasPos?.y) || 0);
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -2417,10 +2613,16 @@ const exportJson = () => {
       panelVariant: p.panelVariant,
       rotation: mirrorRotation(p.panelVariant, p.rotation),
       panelType: p.panelType,
+      subScreenId: null,
     }));
     setProjectName(mode === "new" ? result.projectName : result.projectName || projectName);
     setPanelType("MG9");
     setGrid(panels);
+    // Import replaces the whole project's panels wholesale - any existing
+    // sub-screens no longer have valid members, so start clean rather than
+    // leaving stale/empty sub-screens behind.
+    setSubScreens([]);
+    setActiveSubScreenId(null);
     setSelectedId(null);
     setSelectedCells(new Set());
     setUndoStack([]);
@@ -2559,6 +2761,69 @@ const exportJson = () => {
       }
     };
 
+    // Per-sub-screen summary: always re-derives each sub-screen's own stats
+    // from the FULL grid (not the live scoped activePanels, which only ever
+    // reflects one sub-screen - or none - at a time), so the page covers
+    // every sub-screen regardless of which one is currently being edited.
+    const drawSubScreensTable = (startIndex: number, startY: number, maxY: number) => {
+      let y = startY;
+      const drawHeader = () => {
+        pdf.setFillColor(226, 232, 240);
+        pdf.rect(10, y - 5, 274, 7, "F");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(8);
+        pdf.text("Name", 12, y);
+        pdf.text("Resolution", 90, y);
+        pdf.text("Size (m)", 130, y);
+        pdf.text("Canvas X,Y", 168, y);
+        pdf.text("Right,Bottom", 210, y);
+        pdf.text("Panels", 255, y, { align: "right" });
+        pdf.text("Signal Ports", 282, y, { align: "right" });
+        y += 6;
+        pdf.setFont("helvetica", "normal");
+      };
+      drawHeader();
+      for (let index = startIndex; index < subScreens.length; index += 1) {
+        const screen = subScreens[index];
+        if (y > maxY) return index;
+        const bbox = subScreenBBoxOf(grid, screen.id, cellRect);
+        const resolution = subScreenResolutionOf(grid, screen.id);
+        const panelCount = subScreenPanelCount(grid, screen.id);
+        const portsUsed = new Set(
+          grid
+            .filter((c) => c.subScreenId === screen.id && !c.isRemoved && c.assignedPort)
+            .map((c) => c.assignedPort),
+        ).size;
+        pdf.text(pdf.splitTextToSize(screen.name, 74)[0], 12, y);
+        pdf.text(`${resolution.w} x ${resolution.h}`, 90, y);
+        pdf.text(`${(bbox.w / 1000).toFixed(2)} x ${(bbox.h / 1000).toFixed(2)}`, 130, y);
+        pdf.text(`${screen.canvasX}, ${screen.canvasY}`, 168, y);
+        pdf.text(`${screen.canvasX + resolution.w}, ${screen.canvasY + resolution.h}`, 210, y);
+        pdf.text(formatNumber(panelCount), 255, y, { align: "right" });
+        pdf.text(formatNumber(portsUsed), 282, y, { align: "right" });
+        y += 6;
+      }
+      return subScreens.length;
+    };
+
+    const drawSubScreensSummaryPage = () => {
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(`${safeProjectName} - Sub-Screens`, 10, 12);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(10);
+      pdf.text(`Output canvas: ${outputCanvasW} x ${outputCanvasH}px`, 10, 18);
+      let nextIndex = drawSubScreensTable(0, 28, 190);
+      while (nextIndex < subScreens.length) {
+        pdf.addPage("a4", "landscape");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(16);
+        pdf.text(`${safeProjectName} - Sub-Screens continued`, 10, 12);
+        nextIndex = drawSubScreensTable(nextIndex, 22, 190);
+      }
+    };
+
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
     pdf.text(safeProjectName, 10, 12);
@@ -2630,6 +2895,7 @@ const exportJson = () => {
     const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
     const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
     if (nextStockIndex < stockRows.length) drawStockPage(nextStockIndex);
+    if (subScreens.length > 0) drawSubScreensSummaryPage();
     drawLayoutPage(backLayoutCanvas, "Back View");
     drawLayoutPage(frontLayoutCanvas, "Front View");
     addPdfFooters();
@@ -2649,6 +2915,10 @@ const exportJson = () => {
     setCols(nextCols);
     setRows(nextRows);
     setGrid(makeGridPanels(nextCols, nextRows, panelType));
+    // Regenerating the grid replaces every panel - any existing sub-screens
+    // no longer have valid members, so start clean.
+    setSubScreens([]);
+    setActiveSubScreenId(null);
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
@@ -2698,6 +2968,7 @@ const exportJson = () => {
     };
     const ids = new Set<string>();
     grid.forEach((cell) => {
+      if (isPanelDimmed(cell)) return;
       const rect = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
       if (rectsIntersect(marquee, rect)) ids.add(cell.id);
     });
@@ -2884,6 +3155,7 @@ const exportJson = () => {
   // belongs to, or its joined group; snap + overlap checks run on release.
 
   const onPanelMouseDown = (cell: Cell, event: React.MouseEvent) => {
+    if (isPanelDimmed(cell)) return;
     if (editMode === "move") {
       if (!isActiveCell(cell)) return;
       event.preventDefault();
@@ -2932,6 +3204,7 @@ const exportJson = () => {
   };
 
   const onPanelMouseEnter = (cell: Cell) => {
+    if (isPanelDimmed(cell)) return;
     if (editMode !== "patch" || !isDragging) return;
     if (!isActiveCell(cell)) return;
     if (patchMode === "signal") assignSignalPanel(cell);
@@ -3004,53 +3277,72 @@ const exportJson = () => {
   const snakePatch = () => {
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
+      // Scope: when a sub-screen is being edited, auto-patch must only
+      // touch/reorder that sub-screen's panels - other sub-screens' existing
+      // assignments are left completely alone, but still count against the
+      // shared ports' capacity (ports are physically shared hardware).
+      const scopeIds = currentScopeIds(); // null = whole grid, today's behaviour when unscoped.
+
       // Reading order over the free layout. LETTERS = one segment per connected
       // letter (bottom-up, branch-aware); LOOP_TOGETHER = one segment per loop;
       // otherwise a single reading-order segment over row/column bands.
       const letterMode = snakeDirection === "LETTERS";
+      const scopedForOrdering = scopeIds ? next.filter((c) => scopeIds.has(c.id)) : next;
       const segments = letterMode
-        ? orderPanelsForLetters(next)
-        : orderPanelsForSnake(next, snakeDirection, snakeAlternates);
+        ? orderPanelsForLetters(scopedForOrdering)
+        : orderPanelsForSnake(scopedForOrdering, snakeDirection, snakeAlternates);
 
       if (patchMode === "signal") {
         for (const cell of next) {
+          if (scopeIds && !scopeIds.has(cell.id)) continue;
           cell.assignedPort = null;
           cell.sequence = null;
         }
 
-        let port = 1;
-        let seq = 1;
+        // Live capacity-aware walk (mirrors the power loop below): unlike the
+        // old blind port/seq counters, this queries actual port occupancy so
+        // it correctly skips ports another sub-screen has already filled,
+        // instead of assuming every port starts empty.
+        let portIndex = 0;
+        const advanceToPortWithCapacity = () => {
+          while (portIndex < SIGNAL_PORT_COUNT && getPortPanelCount(next, "assignedPort", portIndex + 1) >= safePanelsPerSignalPort) {
+            portIndex += 1;
+          }
+        };
+        const assignToSignalPort = (cell: Cell) => {
+          advanceToPortWithCapacity();
+          if (portIndex >= SIGNAL_PORT_COUNT) return;
+          const port = portIndex + 1;
+          cell.assignedPort = port;
+          cell.sequence = getNextSequence(next, "assignedPort", "sequence", port);
+        };
+
         segments.forEach((segment) => {
-          // Letter mode: don't split a letter across ports - start it on a fresh
-          // port if the whole letter won't fit in the remaining capacity (unless
-          // the letter is larger than a full port, in which case it must split).
-          if (letterMode && seq > 1) {
-            const remaining = safePanelsPerSignalPort - (seq - 1);
-            if (segment.length > remaining && segment.length <= safePanelsPerSignalPort) {
-              port += 1;
-              seq = 1;
+          // Letter mode: don't split a letter across ports - advance to a fresh
+          // port first if the whole letter won't fit in the current port's
+          // remaining capacity (unless the letter is larger than a full port,
+          // in which case it must split).
+          if (letterMode) {
+            advanceToPortWithCapacity();
+            if (portIndex < SIGNAL_PORT_COUNT) {
+              const currentCount = getPortPanelCount(next, "assignedPort", portIndex + 1);
+              const fitsFullPort = segment.length <= safePanelsPerSignalPort;
+              const fitsRemaining = currentCount + segment.length <= safePanelsPerSignalPort;
+              if (currentCount > 0 && fitsFullPort && !fitsRemaining) portIndex += 1;
             }
           }
-          segment.forEach((cell) => {
-            if (port > SIGNAL_PORT_COUNT) return;
-            cell.assignedPort = port;
-            cell.sequence = seq;
-            seq += 1;
-            if (seq > safePanelsPerSignalPort) {
-              port += 1;
-              seq = 1;
-            }
-          });
+          segment.forEach(assignToSignalPort);
           // Each loop-together segment starts on a fresh port.
-          if (!letterMode && segments.length > 1 && seq !== 1) {
-            port += 1;
-            seq = 1;
+          if (!letterMode && segments.length > 1) {
+            advanceToPortWithCapacity();
+            if (portIndex < SIGNAL_PORT_COUNT && getPortPanelCount(next, "assignedPort", portIndex + 1) > 0) portIndex += 1;
           }
         });
       }
 
       if (patchMode === "power") {
         for (const cell of next) {
+          if (scopeIds && !scopeIds.has(cell.id)) continue;
           cell.assignedPowerPort = null;
           cell.powerSequence = null;
           cell.powerManual = false;
@@ -3104,8 +3396,11 @@ const exportJson = () => {
 
   // Remove every panel, leaving an empty workspace (undoable).
   const clearAllPanels = () => {
-    if (grid.length && !window.confirm("Remove all panels from the layout? This can be undone.")) return;
-    commitGridUpdate(() => []);
+    const scopeIds = currentScopeIds();
+    const scopedLabel = scopeIds ? "this sub-screen" : "the layout";
+    const affectedCount = scopeIds ? grid.filter((c) => scopeIds.has(c.id)).length : grid.length;
+    if (affectedCount && !window.confirm(`Remove all panels from ${scopedLabel}? This can be undone.`)) return;
+    commitGridUpdate((prev) => (scopeIds ? prev.filter((c) => !scopeIds.has(c.id)) : []));
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
@@ -3118,7 +3413,13 @@ const exportJson = () => {
   // each signal port so power plugs line up with the signal ports. Respects the
   // power panel-count and amp limits, and stops when the plugs run out.
   const matchPowerToSignal = () => {
-    const hasSignal = grid.some((cell) => isActiveCell(cell) && cell.assignedPort);
+    // Scope: only check/follow the active sub-screen's own signal patching -
+    // otherwise "patch signal first" could fire (or not) based on unrelated
+    // sub-screens, which would be confusing.
+    const scopeIdsForCheck = currentScopeIds();
+    const hasSignal = grid.some(
+      (cell) => isActiveCell(cell) && cell.assignedPort && (!scopeIdsForCheck || scopeIdsForCheck.has(cell.id)),
+    );
     if (!hasSignal) {
       alert("Patch the signal ports first - power will follow the same pattern.");
       return;
@@ -3126,8 +3427,10 @@ const exportJson = () => {
 
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
+      const scopeIds = scopeIdsForCheck;
 
       for (const cell of next) {
+        if (scopeIds && !scopeIds.has(cell.id)) continue;
         cell.assignedPowerPort = null;
         cell.powerSequence = null;
         cell.powerManual = false;
@@ -3136,6 +3439,7 @@ const exportJson = () => {
       const byPort = new Map<number, Cell[]>();
       next.forEach((cell) => {
         if (!isActiveCell(cell) || !cell.assignedPort) return;
+        if (scopeIds && !scopeIds.has(cell.id)) return;
         const list = byPort.get(cell.assignedPort) ?? [];
         list.push(cell);
         byPort.set(cell.assignedPort, list);
@@ -3190,7 +3494,7 @@ const exportJson = () => {
   };
 
   const clearSignalCabling = () => {
-    commitGridUpdate((prev) => clearSignalOnGrid(prev));
+    commitGridUpdate((prev) => clearSignalOnGrid(prev, currentScopeIds()));
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
@@ -3198,7 +3502,7 @@ const exportJson = () => {
   };
 
   const clearPowerAssignments = () => {
-    commitGridUpdate((prev) => clearPowerOnGrid(prev));
+    commitGridUpdate((prev) => clearPowerOnGrid(prev, currentScopeIds()));
     setSelectedId(null);
     setSelectedCells(new Set());
   };
@@ -3218,6 +3522,85 @@ const exportJson = () => {
         target.powerManual = false;
       });
       return next;
+    });
+  };
+
+  // --- Sub-screen CRUD / assignment ----------------------------------------
+  const selectSubScreen = (id: string | null) => {
+    setActiveSubScreenId(id);
+    // The old selection almost certainly doesn't belong to the new scope;
+    // clearing avoids leaving a dimmed/invisible panel "selected".
+    setSelectedId(null);
+    setSelectedCells(new Set());
+  };
+
+  const createSubScreen = (name: string) => {
+    const snapshot = captureLayout();
+    const screen = makeSubScreen(name, Date.now() + subScreens.length);
+    setSubScreens((prev) => [...prev, screen]);
+    // Deliberately stay on whatever view the user was already on (usually
+    // Canvas View) instead of jumping into the brand-new, empty sub-screen -
+    // switching there immediately would scope the workspace down to zero
+    // panels and dim/lock everything else, which looks like the whole
+    // layout vanished. The user assigns panels to it first, then switches in.
+    pushUndoSnapshot(snapshot);
+  };
+
+  const renameSubScreen = (id: string, name: string) => {
+    commitSubScreensUpdate((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+  };
+
+  // Deleting a sub-screen unassigns its panels (they become "unassigned",
+  // not deleted) and falls back to Canvas View if it was the active one.
+  const deleteSubScreen = (id: string) => {
+    const snapshot = captureLayout();
+    setGrid((prev) => prev.map((cell) => (cell.subScreenId === id ? { ...cell, subScreenId: null } : cell)));
+    setSubScreens((prev) => prev.filter((s) => s.id !== id));
+    if (resolvedActiveSubScreenId === id) setActiveSubScreenId(null);
+    setSelectedId(null);
+    setSelectedCells(new Set());
+    pushUndoSnapshot(snapshot);
+  };
+
+  const assignSelectedToSubScreen = (id: string) => {
+    const keys = getSelectedIds(selectedCells, selectedId);
+    if (!keys.size) return;
+    commitGridUpdate((prev) => prev.map((cell) => (keys.has(cell.id) ? { ...cell, subScreenId: id } : cell)));
+  };
+
+  const removeSelectedFromSubScreen = () => {
+    const keys = getSelectedIds(selectedCells, selectedId);
+    if (!keys.size) return;
+    commitGridUpdate((prev) => prev.map((cell) => (keys.has(cell.id) ? { ...cell, subScreenId: null } : cell)));
+  };
+
+  const selectAllInSubScreen = (id: string) => {
+    const ids = grid.filter((cell) => !cell.isRemoved && cell.subScreenId === id).map((cell) => cell.id);
+    setSelectedCells(new Set(ids));
+    setSelectedId(null);
+  };
+
+  // --- Output canvas positioning --------------------------------------------
+  // id === null updates the whole-layout position (used only when no
+  // sub-screens exist); otherwise updates that sub-screen's canvas position.
+  // Kept as a plain project-data mutation through commitCanvasUpdate, so
+  // repositioning participates in the same single undo stack as everything
+  // else - dragging a sub-screen never touches any panel's mm x/y.
+  const updateCanvasPosition = (id: string | null, x: number, y: number) => {
+    commitCanvasUpdate(() => {
+      if (id === null) {
+        setWholeLayoutCanvasX(x);
+        setWholeLayoutCanvasY(y);
+      } else {
+        setSubScreens((prev) => prev.map((s) => (s.id === id ? { ...s, canvasX: x, canvasY: y } : s)));
+      }
+    });
+  };
+
+  const updateOutputCanvasResolution = (w: number, h: number) => {
+    commitCanvasUpdate(() => {
+      setOutputCanvasW(w);
+      setOutputCanvasH(h);
     });
   };
 
@@ -3326,10 +3709,12 @@ const exportJson = () => {
 
   const clearSelectedPortPatching = () => {
     if ((patchMode === "signal" && activePort < 1) || (patchMode === "power" && activePowerPort < 1)) return;
+    const scopeIds = currentScopeIds();
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
       next.forEach((cell) => {
         if (!isActiveCell(cell)) return;
+        if (scopeIds && !scopeIds.has(cell.id)) return;
         if (patchMode === "signal" && cell.assignedPort === activePort) {
           cell.assignedPort = null;
           cell.sequence = null;
@@ -3505,7 +3890,7 @@ const exportJson = () => {
         </div>
 
         <div className="grid gap-4 xl:grid-cols-[1.1fr_1.2fr]">
-          <Card className="border-slate-700 bg-slate-800 print-card">
+          <Card className="border-slate-700 bg-slate-800 print-card" collapsible>
             <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">LED Wall Setup</CardTitle>
           </CardHeader>
@@ -3514,10 +3899,6 @@ const exportJson = () => {
                 <div className="space-y-1 md:col-span-2">
                   <label className="text-xs text-slate-300">Project Name</label>
                   <Input className="bg-white text-black" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Enter project name" />
-                </div>
-                <div className="space-y-1 md:col-span-2">
-                  <label className="text-xs text-slate-300">LED Surface / Sub-Screen Name</label>
-                  <Input className="bg-white text-black" type="text" value={surfaceName} onChange={(e) => setSurfaceName(e.target.value)} placeholder="e.g. Main Screen, IMAG Left (optional)" />
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs text-slate-300">Columns</label>
@@ -3640,7 +4021,8 @@ const exportJson = () => {
             </CardContent>
           </Card>
 
-          <Card className="border-slate-700 bg-slate-800 print-card">
+          <div className="space-y-4">
+          <Card className="border-slate-700 bg-slate-800 print-card" collapsible>
             <CardHeader>
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Wall Summary</CardTitle>
             </CardHeader>
@@ -3775,15 +4157,27 @@ const exportJson = () => {
               </div>
             </CardContent>
           </Card>
+
+          <SubScreenPanel
+            subScreens={subScreens}
+            activeSubScreenId={resolvedActiveSubScreenId}
+            grid={grid}
+            onSelectScreen={selectSubScreen}
+            onCreate={createSubScreen}
+            onRename={renameSubScreen}
+            onDelete={deleteSubScreen}
+            onSelectAllInSubScreen={selectAllInSubScreen}
+          />
+          </div>
         </div>
 
-        <Card className="border-slate-700 bg-slate-800 print-card" data-panel-layout>
+        <Card className="border-slate-700 bg-slate-800 print-card" data-panel-layout collapsible>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
               <div className="flex items-center gap-2 no-print">
                 <StatusChip tone={isFlippedView ? "amber" : "sky"}>{isFlippedView ? "Front View" : "Back View"}</StatusChip>
-                <Button intent="secondary" size="sm" onClick={() => setIsFlippedView((prev) => !prev)}>
+                <Button intent="secondary" size="sm" onClick={(e) => { e.stopPropagation(); setIsFlippedView((prev) => !prev); }}>
                   {isFlippedView ? "Show Back View" : "Show Front View"}
                 </Button>
               </div>
@@ -3864,7 +4258,7 @@ const exportJson = () => {
                 onClick={() => {
                   commitGridUpdate((prev) => [
                     ...prev,
-                    makePanelAt(wallBBox.x, wallBBox.y + wallBBox.h + MODULE_MM, panelType),
+                    makePanelAt(wallBBox.x, wallBBox.y + wallBBox.h + MODULE_MM, panelType, resolvedActiveSubScreenId),
                   ]);
                   setEditMode("move");
                 }}
@@ -3899,6 +4293,37 @@ const exportJson = () => {
               <Button intent="success" size="sm" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore</Button>
               <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
               <Button intent="ghost" size="sm" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="h-4 w-4" />Redo</Button>
+              {subScreens.length > 0 ? (
+                <>
+                  <select
+                    className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
+                    value={assignTargetSubScreenId}
+                    onChange={(e) => setAssignTargetSubScreenId(e.target.value)}
+                    disabled={selectedCount === 0}
+                    title="Choose which sub-screen to assign the selected panels to"
+                  >
+                    <option value="">Choose a sub-screen...</option>
+                    {subScreens.map((screen) => (
+                      <option key={screen.id} value={screen.id}>
+                        {screen.name}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    intent="secondary"
+                    size="sm"
+                    onClick={() => {
+                      if (assignTargetSubScreenId) assignSelectedToSubScreen(assignTargetSubScreenId);
+                    }}
+                    disabled={selectedCount === 0 || !assignTargetSubScreenId}
+                  >
+                    Assign Selected ({selectedCount})
+                  </Button>
+                  <Button intent="ghost" size="sm" onClick={removeSelectedFromSubScreen} disabled={selectedCount === 0}>
+                    Remove from Sub-Screen
+                  </Button>
+                </>
+              ) : null}
             </div>
             {overlapNotice ? (
               <div className="mb-3 rounded-lg border border-amber-400 bg-amber-500/15 px-3 py-2 text-sm text-amber-200 no-print">
@@ -3988,6 +4413,43 @@ const exportJson = () => {
                   ))}
                 </svg>
 
+                {/* Sub-screen boundary outlines + name labels. Purely a visual aid -
+                    derived from panel positions, never obscures panel content since it
+                    sits below the panel layer (z-10+). The actively-edited sub-screen (if
+                    any) is drawn solid/bright; others are faint, matching the panel
+                    dimming treatment so the visual language stays consistent. */}
+                {subScreens.length ? (
+                  <svg className="absolute inset-0 z-[2] pointer-events-none" width={svgW} height={svgH}>
+                    {subScreens.map((screen, index) => {
+                      const bbox = subScreenBBoxes.get(screen.id);
+                      if (!bbox) return null;
+                      const displayBBox = isFlippedView ? mirrorRectX(bbox, wallBBox) : bbox;
+                      const r = rectToPx(displayBBox);
+                      const isActive = resolvedActiveSubScreenId === screen.id;
+                      const isOtherActive = resolvedActiveSubScreenId !== null && !isActive;
+                      const color = PORT_COLORS[index % PORT_COLORS.length];
+                      return (
+                        <g key={screen.id} opacity={isOtherActive ? 0.35 : 1}>
+                          <rect
+                            x={r.x - 6}
+                            y={r.y - 6}
+                            width={r.w + 12}
+                            height={r.h + 12}
+                            fill="none"
+                            stroke={color}
+                            strokeWidth={isActive ? 2.5 : 1.5}
+                            strokeDasharray={isActive ? undefined : "6 5"}
+                            rx={6}
+                          />
+                          <text x={r.x - 4} y={r.y - 12} fill={color} fontSize="12" fontWeight="bold">
+                            {screen.name}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                ) : null}
+
                 {/* Cable LINES sit behind the panels (z-[1], panels are z-10+) so they
                     never obscure panel labels. Each line is drawn twice: a wider black
                     stroke underneath for a thin outline, then the coloured stroke on top.
@@ -4026,6 +4488,7 @@ const exportJson = () => {
                   const { signalRing, powerRing } = getPanelIndicators(cell);
                   const isSelected = selectedCells.has(cell.id) || selectedId === cell.id;
                   const isRemoved = cell.isRemoved;
+                  const isDimmed = isPanelDimmed(cell);
                   const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
                   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
                   // Match the canvas/PDF base shapes (and the YES TECH layout
@@ -4057,11 +4520,13 @@ const exportJson = () => {
                         width: rect.w,
                         height: rect.h,
                         zIndex: isMoving ? 30 : isSelected ? 25 : 10,
-                        opacity: isMoving ? 0.85 : 1,
+                        opacity: isRemoved ? undefined : isDimmed ? 0.28 : isMoving ? 0.85 : 1,
+                        pointerEvents: isDimmed ? "none" : undefined,
                         background: "transparent",
                         border: `2px ${isRemoved ? "dashed" : "solid"} ${isMoving ? "#fbbf24" : isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
                         boxShadow: "none",
                         color: isRemoved ? "#94a3b8" : "#020617",
+                        cursor: isDimmed ? "default" : undefined,
                       }}
                       className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                     >
@@ -4179,7 +4644,7 @@ const exportJson = () => {
           </CardContent>
         </Card>
 
-        <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker>
+        <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker collapsible>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Signal Patching</CardTitle>
             <div className="mt-1 text-xs text-slate-300">Manual assignment follows the current Panels per Signal Port maximum.</div>
@@ -4212,7 +4677,7 @@ const exportJson = () => {
           </CardContent>
         </Card>
 
-        <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker>
+        <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker collapsible>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Power Outputs</CardTitle>
             <div className="mt-1 text-xs text-slate-300">Manual assignment follows the current Panels per Power Outlet maximum.</div>
@@ -4279,11 +4744,24 @@ const exportJson = () => {
           </CardContent>
         </Card>
 
-        <Card className="border-slate-700 bg-slate-800 print-card">
+        <OutputCanvasPanel
+          outputCanvasW={outputCanvasW}
+          outputCanvasH={outputCanvasH}
+          onResolutionChange={updateOutputCanvasResolution}
+          subScreens={subScreens}
+          grid={grid}
+          wholeLayoutCanvasX={wholeLayoutCanvasX}
+          wholeLayoutCanvasY={wholeLayoutCanvasY}
+          snapEnabled={canvasSnapEnabled}
+          onToggleSnap={() => setCanvasSnapEnabled((prev) => !prev)}
+          onPositionChange={updateCanvasPosition}
+        />
+
+        <Card className="border-slate-700 bg-slate-800 print-card" collapsible>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Stock Calculations</CardTitle>
-              <Button variant="outline" className="no-print" onClick={exportStockCsv}>
+              <Button variant="outline" className="no-print" onClick={(e) => { e.stopPropagation(); exportStockCsv(); }}>
                 <Download className="mr-2 h-4 w-4" />Download CSV
               </Button>
             </div>
@@ -4334,7 +4812,7 @@ const exportJson = () => {
           </CardContent>
         </Card>
 
-        <Card className="border-slate-700 bg-slate-800 print-card">
+        <Card className="border-slate-700 bg-slate-800 print-card" collapsible>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Relevant Stock / Shortfalls</CardTitle>
           </CardHeader>
