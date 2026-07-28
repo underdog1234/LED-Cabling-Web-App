@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.22.1`
+Version `0.22.2`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -18,6 +18,10 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v3 format with sub-screens and output-canvas positioning; v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.22.2
+
+- Fixed the PNG and animated/video test patterns rendering MT panels at the wrong resolution: both always sized the whole canvas and every panel using MG9's mm-to-pixel ratio (168px per 500mm), which happened to be correct for MG9 but gave MT panels 336x168px instead of their true native 256x64px. Both exports now place each panel using its own native `pixW`/`pixH` from its panel type, accumulated per row band - the same algorithm already used for the "Resolution" stat in Wall Summary - so the exported canvas size and every panel's pixel footprint always match what the app reports on screen. MG9-only walls are unaffected
 
 ## Recent Changes In v0.22.1
 

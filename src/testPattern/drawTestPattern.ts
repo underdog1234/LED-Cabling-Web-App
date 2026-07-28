@@ -21,7 +21,6 @@ import {
   PANEL_VARIANTS,
   cellRect,
   cellPanelType,
-  mirrorRectX,
   isPanelHead,
   applyPanelFrame,
   tracePanelShapePath,
@@ -41,7 +40,9 @@ export type TestPatternLayout = {
   wallBBox: RectMm;
   W: number;
   H: number;
-  pxPerMm: number;
+  /** Each panel's TRUE native-resolution pixel rect (back view, unmirrored),
+   * keyed by cell id - see computeTestPatternLayout. */
+  panelPixelRects: Map<string, RectMm>;
   totalPanels: number;
   activeColsCount: number;
   activeRowsCount: number;
@@ -163,10 +164,6 @@ const getPatternLayer = (w: number, h: number): HTMLCanvasElement => {
 export const computeTestPatternLayout = (project: TestPatternProject): TestPatternLayout => {
   const activePanels = project.panels.filter((cell) => isPanelHead(cell));
   const wallBBox = activeBBox(activePanels.map(cellRect));
-  // Same formula as the static PNG test-pattern exporter, so resolutions match.
-  const pxPerMm = PANEL_TYPES.MG9.pixW / (PANEL_TYPES.MG9.w * 1000);
-  const W = Math.max(1, Math.round(wallBBox.w * pxPerMm));
-  const H = Math.max(1, Math.round(wallBBox.h * pxPerMm));
   const panelBands = bandPanels(activePanels, cellRect) as Cell[][];
   const bandIndexById = new Map<string, number>();
   panelBands.forEach((band, index) => band.forEach((cell) => bandIndexById.set(cell.id, index)));
@@ -178,11 +175,41 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     for (let i = first; i <= last; i += 1) occupiedCols.add(i);
   });
 
-  // RGB tile size = one full panel footprint, so each panel shows a single
-  // solid colour (MT is physically twice as wide as MG9, so its tile is
-  // twice as wide too). Derived from the panels actually on the wall (most
-  // common type wins) rather than the project's panelType default, which
-  // can go stale if panels were changed individually after the fact.
+  // Each panel's TRUE native-resolution pixel rect (back view, unmirrored):
+  // its own pixW x pixH from PANEL_TYPES (e.g. MT is 256x64, NOT a
+  // physical-size scaling of MG9's pitch), positioned by accumulating each
+  // row band's panels left-to-right at their own native width and stacking
+  // bands by their own native height. This is the exact same algorithm
+  // behind the "Resolution: W x H" stat in the main app's Wall Summary, so
+  // the exported/animated pattern's canvas size and every panel's pixel
+  // footprint always match what's shown on screen - critical for MT, whose
+  // 256x64 native resolution has a completely different aspect ratio from
+  // its 1000x500mm physical size.
+  const panelPixelRects = new Map<string, RectMm>();
+  let bandY = 0;
+  panelBands.forEach((band) => {
+    let x = 0;
+    let bandH = 0;
+    band.forEach((cell) => {
+      const spec = PANEL_TYPES[cellPanelType(cell)];
+      panelPixelRects.set(cell.id, { x, y: bandY, w: spec.pixW, h: spec.pixH });
+      x += spec.pixW;
+      bandH = Math.max(bandH, spec.pixH);
+    });
+    bandY += bandH;
+  });
+  let W = 0;
+  panelPixelRects.forEach((r) => {
+    W = Math.max(W, r.x + r.w);
+  });
+  W = Math.max(1, W);
+  const H = Math.max(1, bandY);
+
+  // RGB tile size = one full panel footprint at its OWN native resolution
+  // (not a physical-size scaling), so each panel shows a single solid
+  // colour. Derived from the panels actually on the wall (most common type
+  // wins) rather than the project's panelType default, which can go stale
+  // if panels were changed individually after the fact.
   const typeCounts = new Map<PanelTypeKey, number>();
   activePanels.forEach((cell) => {
     const type = cellPanelType(cell);
@@ -197,15 +224,15 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     }
   });
   const tileSpec = PANEL_TYPES[dominantType] ?? PANEL_TYPES.MG9;
-  const tileWidthPx = Math.max(1, Math.round(tileSpec.w * 1000 * pxPerMm));
-  const tileHeightPx = Math.max(1, Math.round(tileSpec.h * 1000 * pxPerMm));
+  const tileWidthPx = tileSpec.pixW;
+  const tileHeightPx = tileSpec.pixH;
 
   return {
     activePanels,
     wallBBox,
     W,
     H,
-    pxPerMm,
+    panelPixelRects,
     totalPanels: activePanels.length,
     activeColsCount: occupiedCols.size,
     activeRowsCount: panelBands.length,
@@ -224,15 +251,12 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
 };
 
 // Always front view (mirrored), independent of any on-screen toggle - matches
-// the static PNG test-pattern exporter's convention.
+// the static PNG test-pattern exporter's convention. Mirrors the panel's
+// native-pixel rect horizontally within the total wall pixel width.
 const dispRectPx = (layout: TestPatternLayout, cell: Cell): RectMm => {
-  const d = mirrorRectX(cellRect(cell), layout.wallBBox);
-  return {
-    x: (d.x - layout.wallBBox.x) * layout.pxPerMm,
-    y: (d.y - layout.wallBBox.y) * layout.pxPerMm,
-    w: d.w * layout.pxPerMm,
-    h: d.h * layout.pxPerMm,
-  };
+  const r = layout.panelPixelRects.get(cell.id);
+  if (!r) return { x: 0, y: 0, w: 0, h: 0 };
+  return { x: layout.W - r.x - r.w, y: r.y, w: r.w, h: r.h };
 };
 
 // Wall info text: centred in the middle of the wall - right where the

@@ -37,7 +37,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.22.1";
+const APP_VERSION = "0.22.2";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -2344,14 +2344,30 @@ const exportJson = () => {
 
   const exportTestPatternPng = () => {
     try {
-      // Front-view pixel map at each panel's native resolution. Panels are placed
-      // at their TRUE workspace positions (no band-packing, no centring), so the
-      // PNG matches the Panel Layout area exactly - gaps and offsets preserved.
-      // Scale = MG9 native pixels per mm (168px / 500mm); MG9/MG12/MG13 render at
-      // their exact native size and every position/gap is proportional.
-      const pxPerMm = PANEL_TYPES.MG9.pixW / (PANEL_TYPES.MG9.w * 1000);
-      const W = Math.max(1, Math.round(wallBBox.w * pxPerMm));
-      const H = Math.max(1, Math.round(wallBBox.h * pxPerMm));
+      // Front-view pixel map at each panel's TRUE native resolution (its own
+      // pixW x pixH from PANEL_TYPES, e.g. MT is 256x64, not a physical-size
+      // scaling of MG9's pitch). Panels are placed by accumulating each row
+      // band's panels left-to-right at their own native width, and stacking
+      // bands by their own native height - the exact same algorithm behind
+      // the "Resolution: W x H" stat in Wall Summary, so the exported PNG's
+      // canvas size and every panel's pixel footprint always match what's
+      // shown on screen (critical for MT, whose 256x64 native resolution has
+      // a completely different aspect ratio from its 1000x500mm physical size).
+      const panelPixelRects = new Map<string, RectMm>();
+      let bandY = 0;
+      panelBands.forEach((band) => {
+        let x = 0;
+        let bandH = 0;
+        band.forEach((cell) => {
+          const spec = PANEL_TYPES[cellPanelType(cell)];
+          panelPixelRects.set(cell.id, { x, y: bandY, w: spec.pixW, h: spec.pixH });
+          x += spec.pixW;
+          bandH = Math.max(bandH, spec.pixH);
+        });
+        bandY += bandH;
+      });
+      const W = Math.max(1, wallPixelW);
+      const H = Math.max(1, wallPixelH);
       const canvas = document.createElement("canvas");
       canvas.width = W;
       canvas.height = H;
@@ -2363,12 +2379,14 @@ const exportJson = () => {
       ctx.fillRect(0, 0, W, H);
 
       // The PNG ALWAYS renders the front view (what an observer sees standing in
-      // front of the finished wall): the whole wall is mirrored horizontally
-      // (mirrorRectX for position) and each panel shape is mirrored with it
-      // (mirrorX below), independent of the on-screen Front/Back toggle.
+      // front of the finished wall): mirror each panel's native-pixel rect
+      // horizontally within the total wall width (mirrorX below mirrors the
+      // panel's own shape to match), independent of the on-screen Front/Back
+      // toggle.
       const dispRectPx = (cell: Cell): RectMm => {
-        const d = mirrorRectX(cellRect(cell), wallBBox);
-        return { x: (d.x - wallBBox.x) * pxPerMm, y: (d.y - wallBBox.y) * pxPerMm, w: d.w * pxPerMm, h: d.h * pxPerMm };
+        const r = panelPixelRects.get(cell.id);
+        if (!r) return { x: 0, y: 0, w: 0, h: 0 };
+        return { x: W - r.x - r.w, y: r.y, w: r.w, h: r.h };
       };
 
       activePanels.forEach((cell) => {
