@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.22.2`
+Version `0.23.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -10,14 +10,24 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
 - Group panels into named **Sub-Screens**, edit/patch each one in isolation (other sub-screens stay visible but dimmed and locked), and view the complete assembled layout in Canvas View
 - Position the whole layout or individual sub-screens within a configurable-resolution **Output Canvas** (drag, numeric entry, align/snap tools, boundary/overlap warnings) for multi-processor / media-server mapping
+- Select a **NovaStar processor model** (`VX1000 Pro` / `VX2000 Pro`), see its live pixel/port capacity vs. current usage, assign a video input per sub-screen or one input for the whole canvas, and generate a real, importable `.uprj` processor configuration file - validated against the selected processor's port count, per-port and total pixel limits, and canvas size, with a summary of what will be exported and any blocking errors or warnings before download
 - Import projects from the Creative Layout Tool
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape
 - Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
-- Save and reopen settings as JSON (v3 format with sub-screens and output-canvas positioning; v2 free-panel and legacy grid formats still open)
+- Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.23.0
+
+- Added **NovaStar Processor Configuration File Export**: pick `VX1000 Pro` or `VX2000 Pro` in LED Wall Setup (with a live capacity-vs-usage readout beside the selector), assign a video input per sub-screen or one input for the whole canvas via a mode toggle in Output Canvas, then generate a real `.uprj` file from a new "NovaStar Processor Configuration" section showing a full pre-download summary (processor, surface, canvas/screen resolution, panel/sub-screen counts, Ethernet outputs used, pixel load per output, input assignments) plus any validation errors (which block download) or warnings. The file format - a custom envelope wrapping an embedded SQLite project database, including its checksum algorithm - was reverse engineered byte-for-byte against real NovaStar-exported project files rather than guessed; cabinet/panel positions and signal-port patching order are written into the LED screen's own native pixel grid exactly as NovaStar itself represents it, verified byte-for-byte against real reference exports covering gapped/irregular walls, multiple Ethernet outputs, and multi-sub-screen layouts. Output-canvas/sub-screen placement is not yet reflected in the exported cabinet positions (only in the video-routing side) - a known gap for a future pass. Settings JSON bumps to v5 to carry the new processor/input fields; older saves load with no processor selected, same as always
+- Output Canvas and Stock Calculations are now collapsed by default
+- Fixed the PNG and animated/video test patterns not locking panels to their true positions on walls with a missing/removed panel in the middle of a row: panels were packed tightly left-to-right in array order (silently closing up any gap), shifting every panel after the gap out of position. Both now place each panel at its real relative pixel offset, so a physical gap shows as empty space instead of squeezing later panels together - uniform, gap-free walls render identically to before. The PNG export also had its own separate copy of this same (still-buggy) positioning logic despite the live/video test pattern already having been fixed for it previously; it now shares the one, corrected implementation
+- Fixed the test pattern's per-panel row/column corner labels reading from the panel's raw back-view position instead of the front (mirrored) view the pattern always renders in - column numbers were backwards versus what's on screen. The rendered top-left panel now always reads row 1, column 1, and the centred info-text block is smaller
+- The Panel Layout workspace's (and PDF's) height ruler now reads bottom-up - 0m at the wall's base, increasing upward - matching how a physical wall is measured and built; tick positions are unchanged, only the printed labels. Added compact direction arrows to the Columns/Rows field labels
+- Added an automated test suite (Vitest, `npm test`) covering the NovaStar export pipeline - envelope/checksum round-trips, both processor models, irregular and multi-sub-screen walls, patching-order preservation, and golden-file comparisons against real NovaStar-exported project files
 
 ## Recent Changes In v0.22.2
 
@@ -246,6 +256,14 @@ Or double-click:
 ```text
 start-local.bat
 ```
+
+## Testing
+
+```bash
+npm test
+```
+
+Runs the Vitest suite (`src/**/*.test.ts`), including the NovaStar export tests, which compare generated files byte-for-byte against real NovaStar-exported reference projects checked into `src/novastar/__fixtures__/`.
 
 ## Production Build
 

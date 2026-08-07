@@ -40,6 +40,42 @@ export const subScreenResolutionOf = (panels: Cell[], subScreenId: string): Canv
   resolutionOf(panels.filter((cell) => cell.subScreenId === subScreenId));
 
 /**
+ * Each panel's tightly-packed pixel position within the wall's own native
+ * resolution (see resolutionOf above - same per-band packing algorithm,
+ * returning per-panel positions instead of just the aggregate W/H).
+ *
+ * This is the coordinate space a NovaStar processor's own LED-screen canvas
+ * uses for cabinet topology - confirmed by comparing generated exports
+ * against real NovaStar-software-generated project files: the processor's
+ * pixel-addressing canvas is sized and positioned purely from real (patched)
+ * panel pixels, with no such thing as an "empty gap pixel" for a
+ * missing/unpatched panel, and is entirely independent of the output-canvas/
+ * sub-screen placement used for on-screen positioning elsewhere in this app.
+ * Deliberately NOT the same function as the test pattern's own panel
+ * placement (drawTestPattern.ts), which intentionally preserves physical
+ * gaps as empty space for a technician's visual reference - both are
+ * correct, for two different purposes.
+ */
+export const wallNativePositionsOf = (panels: Cell[]): Map<string, RectMm> => {
+  const active = panels.filter((cell) => !cell.isRemoved);
+  const bands = bandPanels(active, cellRect) as Cell[][];
+  const positions = new Map<string, RectMm>();
+  let bandY = 0;
+  bands.forEach((band) => {
+    let x = 0;
+    let bandH = 0;
+    band.forEach((cell) => {
+      const spec = PANEL_TYPES[cellPanelType(cell)];
+      positions.set(cell.id, { x, y: bandY, w: spec.pixW, h: spec.pixH });
+      x += spec.pixW;
+      bandH = Math.max(bandH, spec.pixH);
+    });
+    bandY += bandH;
+  });
+  return positions;
+};
+
+/**
  * A panel's final position on the output canvas: the sub-screen's own canvas
  * X/Y plus the panel's position within the sub-screen, converted from mm to
  * canvas pixels using THAT PANEL'S OWN native mm->px ratio (MG9 and MT have

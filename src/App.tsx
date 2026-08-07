@@ -24,6 +24,9 @@ import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
 import { finalCanvasPositionOf, subScreenResolutionOf } from "./canvasView/canvasModel";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
 import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame } from "./testPattern/drawTestPattern";
+import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./novastar/processorModels";
+import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
+import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -37,7 +40,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.22.2";
+const APP_VERSION = "0.23.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -338,6 +341,14 @@ type OpenJsonPayload = {
   outputCanvas?: { w?: number; h?: number };
   /** v3: whole-layout canvas position, used only when subScreens is empty. */
   wholeLayoutCanvasPos?: { x?: number; y?: number };
+  /** v4: selected NovaStar processor model, "" = none selected. */
+  processorModel?: ProcessorModelId | "";
+  /** v4: per-canvas-entry input assignment, keyed by sub-screen id (or the whole-layout sentinel). */
+  canvasInputs?: Record<string, number | null>;
+  /** v5: "perEntry" (default) or "whole" - see App's inputMode state. */
+  inputMode?: InputMode;
+  /** v5: used only when inputMode is "whole". */
+  wholeCanvasInputId?: number | null;
 };
 
 const gcd = (a: number, b: number): number => {
@@ -1296,6 +1307,21 @@ export default function App() {
   const [wholeLayoutCanvasX, setWholeLayoutCanvasX] = useState(0);
   const [wholeLayoutCanvasY, setWholeLayoutCanvasY] = useState(0);
   const [canvasSnapEnabled, setCanvasSnapEnabled] = useState(true);
+  // --- NovaStar processor configuration export -----------------------------
+  // "" = no processor selected yet (older saved projects load into this
+  // state, per the format-migration requirement - see openJson).
+  const [processorModel, setProcessorModel] = useState<ProcessorModelId | "">("");
+  // "perEntry" (default, original behavior): a separate input per sub-screen
+  // (or a single whole-layout entry). "whole": one input for the entire
+  // output canvas regardless of sub-screen boundaries.
+  const [inputMode, setInputMode] = useState<InputMode>("perEntry");
+  // Per-canvas-entry (sub-screen, or WHOLE_LAYOUT_KEY when none exist) input
+  // assignment - the FK into the selected processor's input list. Kept even
+  // while inputMode is "whole" so switching back to "perEntry" restores it.
+  const [canvasInputs, setCanvasInputs] = useState<Record<string, number | null>>({});
+  // Used only when inputMode === "whole".
+  const [wholeCanvasInputId, setWholeCanvasInputId] = useState<number | null>(null);
+  const [isGeneratingNovaStarFile, setIsGeneratingNovaStarFile] = useState(false);
   // Drag gesture for repositioning a sub-screen (or the whole layout, id=null)
   // on the output canvas - separate pixel-space analogue of moveDrag.
   const [canvasDrag, setCanvasDrag] = useState<{ id: string | null; startX: number; startY: number; dx: number; dy: number } | null>(null);
@@ -2235,13 +2261,16 @@ export default function App() {
       if (m % 1 === 0) ctx.fillText(`${m}m`, x, -16);
     }
     ctx.textAlign = "right";
+    // Height ruler reads bottom-up (0m at the wall's base), matching the live
+    // workspace - only the printed label flips, not the tick positions.
+    const maxHeightM = Math.floor(wallBBox.h / 1000);
     for (let m = 0; m * 1000 <= wallBBox.h + 1; m += 0.5) {
       const y = m * 1000 * px;
       ctx.beginPath();
       ctx.moveTo(-4, y);
       ctx.lineTo(m % 1 === 0 ? -12 : -8, y);
       ctx.stroke();
-      if (m % 1 === 0) ctx.fillText(`${m}m`, -16, y + 4);
+      if (m % 1 === 0) ctx.fillText(`${maxHeightM - m}m`, -16, y + 4);
     }
 
     // Cable lines first so they sit behind the panels.
@@ -2283,12 +2312,94 @@ export default function App() {
     return canvas;
   };
 
+  // --- NovaStar processor configuration export ------------------------------
+  // One entry per canvas entry (sub-screens, or a single WHOLE_LAYOUT_KEY
+  // entry when none exist yet) - matches OutputCanvasPanel's own "whole
+  // layout vs. sub-screens" branching exactly.
+  const canvasInputsList: CanvasEntryInput[] = useMemo(() => {
+    const keys = subScreens.length ? subScreens.map((s) => s.id) : [WHOLE_LAYOUT_KEY];
+    return keys.map((key) => ({
+      key,
+      name: key === WHOLE_LAYOUT_KEY ? "Whole Layout" : subScreens.find((s) => s.id === key)?.name ?? key,
+      interfacePk: canvasInputs[key] ?? null,
+    }));
+  }, [subScreens, canvasInputs]);
+
+  const novaStarValidation = useMemo(() => {
+    if (!processorModel) return null;
+    return buildExportSummaryAndCabinets({
+      processorModel,
+      projectName: safeProjectName,
+      surfaceName,
+      outputCanvasW,
+      outputCanvasH,
+      wholeLayoutCanvasX,
+      wholeLayoutCanvasY,
+      grid,
+      subScreens,
+      inputMode,
+      wholeCanvasInputId,
+      canvasInputs: canvasInputsList,
+    });
+  }, [
+    processorModel,
+    safeProjectName,
+    surfaceName,
+    outputCanvasW,
+    outputCanvasH,
+    wholeLayoutCanvasX,
+    wholeLayoutCanvasY,
+    grid,
+    subScreens,
+    inputMode,
+    wholeCanvasInputId,
+    canvasInputsList,
+  ]);
+
+  const downloadNovaStarConfig = async () => {
+    if (!processorModel) return;
+    setIsGeneratingNovaStarFile(true);
+    try {
+      const result = await buildNovaStarExport({
+        processorModel,
+        projectName: safeProjectName,
+        surfaceName,
+        outputCanvasW,
+        outputCanvasH,
+        wholeLayoutCanvasX,
+        wholeLayoutCanvasY,
+        grid,
+        subScreens,
+        inputMode,
+        wholeCanvasInputId,
+        canvasInputs: canvasInputsList,
+      });
+      if (!result.ok || !result.blob || !result.fileName) {
+        window.alert("NovaStar export blocked by validation errors - see the NovaStar Processor Configuration section.");
+        return;
+      }
+      const url = window.URL.createObjectURL(result.blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", result.fileName);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      console.error("NovaStar config download failed", err);
+      window.alert("NovaStar config download failed - check console");
+    } finally {
+      setIsGeneratingNovaStarFile(false);
+    }
+  };
+
 const exportJson = () => {
   try {
-    // formatVersion 3: adds sub-screens + output-canvas positioning (v1/v2
-    // files still open, see openJson).
+    // formatVersion 5: adds the whole-canvas-vs-per-entry input mode toggle
+    // (v1-v4 files still open, see openJson).
     const payload = {
-      formatVersion: 3,
+      formatVersion: 5,
       appVersion: APP_VERSION,
       projectName: safeProjectName,
       surfaceName,
@@ -2304,6 +2415,10 @@ const exportJson = () => {
       subScreens,
       outputCanvas: { w: outputCanvasW, h: outputCanvasH },
       wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
+      processorModel,
+      canvasInputs,
+      inputMode,
+      wholeCanvasInputId,
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
@@ -2344,30 +2459,14 @@ const exportJson = () => {
 
   const exportTestPatternPng = () => {
     try {
-      // Front-view pixel map at each panel's TRUE native resolution (its own
-      // pixW x pixH from PANEL_TYPES, e.g. MT is 256x64, not a physical-size
-      // scaling of MG9's pitch). Panels are placed by accumulating each row
-      // band's panels left-to-right at their own native width, and stacking
-      // bands by their own native height - the exact same algorithm behind
-      // the "Resolution: W x H" stat in Wall Summary, so the exported PNG's
-      // canvas size and every panel's pixel footprint always match what's
-      // shown on screen (critical for MT, whose 256x64 native resolution has
-      // a completely different aspect ratio from its 1000x500mm physical size).
-      const panelPixelRects = new Map<string, RectMm>();
-      let bandY = 0;
-      panelBands.forEach((band) => {
-        let x = 0;
-        let bandH = 0;
-        band.forEach((cell) => {
-          const spec = PANEL_TYPES[cellPanelType(cell)];
-          panelPixelRects.set(cell.id, { x, y: bandY, w: spec.pixW, h: spec.pixH });
-          x += spec.pixW;
-          bandH = Math.max(bandH, spec.pixH);
-        });
-        bandY += bandH;
-      });
-      const W = Math.max(1, wallPixelW);
-      const H = Math.max(1, wallPixelH);
+      // Shares computeTestPatternLayout with the video/live test pattern
+      // (drawTestPattern.ts) instead of keeping a separate duplicate
+      // position/label computation - a previous duplicate here silently
+      // reintroduced the same "gaps collapse, front-view labels wrong"
+      // bugs the shared version had already been fixed for.
+      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName, panelType, panels: activePanels });
+      const W = Math.max(1, layout.W);
+      const H = Math.max(1, layout.H);
       const canvas = document.createElement("canvas");
       canvas.width = W;
       canvas.height = H;
@@ -2384,13 +2483,12 @@ const exportJson = () => {
       // panel's own shape to match), independent of the on-screen Front/Back
       // toggle.
       const dispRectPx = (cell: Cell): RectMm => {
-        const r = panelPixelRects.get(cell.id);
+        const r = layout.panelPixelRects.get(cell.id);
         if (!r) return { x: 0, y: 0, w: 0, h: 0 };
         return { x: W - r.x - r.w, y: r.y, w: r.w, h: r.h };
       };
 
-      activePanels.forEach((cell) => {
-        if (!isPanelHead(cell)) return;
+      layout.activePanels.forEach((cell) => {
         const r = dispRectPx(cell);
         const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
         // No signal/power chain-start ring indicators in the PNG - it's a
@@ -2401,7 +2499,7 @@ const exportJson = () => {
         ctx.fillStyle = "#020617";
         ctx.textAlign = "center";
         ctx.font = `bold ${Math.max(12, Math.floor(r.h * 0.085))}px Arial`;
-        ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`, cx, r.y + r.h * 0.4);
+        ctx.fillText(`↓ ${layout.rowLabel(cell)} → ${layout.colLabel(cell)}`, cx, r.y + r.h * 0.4);
         // Shape symbol only (△/◜/Corner) - no rotate icon, no signal/power port info.
         const variantSymbol = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].symbol;
         if (variantSymbol) {
@@ -2563,6 +2661,16 @@ const exportJson = () => {
         setOutputCanvasH(Number(data.outputCanvas?.h) || 1080);
         setWholeLayoutCanvasX(Number(data.wholeLayoutCanvasPos?.x) || 0);
         setWholeLayoutCanvasY(Number(data.wholeLayoutCanvasPos?.y) || 0);
+        // formatVersion 4: older projects have neither field - default to
+        // "no processor selected" / no input assignments rather than
+        // guessing, so nothing is silently exported for a wall the user
+        // never configured a processor for.
+        setProcessorModel(data.processorModel && PROCESSOR_SPECS[data.processorModel] ? data.processorModel : "");
+        setCanvasInputs(data.canvasInputs && typeof data.canvasInputs === "object" ? data.canvasInputs : {});
+        // formatVersion 5: older projects have neither field - default to
+        // the original "perEntry" behavior / no whole-canvas input.
+        setInputMode(data.inputMode === "whole" ? "whole" : "perEntry");
+        setWholeCanvasInputId(typeof data.wholeCanvasInputId === "number" ? data.wholeCanvasInputId : null);
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -3622,6 +3730,11 @@ const exportJson = () => {
     });
   };
 
+  /** key is a sub-screen id, or WHOLE_LAYOUT_KEY when no sub-screens exist. */
+  const updateCanvasInput = (key: string, interfacePk: number | null) => {
+    setCanvasInputs((prev) => ({ ...prev, [key]: interfacePk }));
+  };
+
   // Delete now prompts (Remove / Mark Inactive / Cancel); the button and the
   // Delete key just open the confirmation.
   const deleteSelectedPanel = () => {
@@ -3919,11 +4032,11 @@ const exportJson = () => {
                   <Input className="bg-white text-black" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Enter project name" />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Columns</label>
+                  <label className="text-xs text-slate-300">Columns →</label>
                   <Input className="bg-white text-black" type="number" min="1" step="1" value={draftCols} onChange={(e) => setDraftCols(e.target.value)} />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Rows</label>
+                  <label className="text-xs text-slate-300">Rows ↓</label>
                   <Input className="bg-white text-black" type="number" min="1" step="1" value={draftRows} onChange={(e) => setDraftRows(e.target.value)} />
                 </div>
               </div>
@@ -3944,6 +4057,40 @@ const exportJson = () => {
                       <option key={option.id} value={option.id}>{option.label}</option>
                     ))}
                   </select>
+                </div>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-1">
+                  <label className="text-xs text-slate-300">Processor Model</label>
+                  <select
+                    className="w-full rounded bg-white p-2 text-black"
+                    value={processorModel}
+                    onChange={(e) => setProcessorModel(e.target.value as ProcessorModelId | "")}
+                  >
+                    <option value="">None selected</option>
+                    {PROCESSOR_MODEL_IDS.map((id) => (
+                      <option key={id} value={id}>{PROCESSOR_SPECS[id].label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs text-slate-300">Processor Capacity</label>
+                  <div className="rounded border border-slate-700 bg-slate-900 p-2 text-xs">
+                    {processorModel && novaStarValidation ? (
+                      <>
+                        <div>
+                          {novaStarValidation.summary.outputPixelLoads.reduce((sum, o) => sum + o.pixels, 0).toLocaleString()} /{" "}
+                          {PROCESSOR_SPECS[processorModel].maxTotalPixels.toLocaleString()} px total
+                        </div>
+                        <div>
+                          {novaStarValidation.summary.ethernetOutputsUsed} / {PROCESSOR_SPECS[processorModel].ethernetOutputCount} outputs used
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-slate-400">Select a processor to see capacity usage.</span>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -4417,6 +4564,9 @@ const exportJson = () => {
                       {m}m
                     </text>
                   ))}
+                  {/* Height ruler reads bottom-up (0m at the wall's base, increasing
+                      upward) to match how a physical wall is measured/built - the line
+                      positions themselves are unchanged, only the printed label. */}
                   {Array.from({ length: Math.floor(wallBBox.h / 1000) + 1 }).map((_, m) => (
                     <text
                       key={`ry-${m}`}
@@ -4426,7 +4576,7 @@ const exportJson = () => {
                       fontSize="10"
                       textAnchor="end"
                     >
-                      {m}m
+                      {Math.floor(wallBBox.h / 1000) - m}m
                     </text>
                   ))}
                 </svg>
@@ -4773,9 +4923,25 @@ const exportJson = () => {
           snapEnabled={canvasSnapEnabled}
           onToggleSnap={() => setCanvasSnapEnabled((prev) => !prev)}
           onPositionChange={updateCanvasPosition}
+          processorInputs={processorModel ? PROCESSOR_SPECS[processorModel].inputs : []}
+          canvasInputs={canvasInputs}
+          onInputChange={updateCanvasInput}
+          inputMode={inputMode}
+          onInputModeChange={setInputMode}
+          wholeCanvasInputId={wholeCanvasInputId}
+          onWholeCanvasInputChange={setWholeCanvasInputId}
         />
 
-        <Card className="border-slate-700 bg-slate-800 print-card" collapsible>
+        <NovaStarExportPanel
+          hasProcessorModel={Boolean(processorModel)}
+          summary={novaStarValidation?.summary ?? null}
+          errors={novaStarValidation?.errors ?? []}
+          warnings={novaStarValidation?.warnings ?? []}
+          onDownload={downloadNovaStarConfig}
+          downloading={isGeneratingNovaStarFile}
+        />
+
+        <Card className="border-slate-700 bg-slate-800 print-card" collapsible defaultOpen={false}>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Stock Calculations</CardTitle>

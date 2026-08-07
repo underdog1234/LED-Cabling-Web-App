@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from "react";
 import { type RectMm, activeBBox } from "../model/panels";
-import { Button, Card, CardContent, CardHeader, CardTitle, Input, Select } from "../components/ui";
+import { Button, Card, CardContent, CardHeader, CardTitle, ControlGroup, Input, Select } from "../components/ui";
 import { OUTPUT_CANVAS_PRESETS, type Cell, type SubScreen, PORT_COLORS, cellRect } from "../App";
 import { subScreenBBoxOf } from "../subScreens/subScreenModel";
 import { resolutionOf, subScreenResolutionOf } from "./canvasModel";
+import type { ProcessorInput } from "../novastar/processorModels";
+import type { InputMode } from "../novastar/exportBuilder";
 
 type ScreenEntry = {
   /** null = the whole layout (used only when no sub-screens exist). */
@@ -27,6 +29,16 @@ type Props = {
   onToggleSnap: () => void;
   /** id === null updates the whole-layout position. */
   onPositionChange: (id: string | null, x: number, y: number) => void;
+  /** Available video inputs for the currently-selected NovaStar processor (empty if none selected). */
+  processorInputs: ProcessorInput[];
+  /** Per-entry input assignment, keyed by sub-screen id or "__whole__" - see keyOf below. Used when inputMode is "perEntry". */
+  canvasInputs: Record<string, number | null>;
+  onInputChange: (key: string, interfacePk: number | null) => void;
+  /** "perEntry": a dropdown per sub-screen/whole-layout entry (original behavior). "whole": one dropdown for the entire output canvas. */
+  inputMode: InputMode;
+  onInputModeChange: (mode: InputMode) => void;
+  wholeCanvasInputId: number | null;
+  onWholeCanvasInputChange: (interfacePk: number | null) => void;
 };
 
 const SNAP_PX = 10;
@@ -46,6 +58,13 @@ export default function OutputCanvasPanel({
   snapEnabled,
   onToggleSnap,
   onPositionChange,
+  processorInputs,
+  canvasInputs,
+  onInputChange,
+  inputMode,
+  onInputModeChange,
+  wholeCanvasInputId,
+  onWholeCanvasInputChange,
 }: Props) {
   const [customW, setCustomW] = useState(String(outputCanvasW));
   const [customH, setCustomH] = useState(String(outputCanvasH));
@@ -193,7 +212,7 @@ export default function OutputCanvasPanel({
   };
 
   return (
-    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible>
+    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible defaultOpen={false}>
       <CardHeader>
         <CardTitle className="text-white [text-shadow:0_0_2px_black]">Output Canvas</CardTitle>
       </CardHeader>
@@ -227,6 +246,33 @@ export default function OutputCanvasPanel({
           </label>
         </div>
 
+        <ControlGroup label="Input assignment">
+          <Button size="sm" intent="secondary" active={inputMode === "whole"} onClick={() => onInputModeChange("whole")}>
+            Whole Canvas
+          </Button>
+          <Button size="sm" intent="secondary" active={inputMode === "perEntry"} onClick={() => onInputModeChange("perEntry")}>
+            Per Sub-Screen
+          </Button>
+          {inputMode === "whole" ? (
+            <label className="flex items-center gap-1 text-xs text-slate-300">
+              Input
+              <Select
+                className="w-32"
+                value={wholeCanvasInputId ?? ""}
+                onChange={(e: React.ChangeEvent<HTMLSelectElement>) => onWholeCanvasInputChange(e.target.value ? Number(e.target.value) : null)}
+                disabled={processorInputs.length === 0}
+              >
+                <option value="">Unassigned</option>
+                {processorInputs.map((input) => (
+                  <option key={input.interfacePk} value={input.interfacePk}>{input.label}</option>
+                ))}
+              </Select>
+            </label>
+          ) : (
+            <span className="text-xs text-slate-400">One input dropdown per entry below.</span>
+          )}
+        </ControlGroup>
+
         <div className="space-y-2">
           {entries.map((entry, index) => {
             const color = PORT_COLORS[index % PORT_COLORS.length];
@@ -241,6 +287,24 @@ export default function OutputCanvasPanel({
                 <span className="text-xs text-slate-400 w-28 shrink-0">
                   {(entry.bboxMm.w / 1000).toFixed(2)}m × {(entry.bboxMm.h / 1000).toFixed(2)}m
                 </span>
+                {inputMode === "perEntry" ? (
+                  <label className="flex items-center gap-1 text-xs text-slate-300">
+                    Input
+                    <Select
+                      className="w-32"
+                      value={canvasInputs[keyOf(entry.id)] ?? ""}
+                      onChange={(e: React.ChangeEvent<HTMLSelectElement>) =>
+                        onInputChange(keyOf(entry.id), e.target.value ? Number(e.target.value) : null)
+                      }
+                      disabled={processorInputs.length === 0}
+                    >
+                      <option value="">Unassigned</option>
+                      {processorInputs.map((input) => (
+                        <option key={input.interfacePk} value={input.interfacePk}>{input.label}</option>
+                      ))}
+                    </Select>
+                  </label>
+                ) : null}
                 <label className="flex items-center gap-1 text-xs text-slate-300">
                   X
                   <Input

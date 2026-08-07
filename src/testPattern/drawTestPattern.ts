@@ -177,33 +177,39 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
 
   // Each panel's TRUE native-resolution pixel rect (back view, unmirrored):
   // its own pixW x pixH from PANEL_TYPES (e.g. MT is 256x64, NOT a
-  // physical-size scaling of MG9's pitch), positioned by accumulating each
-  // row band's panels left-to-right at their own native width and stacking
-  // bands by their own native height. This is the exact same algorithm
-  // behind the "Resolution: W x H" stat in the main app's Wall Summary, so
-  // the exported/animated pattern's canvas size and every panel's pixel
-  // footprint always match what's shown on screen - critical for MT, whose
-  // 256x64 native resolution has a completely different aspect ratio from
-  // its 1000x500mm physical size.
+  // physical-size scaling of MG9's pitch), placed at its own mm position
+  // converted to pixels via that panel type's own px-per-mm ratio (per
+  // axis, and swapped the same way cellRect's own mm footprint swaps on a
+  // 90/270 rotation, so the ratio stays internally consistent).
+  //
+  // Deliberately NOT accumulated band-by-band (tightly packing each row's
+  // panels left-to-right in array order): that silently closes up any gap
+  // from a missing/removed panel in the middle of a row, shifting every
+  // panel after the gap out of its true position - the wall's pixel
+  // positions must reflect real relative mm spacing, gaps included, or the
+  // pattern no longer matches which physical panel is which.
   const panelPixelRects = new Map<string, RectMm>();
-  let bandY = 0;
-  panelBands.forEach((band) => {
-    let x = 0;
-    let bandH = 0;
-    band.forEach((cell) => {
-      const spec = PANEL_TYPES[cellPanelType(cell)];
-      panelPixelRects.set(cell.id, { x, y: bandY, w: spec.pixW, h: spec.pixH });
-      x += spec.pixW;
-      bandH = Math.max(bandH, spec.pixH);
-    });
-    bandY += bandH;
+  activePanels.forEach((cell) => {
+    const rect = cellRect(cell);
+    const spec = PANEL_TYPES[cellPanelType(cell)];
+    const rot = ((Math.round((cell.rotation ?? 0) / 90) * 90) % 360 + 360) % 360;
+    const swapped = rot === 90 || rot === 270;
+    const nativeW = swapped ? spec.pixH : spec.pixW;
+    const nativeH = swapped ? spec.pixW : spec.pixH;
+    const physWMm = (swapped ? spec.h : spec.w) * 1000;
+    const physHMm = (swapped ? spec.w : spec.h) * 1000;
+    const x = Math.round(((rect.x - wallBBox.x) / physWMm) * nativeW);
+    const y = Math.round(((rect.y - wallBBox.y) / physHMm) * nativeH);
+    panelPixelRects.set(cell.id, { x, y, w: nativeW, h: nativeH });
   });
   let W = 0;
+  let H = 0;
   panelPixelRects.forEach((r) => {
     W = Math.max(W, r.x + r.w);
+    H = Math.max(H, r.y + r.h);
   });
   W = Math.max(1, W);
-  const H = Math.max(1, bandY);
+  H = Math.max(1, H);
 
   // RGB tile size = one full panel footprint at its OWN native resolution
   // (not a physical-size scaling), so each panel shows a single solid
@@ -243,8 +249,16 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     tileWidthPx,
     tileHeightPx,
     rowLabel: (cell) => (bandIndexById.get(cell.id) ?? 0) + 1,
+    // Column numbers must read from the FRONT (the pattern is always
+    // rendered mirrored - see dispRectPx below), not the panel's raw
+    // back-view x - otherwise the printed number doesn't match the
+    // column the audience actually sees it in. Mirror the same way
+    // dispRectPx does: a panel's front-view left edge is the wall's
+    // width minus its back-view right edge.
     colLabel: (cell) => {
-      const col = (cellRect(cell).x - wallBBox.x) / MODULE_MM + 1;
+      const rect = cellRect(cell);
+      const mirroredLeft = wallBBox.w - (rect.x - wallBBox.x) - rect.w;
+      const col = mirroredLeft / MODULE_MM + 1;
       return Number.isInteger(col) ? String(col) : col.toFixed(1);
     },
   };
@@ -264,7 +278,7 @@ const dispRectPx = (layout: TestPatternLayout, cell: Cell): RectMm => {
 // stroke behind the white fill keeps it legible there too.
 const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
   const { W, H } = layout;
-  const fontPx = Math.max(28, Math.min(70, Math.round(W * 0.028)));
+  const fontPx = Math.max(16, Math.min(40, Math.round(W * 0.016)));
   const lineH = Math.round(fontPx * 1.4);
   const lines: string[] = [];
   if (layout.projectName) lines.push(layout.projectName);
