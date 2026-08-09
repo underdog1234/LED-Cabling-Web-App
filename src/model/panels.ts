@@ -207,9 +207,17 @@ const localAnchors = (shape: PanelShape, halfW: number, halfH: number): Array<{ 
   return pts;
 };
 
-/** World-space connector anchors for a panel, rotated by its rotation. */
+/**
+ * World-space connector anchors for a panel, rotated by its FULL rotation
+ * (any angle, not just multiples of 90) - so a panel spun to e.g. 45deg
+ * snaps and joins along its own true rotated edges, not the nearest cardinal
+ * axis. (Rounding to the nearest 90 here used to be harmless when rotation
+ * was always cardinal; once custom angles became possible it silently
+ * snapped every rotated panel as if it were unrotated or at the nearest
+ * cardinal angle instead.)
+ */
 export const panelWorldAnchors = (g: PanelAnchorSpec): Array<{ x: number; y: number }> => {
-  const rad = (((Math.round(g.rotation / 90) * 90) % 360) * Math.PI) / 180;
+  const rad = (g.rotation * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);
   return localAnchors(g.shape, g.halfW, g.halfH).map((p) => ({

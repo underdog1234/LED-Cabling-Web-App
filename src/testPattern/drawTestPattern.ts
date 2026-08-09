@@ -421,6 +421,58 @@ const buildOuterExtremityOutline = (layout: TestPatternLayout): HTMLCanvasElemen
   return out;
 };
 
+// Direction arrow icon (vector line + filled triangular head) for the
+// per-panel row/column labels, replacing the old Unicode "↓"/"→" glyph
+// characters. A font glyph's internal strokes are only ever as thick as the
+// font renderer draws them - at small panel sizes (or when the output canvas
+// is later scaled for display/video) that can render at sub-pixel width and
+// disappear. Drawing the shaft with an explicit ctx.lineWidth (floored so it
+// never rounds below a visible thickness) guarantees it stays visible at any
+// output resolution, and the arrowhead is sized directly off that same line
+// width so it always scales with it. (x, y) is the icon's top-left corner;
+// `size` is its bounding box side length.
+const drawDirectionArrow = (ctx: CanvasRenderingContext2D, x: number, y: number, size: number, direction: "down" | "right") => {
+  const lineWidth = Math.min(3.5, Math.max(1.5, size * 0.16));
+  const headLen = Math.max(lineWidth * 1.8, size * 0.42);
+  const headWidth = headLen * 0.9;
+  ctx.save();
+  ctx.strokeStyle = "#ffffff";
+  ctx.fillStyle = "#ffffff";
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  if (direction === "down") {
+    const cx = x + size / 2;
+    const yTop = y + lineWidth / 2;
+    const yTip = y + size - lineWidth / 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, yTop);
+    ctx.lineTo(cx, yTip - headLen * 0.6);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx, yTip);
+    ctx.lineTo(cx - headWidth / 2, yTip - headLen);
+    ctx.lineTo(cx + headWidth / 2, yTip - headLen);
+    ctx.closePath();
+    ctx.fill();
+  } else {
+    const cy = y + size / 2;
+    const xLeft = x + lineWidth / 2;
+    const xTip = x + size - lineWidth / 2;
+    ctx.beginPath();
+    ctx.moveTo(xLeft, cy);
+    ctx.lineTo(xTip - headLen * 0.6, cy);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(xTip, cy);
+    ctx.lineTo(xTip - headLen, cy - headWidth / 2);
+    ctx.lineTo(xTip - headLen, cy + headWidth / 2);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+};
+
 // Corner-to-corner alignment cross + a centre circle as tall as the wall -
 // classic geometry/alignment references for spotting warped, offset or
 // stretched panels across the whole assembled surface.
@@ -438,6 +490,44 @@ const drawAlignmentOverlay = (ctx: CanvasRenderingContext2D, layout: TestPattern
   ctx.beginPath();
   ctx.arc(W / 2, H / 2, H / 2, 0, Math.PI * 2);
   ctx.stroke();
+  ctx.restore();
+};
+
+// 1D "DVD screensaver" ping-pong: reflects a constantly-increasing position
+// back and forth across [0, range] with no stored state - the whole
+// trajectory is a pure function of elapsed time, so it can be called from
+// any frame without tracking velocity/position between calls.
+const bounce1D = (t: number, speed: number, range: number): number => {
+  if (range <= 0) return 0;
+  const period = range * 2;
+  let x = (t * speed) % period;
+  if (x < 0) x += period;
+  return x <= range ? x : period - x;
+};
+
+/**
+ * Draws a small logo bouncing around the canvas, DVD-screensaver style.
+ * Deliberately NOT called from drawTestPatternFrame (or anywhere in the
+ * recorder/export paths) - this is decoration for the live browser tab only,
+ * never the recorded video or the static PNG/PDF exports.
+ */
+export const drawBouncingLogo = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout, timeSeconds: number, image: HTMLImageElement) => {
+  const { W, H } = layout;
+  if (W <= 0 || H <= 0 || !image.naturalWidth || !image.naturalHeight) return;
+  // ~1/2 of a standard panel's native pixel width (2x the original 1/4), aspect ratio preserved.
+  const logoW = Math.max(4, layout.tileWidthPx / 2);
+  const logoH = logoW * (image.naturalHeight / image.naturalWidth);
+  const rangeX = Math.max(0, W - logoW);
+  const rangeY = Math.max(0, H - logoH);
+  // Full one-way traverse takes several seconds on each axis (slow/subtle),
+  // and the two periods share no common factor, so the path doesn't retrace
+  // a short, obviously-repeating loop. /18 and /14 are double the original
+  // /9 and /7 divisors - half the speed, same non-repeating ratio.
+  const x = bounce1D(timeSeconds, rangeX / 18, rangeX);
+  const y = bounce1D(timeSeconds, rangeY / 14, rangeY);
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(image, x, y, logoW, logoH);
   ctx.restore();
 };
 
@@ -540,16 +630,21 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     ctx.restore();
 
     // Location label: top-left corner, two lines (row then column), always
-    // axis-aligned/white/upright regardless of the panel's own rotation.
+    // axis-aligned/white/upright regardless of the panel's own rotation. Each
+    // line is a vector direction-arrow icon followed by the row/column number.
     const pad = Math.max(3, Math.round(Math.min(r.w, r.h) * 0.06));
     const fontPx = Math.max(6, Math.floor(Math.min(r.w, r.h) * 0.08));
     const lineH = Math.round(fontPx * 1.15);
+    const iconSize = fontPx;
+    const textX = r.x + pad + iconSize + Math.max(2, Math.round(fontPx * 0.25));
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.font = `bold ${fontPx}px Arial`;
-    ctx.fillText(`↓${layout.rowLabel(cell)}`, r.x + pad, r.y + pad);
-    ctx.fillText(`→${layout.colLabel(cell)}`, r.x + pad, r.y + pad + lineH);
+    drawDirectionArrow(ctx, r.x + pad, r.y + pad, iconSize, "down");
+    ctx.fillText(`${layout.rowLabel(cell)}`, textX, r.y + pad);
+    drawDirectionArrow(ctx, r.x + pad, r.y + pad + lineH, iconSize, "right");
+    ctx.fillText(`${layout.colLabel(cell)}`, textX, r.y + pad + lineH);
   });
 
   ctx.drawImage(buildOuterExtremityOutline(layout), 0, 0);

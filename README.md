@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.23.0`
+Version `0.25.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -8,17 +8,45 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 
 - Build LED walls by rows and columns, or place panels freely (non-uniform layouts) with drag, edge-snap and joining
 - Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
-- Group panels into named **Sub-Screens**, edit/patch each one in isolation (other sub-screens stay visible but dimmed and locked), and view the complete assembled layout in Canvas View
+- Group panels into named **Sub-Screens** and edit/patch each one in isolation - every other panel (including unassigned ones) is fully hidden and un-interactive while a sub-screen is active, with its name clearly shown; **All Screens** returns to the complete layout instantly, with no panel data ever altered
 - Position the whole layout or individual sub-screens within a configurable-resolution **Output Canvas** (drag, numeric entry, align/snap tools, boundary/overlap warnings) for multi-processor / media-server mapping
 - Select a **NovaStar processor model** (`VX1000 Pro` / `VX2000 Pro`), see its live pixel/port capacity vs. current usage, assign a video input per sub-screen or one input for the whole canvas, and generate a real, importable `.uprj` processor configuration file - validated against the selected processor's port count, per-port and total pixel limits, and canvas size, with a summary of what will be exported and any blocking errors or warnings before download
 - Import projects from the Creative Layout Tool
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape
-- Export a native-resolution PNG test pattern, a full-screen canvas-only live animated test pattern, or a downloadable looping WebM video of it
+- Export a native-resolution Test Pattern image, a full-screen canvas-only live Moving Test Pattern (top-left anchored, scaled to fit the browser window without stretching/cropping, with a small bouncing logo browser-side only), or a downloadable looping WebM or MP4 video of it
+- Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
+- Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds), optionally included in the PDF export
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.25.0
+
+- Doubled the bouncing MMS logo's size (now ~1/2 a standard panel's native pixel width, up from 1/4) and halved its movement speed in the browser-only live Moving Test Pattern
+- The "Include Centre Line" PDF export option now defaults to enabled and sits at the end of its toolbar row
+- Replaced the separate WebM/MP4 download buttons with a single "Download Moving Test Pattern" button that opens a format-choice dialog (WebM or MP4, with a clear warning that MP4 takes significantly longer to encode) with Download/Cancel
+- Fixed blurry/sub-pixel text, lines and arrows in the live Moving Test Pattern tab: the canvas's backing store is now sized to the actual physical device pixels it's displayed at (CSS size x devicePixelRatio), not just the wall's native resolution, so high-DPI displays and non-1:1 window scaling no longer blur or alias thin strokes
+- Fixed rotated-panel snapping: panels rotated to a custom angle (not just 0/90/180/270) now snap and join along their own true rotated edges instead of silently snapping as if they were unrotated. This was a real bug in `panelWorldAnchors` (it rounded rotation to the nearest 90deg before computing connector anchor positions) affecting individual panels, multi-selected groups, custom angles and imported rotated panels alike; covered by a new regression test
+- Added a **Fit to View** button that zooms the Panel Layout workspace so the entire project - including a wide or tall imported layout - is visible at once, with the scroll position reset to the origin; confirmed the existing scrollable workspace already expands and scrolls correctly for any project size
+- Reorganised the Panel Layout toolbar into labelled groups (Selection & editing, Move/align & snap, Rotation & transforms, View/zoom & navigation, Overlays & display) instead of one long unlabelled row - all existing controls preserved, including moving the Front/Back View and Centre Line toggles down from the card header into their matching groups
+
+## Recent Changes In v0.24.0
+
+- Rounded the measurements shown in the Panel Layout header (and the Wall Summary/PDF size lines) to at most 2 decimal places with trailing zeros trimmed, instead of the raw unrounded floating-point value
+- Expanded panel rotation: dedicated 45° and 90° buttons plus a custom-angle input, on top of the existing keyboard shortcut. Rotating a multi-selection spins every selected panel in place by the same amount, so their arrangement and spacing relative to each other never changes
+- Fixed layout imports from the Creative Layout Tool silently snapping every panel's rotation to the nearest 90° and mis-mirroring square panels' rotation under the front-view flip - both bugs only showed up once panels could be rotated to non-cardinal angles. Imported panels now keep their exact source rotation and orientation
+- The NovaStar Processor Configuration section is now collapsed by default and moved to the very bottom of the sidebar, out of the way during normal layout work
+- Added copy/paste for selected panels: Ctrl/Cmd+C copies, Ctrl/Cmd+V enters a paste-placement mode with a dashed preview that follows the cursor and snaps to the grid/nearby panels, click to place, Escape or right-click to cancel. Pasted panels are auto-selected and keep their source spacing, rotation, panel type and arrangement (patching is left unassigned, same as importing a layout)
+- Applying a new grid size over an existing layout now asks for confirmation ("Remove Panels and Apply Grid" / "Cancel") instead of silently wiping every panel
+- The Moving Test Pattern's per-panel row/column direction indicators are now drawn as vector arrows (explicit stroke width with a floor, arrowhead scaled to match) instead of relying on a font glyph's own internal strokes, which could shrink below a visible pixel width at small panel sizes or when the output is scaled
+- Added a small bouncing MMS logo (DVD-screensaver style) to the browser-only live Moving Test Pattern view - about a quarter of a panel's native width, aspect-ratio preserved, stays fully inside the canvas, never appears in the recorded video or PNG/PDF exports
+- Added a toggleable vertical centre-line indicator to the Panel Layout workspace, with a "Centre" label and an "Include Centre Line" option for the PDF export. The centre is computed from every active panel's true rotated outer bounds, not just the axis-aligned wall bounding box, so a panel spun to a non-cardinal angle is still accounted for correctly
+- Selecting a sub-screen now fully hides every panel not assigned to it (previously they stayed visible, dimmed and locked) - the active sub-screen's name is shown clearly above the workspace, and an "All Screens" option (renamed from "Canvas View") returns to the complete layout instantly. No panel data is ever changed by switching the visible screen
+- Renamed **Video Test Pattern** to **Moving Test Pattern** and dropped "PNG" from **PNG Test Pattern** (now just **Test Pattern**) everywhere the labels appear - buttons, tab titles, help text and the README
+- The browser's live Moving Test Pattern tab now anchors the LED canvas to the top-left corner and scales it to fit the window on both axes (never stretched, cropped, centred, or auto-rotated between portrait/landscape), recalculating on resize; unused space fills with a plain black background instead of centring the canvas
+- Added a **Download MP4** option next to the existing WebM download. MediaRecorder can't produce MP4 directly in most browsers, so this records the same WebM as today and then transcodes it to H.264 MP4 in the browser via a lazily-loaded ffmpeg.wasm (only fetched the first time this button is used - roughly 30MB, entirely separate from the app's normal bundle)
 
 ## Recent Changes In v0.23.0
 

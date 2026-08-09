@@ -11,7 +11,7 @@
 //   - Coordinates are in the tool's units where 1 unit = 4mm (MM_TO_UNITS 0.25).
 //   - A panel is 500x500mm (125 units); (x,y) is the panel CENTRE.
 //   - type: MG9 (square) | MG12 (right triangle) | MG13 (quarter circle).
-//   - rotation: 0/90/180/270, SVG-clockwise. No patching is stored.
+//   - rotation: any angle in degrees, SVG-clockwise. No patching is stored.
 // ---------------------------------------------------------------------------
 
 export const YESTECH_UNIT_MM = 4; // 1 external unit = 4mm (MM_TO_UNITS 0.25)
@@ -60,11 +60,13 @@ export type ImportResult = {
   extra: Record<string, unknown>;
 };
 
+// Preserves the source tool's exact rotation angle (any degree value, not
+// just multiples of 90) so imported panels keep their true orientation.
 const normalizeRotation = (rotation: unknown): { value: number; wasInvalid: boolean } => {
   const raw = Number(rotation);
   if (!Number.isFinite(raw)) return { value: 0, wasInvalid: true };
-  const snapped = ((Math.round(raw / 90) * 90) % 360 + 360) % 360;
-  return { value: snapped, wasInvalid: snapped !== raw };
+  const wrapped = ((raw % 360) + 360) % 360;
+  return { value: wrapped, wasInvalid: false };
 };
 
 /**
@@ -120,7 +122,7 @@ export const parseYesTechLayout = (text: string): ImportResult => {
 
   const panels: ImportedPanel[] = [];
   const typeCounts: Record<string, number> = {};
-  let rotationFixes = 0;
+  let invalidRotations = 0;
 
   rawPanels.forEach((item, index) => {
     const raw = item as Record<string, unknown>;
@@ -137,7 +139,7 @@ export const parseYesTechLayout = (text: string): ImportResult => {
       return;
     }
     const { value: rotation, wasInvalid } = normalizeRotation(raw?.rotation);
-    if (wasInvalid) rotationFixes += 1;
+    if (wasInvalid) invalidRotations += 1;
 
     // Centre (units) -> top-left (mm).
     const centreXmm = cx * YESTECH_UNIT_MM;
@@ -166,7 +168,7 @@ export const parseYesTechLayout = (text: string): ImportResult => {
     return { ...base, error: "No importable panels were found in the file.", skipped: base.skipped };
   }
 
-  if (rotationFixes) base.converted.push(`Snapped ${rotationFixes} rotation value(s) to the nearest 90°.`);
+  if (invalidRotations) base.warnings.push(`${invalidRotations} panel(s) had a missing or invalid rotation value; defaulted to 0°.`);
   base.converted.push("Imported un-patched: signal and power patching are left for you to assign.");
   base.converted.push("Converted grid positions to the flexible mm workspace (panels are freely movable).");
 

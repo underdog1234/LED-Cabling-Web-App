@@ -16,7 +16,7 @@ export default function NovaStarExportPanel({ hasProcessorModel, summary, errors
   const canDownload = hasProcessorModel && summary !== null && errors.length === 0;
 
   return (
-    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible>
+    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible defaultOpen={false}>
       <CardHeader>
         <CardTitle className="text-white [text-shadow:0_0_2px_black]">NovaStar Processor Configuration</CardTitle>
       </CardHeader>

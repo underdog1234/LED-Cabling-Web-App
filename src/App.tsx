@@ -40,7 +40,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.23.0";
+const APP_VERSION = "0.25.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -236,6 +236,13 @@ export type Cell = {
   /** Sub-screen membership - null = unassigned. */
   subScreenId: string | null;
 };
+
+// Copy/paste clipboard: each panel's offset from the copied selection's own
+// top-left, so pasting anywhere reproduces the exact spacing/arrangement.
+// Patching (port assignment) is deliberately not copied - same "paste
+// un-patched" convention as importing a layout.
+type ClipboardPanel = { dx: number; dy: number; panelType: PanelTypeKey; panelVariant: PanelVariantKey; rotation: number };
+type ClipboardSelection = { panels: ClipboardPanel[]; w: number; h: number };
 
 // A named grouping of panels ("Centre Screen", "Stage Left Tower", ...).
 // Resolution/physical size is intentionally NOT stored here - it's always
@@ -585,6 +592,9 @@ const formatNumber = (value: number, digits = 0) =>
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
   });
+
+// Rounds to at most 2 decimal places and trims trailing zeros (19.384... -> "19.38", 3.50 -> "3.5", 4.00 -> "4").
+const formatMeters = (value: number) => (Number(value) || 0).toFixed(2).replace(/\.?0+$/, "");
 
 const getStatusColor = (percent: number) => {
   if (percent > 100) return "#ef4444";
@@ -1115,6 +1125,69 @@ function DeleteConfirmModal({
   );
 }
 
+function GridSizeConfirmModal({ onConfirm, onCancel }: { onConfirm: () => void; onCancel: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onCancel}>
+      <div className="max-w-md rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="mb-2 text-lg font-bold">Apply new grid size?</div>
+        <div className="mb-4 text-sm text-slate-300">
+          Applying this grid size will remove all panels currently in the layout. Do you want to continue?
+        </div>
+        <div className="flex flex-col gap-2">
+          <Button intent="danger" onClick={onConfirm}>Remove Panels and Apply Grid</Button>
+          <Button intent="ghost" onClick={onCancel}>Cancel</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DownloadFormatModal({
+  format,
+  onFormatChange,
+  onDownload,
+  onCancel,
+}: {
+  format: "webm" | "mp4";
+  onFormatChange: (format: "webm" | "mp4") => void;
+  onDownload: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onCancel}>
+      <div className="w-full max-w-md rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="mb-2 text-lg font-bold">Download Moving Test Pattern</div>
+        <div className="mb-3 text-sm text-slate-300">Choose an output format for the recorded video.</div>
+        <div className="mb-3 space-y-2">
+          <label className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 p-2 text-sm">
+            <input type="radio" name="download-format" checked={format === "webm"} onChange={() => onFormatChange("webm")} />
+            <span>
+              <span className="font-semibold">WebM</span>
+              <span className="text-slate-400"> - fast, recorded directly in the browser</span>
+            </span>
+          </label>
+          <label className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 p-2 text-sm">
+            <input type="radio" name="download-format" checked={format === "mp4"} onChange={() => onFormatChange("mp4")} />
+            <span>
+              <span className="font-semibold">MP4</span>
+              <span className="text-slate-400"> - widely compatible, encoded in the browser after recording</span>
+            </span>
+          </label>
+        </div>
+        {format === "mp4" ? (
+          <div className="mb-3 rounded-lg border border-amber-400 bg-amber-500/15 p-2 text-xs text-amber-200">
+            ⚠ MP4 requires an extra encoding pass after recording and can take significantly longer than WebM, especially for larger walls.
+          </div>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <Button intent="ghost" onClick={onCancel}>Cancel</Button>
+          <Button intent="primary" onClick={onDownload}>Download</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ImportPreviewModal({
   result,
   hasUnsavedWork,
@@ -1240,6 +1313,9 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
+  // The scrollable viewport AROUND workspaceRef (the overflow-auto wrapper) -
+  // its current visible size is what "Fit to View" measures against.
+  const workspaceViewportRef = useRef<HTMLDivElement | null>(null);
   const [importPreview, setImportPreview] = useState<ImportResult | null>(null);
   const [pendingQuickLayoutTransfer, setPendingQuickLayoutTransfer] = useState<QuickLayoutTransfer | null>(null);
 
@@ -1286,8 +1362,19 @@ export default function App() {
   const [redoStack, setRedoStack] = useState<LayoutSnapshot[]>([]);
   const [showHelp, setShowHelp] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [showGridSizeConfirm, setShowGridSizeConfirm] = useState(false);
+  const [customRotationDeg, setCustomRotationDeg] = useState("15");
+  const [showCentreLine, setShowCentreLine] = useState(true);
+  const [includeCentreLineInExport, setIncludeCentreLineInExport] = useState(true);
+  const [clipboard, setClipboard] = useState<ClipboardSelection | null>(null);
+  const [isPasting, setIsPasting] = useState(false);
+  const [pasteAnchor, setPasteAnchor] = useState<{ x: number; y: number } | null>(null);
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
   const [videoRecordSeconds, setVideoRecordSeconds] = useState(0);
+  const [isEncodingMp4, setIsEncodingMp4] = useState(false);
+  const [mp4EncodeProgress, setMp4EncodeProgress] = useState(0);
+  const [showDownloadFormatModal, setShowDownloadFormatModal] = useState(false);
+  const [downloadFormat, setDownloadFormat] = useState<"webm" | "mp4">("webm");
   const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
@@ -1491,7 +1578,7 @@ export default function App() {
   }, []);
 
   // Recording progress ticker (display only - the actual stop is a setTimeout
-  // inside downloadVideoTestPattern).
+  // inside downloadMovingTestPatternVideo).
   useEffect(() => {
     if (!isRecordingVideo) return;
     const id = window.setInterval(() => setVideoRecordSeconds((s) => Math.min(LOOP_SECONDS, s + 0.25)), 250);
@@ -1513,7 +1600,21 @@ export default function App() {
         redoLayout();
         return;
       }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        copySelectedPanels();
+        return;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        startPaste();
+        return;
+      }
       if (event.key === "Escape") {
+        if (isPasting) {
+          cancelPaste();
+          return;
+        }
         setSelectedId(null);
         setSelectedCells(new Set());
         setEditMode("patch");
@@ -1672,6 +1773,39 @@ export default function App() {
   const wallBBox = useMemo(() => activeBBox(activePanels.map(cellRect)), [activePanels]);
   const wallWidthM = wallBBox.w / 1000;
   const wallHeightM = wallBBox.h / 1000;
+  // True outer bounds of the whole layout, INCLUDING any panel rotated to a
+  // non-cardinal angle (wallBBox/cellRect only ever swap w/h at 90/270, so a
+  // panel spun to e.g. 30deg would otherwise poke outside wallBBox unnoticed).
+  // Rotates each panel's own footprint rect around its centre by its full
+  // stored rotation - the same box+angle the renderer itself draws - and
+  // takes the union of every corner. Drives the vertical centre indicator.
+  const trueOuterBBox = useMemo(() => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    activePanels.forEach((cell) => {
+      const rect = cellRect(cell);
+      const rotation = cell.rotation ?? 0;
+      const cx = rect.x + rect.w / 2;
+      const cy = rect.y + rect.h / 2;
+      const rad = (rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const hw = rect.w / 2;
+      const hh = rect.h / 2;
+      [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].forEach(([lx, ly]) => {
+        const x = cx + lx * cos - ly * sin;
+        const y = cy + lx * sin + ly * cos;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      });
+    });
+    if (!Number.isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  }, [activePanels]);
   // Visual row bands (top->bottom, left->right) drive snake order, pixel maths,
   // the PNG test pattern, and row labels for non-uniform layouts.
   const panelBands = useMemo(() => bandPanels(activePanels, cellRect) as Cell[][], [activePanels]);
@@ -2308,6 +2442,34 @@ export default function App() {
     // Arrowheads last so the signal/power direction stays visible in front.
     drawCanvasCableArrows(ctx, dispRectPx);
 
+    // Vertical centre indicator - opt-in only (Include Centre Line checkbox),
+    // mirrors the same trueOuterBBox-based calculation as the live workspace.
+    if (includeCentreLineInExport && showCentreLine && trueOuterBBox.w > 0) {
+      const centreTrueX = trueOuterBBox.x + trueOuterBBox.w / 2;
+      const centreDisplayTrueX = flipped ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
+      const lineX = (centreDisplayTrueX - wallBBox.x) * px;
+      const yTop = (trueOuterBBox.y - wallBBox.y) * px;
+      const yBottom = (trueOuterBBox.y + trueOuterBBox.h - wallBBox.y) * px;
+      ctx.save();
+      ctx.strokeStyle = "#eab308";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      ctx.moveTo(lineX, yTop);
+      ctx.lineTo(lineX, yBottom);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "#eab308";
+      ctx.fillRect(lineX - 20, Math.max(0, yTop - 16), 40, 14);
+      ctx.fillStyle = "#1e293b";
+      ctx.font = "bold 10px Arial";
+      ctx.textAlign = "center";
+      ctx.fillText("Centre", lineX, Math.max(10, yTop - 6));
+      ctx.restore();
+    }
+
     ctx.restore();
     return canvas;
   };
@@ -2527,14 +2689,14 @@ const exportJson = () => {
   // There's no router, so the project is handed off through localStorage and
   // the new tab (booted with ?testpattern=1, see main.jsx) reads it back and
   // renders TestPatternView - just the LED canvas, no page chrome.
-  const openVideoTestPatternTab = () => {
+  const openMovingTestPatternTab = () => {
     try {
       const payload = { formatVersion: 1, projectName: safeProjectName, surfaceName, panelType, panels: activePanels };
       localStorage.setItem("ledCablingTestPattern:v1", JSON.stringify(payload));
       window.open(`${location.pathname}?testpattern=1`, "_blank");
     } catch (err) {
-      console.error("Video test pattern failed", err);
-      alert("Could not open the video test pattern - check console");
+      console.error("Moving test pattern failed", err);
+      alert("Could not open the moving test pattern - check console");
     }
   };
 
@@ -2553,24 +2715,36 @@ const exportJson = () => {
     return null;
   };
 
-  // Record and download exactly one loop of the animated test pattern,
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", filename);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+  };
+
+  // Records exactly one loop of the animated test pattern to a WebM Blob,
   // without ever showing a tab/window - draws into a detached canvas (never
   // added to the DOM) and captures it directly. A generous resolution-scaled
   // bitrate avoids the blocky compression artifacts a codec's low default
   // bitrate would produce on this pattern's large flat colour fields and
-  // sharp edges/text.
-  const downloadVideoTestPattern = () => {
-    if (isRecordingVideo) return;
+  // sharp edges/text. Shared by both the WebM and MP4 downloads - MP4 just
+  // pipes this same recording through encodeWebmToMp4 afterwards.
+  const recordMovingTestPatternWebm = (): Promise<Blob> | null => {
+    if (isRecordingVideo) return null;
     const mimeType = pickVideoMimeType();
     if (!mimeType) {
       alert("This browser can't record video (no WebM/MediaRecorder support). Try Chrome, Edge or Firefox.");
-      return;
+      return null;
     }
     const project: TestPatternProject = { projectName: safeProjectName, surfaceName, panelType, panels: activePanels };
     const layout = computeTestPatternLayout(project);
     if (layout.W <= 0 || layout.H <= 0) {
       alert("No active panels to render a test pattern from.");
-      return;
+      return null;
     }
     const canvas = document.createElement("canvas");
     canvas.width = layout.W;
@@ -2578,7 +2752,7 @@ const exportJson = () => {
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       alert("Could not create a recording canvas - check console");
-      return;
+      return null;
     }
 
     const loopStart = performance.now();
@@ -2597,23 +2771,44 @@ const exportJson = () => {
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
     };
-    recorder.onstop = () => {
-      window.clearInterval(drawId);
-      const blob = new Blob(chunks, { type: mimeType });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.setAttribute("download", `${fileSafeProjectName}-front-test-pattern.webm`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => window.URL.revokeObjectURL(url), 1000);
-      setIsRecordingVideo(false);
-    };
-    recorder.start();
     setVideoRecordSeconds(0);
     setIsRecordingVideo(true);
+    const result = new Promise<Blob>((resolve) => {
+      recorder.onstop = () => {
+        window.clearInterval(drawId);
+        setIsRecordingVideo(false);
+        resolve(new Blob(chunks, { type: mimeType }));
+      };
+    });
+    recorder.start();
     setTimeout(() => recorder.stop(), LOOP_SECONDS * 1000);
+    return result;
+  };
+
+  const downloadMovingTestPatternVideo = () => {
+    const recording = recordMovingTestPatternWebm();
+    if (!recording) return;
+    recording.then((blob) => downloadBlob(blob, `${fileSafeProjectName}-front-test-pattern.webm`));
+  };
+
+  const downloadMovingTestPatternMp4 = () => {
+    if (isEncodingMp4) return;
+    const recording = recordMovingTestPatternWebm();
+    if (!recording) return;
+    recording.then(async (blob) => {
+      setIsEncodingMp4(true);
+      setMp4EncodeProgress(0);
+      try {
+        const { encodeWebmToMp4 } = await import("./testPattern/mp4Encode");
+        const mp4Blob = await encodeWebmToMp4(blob, setMp4EncodeProgress);
+        downloadBlob(mp4Blob, `${fileSafeProjectName}-front-test-pattern.mp4`);
+      } catch (err) {
+        console.error("MP4 encode failed", err);
+        alert("MP4 encoding failed - check console. You can still use Download Moving Test Pattern (WebM).");
+      } finally {
+        setIsEncodingMp4(false);
+      }
+    });
   };
 
   const openJson = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -2719,12 +2914,14 @@ const exportJson = () => {
       maxX = Math.max(maxX, p.x + IMPORT_W);
     });
     // Rotation under a horizontal mirror, per shape, so the mirrored (front)
-    // render matches the source orientation. Squares are symmetric.
+    // render matches the source orientation exactly, at any angle (not just
+    // multiples of 90). Kept as a fractional degree - rounding here would
+    // silently snap custom import angles back to whole numbers.
     const mirrorRotation = (variant: string, rotation: number) => {
-      const r = ((Math.round(rotation) % 360) + 360) % 360;
+      const r = ((rotation % 360) + 360) % 360;
       if (variant === "TRIANGLE") return (270 - r + 360) % 360;
       if (variant === "CURVED") return (90 - r + 360) % 360;
-      return r;
+      return (360 - r) % 360; // STANDARD: base square is vertical-axis symmetric, so mirroring negates the angle.
     };
     const panels: Cell[] = result.panels.map((p) => ({
       id: newCellId(),
@@ -2817,7 +3014,7 @@ const exportJson = () => {
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
       pdf.text(`Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`, 10, 38);
 
-      pdf.text(`Size: ${wallWidthM}m x ${wallHeightM}m`, 105, 20);
+      pdf.text(`Size: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
       pdf.text(`Resolution: ${wallPixelW} x ${wallPixelH}`, 105, 32);
       pdf.text(`Aspect ratio: ${aspectRatio}`, 105, 38);
@@ -2961,7 +3158,7 @@ const exportJson = () => {
       `Panel type: ${panelTypeSummary}`,
       `Power distro: ${distro.label}`,
       `Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`,
-      `Size: ${wallWidthM}m x ${wallHeightM}m`,
+      `Size: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`,
       `Resolution: ${wallPixelW} x ${wallPixelH}`,
       `Aspect ratio: ${aspectRatio}`,
       `Reduced ratio: ${ratioLabel}`,
@@ -3032,7 +3229,7 @@ const exportJson = () => {
   }
 };
 
-  const applyGridSize = () => {
+  const performApplyGridSize = () => {
     const nextCols = Number.parseInt(draftCols, 10);
     const nextRows = Number.parseInt(draftRows, 10);
     if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows) || nextCols < 1 || nextRows < 1) return;
@@ -3051,6 +3248,20 @@ const exportJson = () => {
     setIsDragging(false);
   };
 
+  const applyGridSize = () => {
+    const nextCols = Number.parseInt(draftCols, 10);
+    const nextRows = Number.parseInt(draftRows, 10);
+    if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows) || nextCols < 1 || nextRows < 1) return;
+
+    // Regenerating the grid discards every existing panel - warn first
+    // rather than silently wiping out a layout the user has already built.
+    if (grid.some(isActiveCell)) {
+      setShowGridSizeConfirm(true);
+      return;
+    }
+    performApplyGridSize();
+  };
+
   // --- Workspace display geometry ------------------------------------------
   // Display space = workspace mm, mirrored horizontally inside the wall bbox
   // when the front view is shown. The workspace origin is the bbox corner
@@ -3059,6 +3270,25 @@ const exportJson = () => {
   const workspaceOrigin = { x: wallBBox.x - WORKSPACE_PAD_MM, y: wallBBox.y - WORKSPACE_PAD_MM };
   const workspaceSizeMm = { w: wallBBox.w + WORKSPACE_PAD_MM * 2, h: wallBBox.h + WORKSPACE_PAD_MM * 2 };
   const mmToPx = (mm: number) => mm * pxPerMm;
+  // Sets zoom so the FULL workspace (every active panel, including any
+  // imported far outside the default view) fits inside the scrollable
+  // viewport's current visible size - the direct fix for "some panels are
+  // outside the accessible layout area" after importing a wide/tall project.
+  const fitToView = () => {
+    const viewport = workspaceViewportRef.current;
+    if (!viewport || workspaceSizeMm.w <= 0 || workspaceSizeMm.h <= 0) return;
+    // Viewport padding (p-4 = 16px each side) eats into the usable area.
+    const availW = Math.max(1, viewport.clientWidth - 32);
+    const availH = Math.max(1, viewport.clientHeight - 32);
+    const pxPerMmAtZoom1 = CELL_SIZE / MODULE_MM;
+    const fitZoom = Math.min(availW / (workspaceSizeMm.w * pxPerMmAtZoom1), availH / (workspaceSizeMm.h * pxPerMmAtZoom1));
+    setZoom(Math.min(2, Math.max(0.02, fitZoom)));
+    // Reset scroll to the origin so the whole (now-resized) workspace is
+    // actually in view, rather than leaving a stale scroll position that
+    // could still clip part of it after the content shrinks/grows.
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
+  };
   const displayRectOf = (cell: Cell): RectMm => {
     const rect = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
     if (moveDrag && moveDrag.ids.includes(cell.id)) {
@@ -3219,6 +3449,103 @@ const exportJson = () => {
     setIsSelectingPanels(false);
     setSelectionStart(null);
     setSelectionEnd(null);
+  };
+
+  // --- Copy / paste ---------------------------------------------------------
+  const copySelectedPanels = () => {
+    const keys = getSelectedIds(selectedCells, selectedId);
+    if (!keys.size) return;
+    const cells = grid.filter((c) => keys.has(c.id) && isActiveCell(c));
+    if (!cells.length) return;
+    const minX = Math.min(...cells.map((c) => c.x));
+    const minY = Math.min(...cells.map((c) => c.y));
+    const maxX = Math.max(...cells.map((c) => cellRect(c).x + cellRect(c).w));
+    const maxY = Math.max(...cells.map((c) => cellRect(c).y + cellRect(c).h));
+    setClipboard({
+      panels: cells.map((c) => ({
+        dx: c.x - minX,
+        dy: c.y - minY,
+        panelType: c.panelType,
+        panelVariant: c.panelVariant,
+        rotation: c.rotation ?? 0,
+      })),
+      w: maxX - minX,
+      h: maxY - minY,
+    });
+  };
+
+  const cancelPaste = () => {
+    setIsPasting(false);
+    setPasteAnchor(null);
+  };
+
+  const startPaste = () => {
+    if (!clipboard) return;
+    setIsPasting(true);
+    // Default preview position (before the mouse moves over the workspace):
+    // centred on the current wall bounds.
+    setPasteAnchor({ x: wallBBox.x + wallBBox.w / 2 - clipboard.w / 2, y: wallBBox.y + wallBBox.h / 2 - clipboard.h / 2 });
+  };
+
+  // Builds real Cell records for the clipboard at a given true-space anchor
+  // (top-left of the copied selection's own bounding box).
+  const buildPastedCells = (anchorX: number, anchorY: number, subScreenId: string | null): Cell[] =>
+    (clipboard?.panels ?? []).map((p) => ({
+      id: newCellId(),
+      x: anchorX + p.dx,
+      y: anchorY + p.dy,
+      assignedPort: null,
+      sequence: null,
+      assignedPowerPort: null,
+      powerSequence: null,
+      powerManual: false,
+      isRemoved: false,
+      panelVariant: p.panelVariant,
+      rotation: p.rotation,
+      panelType: p.panelType,
+      subScreenId,
+    }));
+
+  // Snaps the paste group's anchor the same way a live panel move snaps -
+  // against the canvas grid pitch and nearby existing panels' edges.
+  const resolvePasteSnapAnchor = (anchorX: number, anchorY: number) => {
+    if (!clipboard) return { x: anchorX, y: anchorY };
+    const shadow = buildPastedCells(anchorX, anchorY, null);
+    const movingGeoms = shadow.map(cellGeom);
+    const firstRect = shadow[0] ? cellRect(shadow[0]) : null;
+    const otherGeoms = grid.filter(isActiveCell).map(cellGeom);
+    const snap = computeAnchorSnapDelta(movingGeoms, otherGeoms, snapEnabled, firstRect);
+    return { x: anchorX + snap.dx, y: anchorY + snap.dy };
+  };
+
+  const updatePastePreviewFromEvent = (event: React.MouseEvent) => {
+    if (!clipboard) return;
+    const mm = eventToDisplayMm(event);
+    if (!mm) return;
+    const trueX = isFlippedView ? wallBBox.x * 2 + wallBBox.w - mm.x : mm.x;
+    const trueY = mm.y;
+    setPasteAnchor(resolvePasteSnapAnchor(trueX - clipboard.w / 2, trueY - clipboard.h / 2));
+  };
+
+  const commitPaste = () => {
+    if (!clipboard || !pasteAnchor) return;
+    const newCells = buildPastedCells(pasteAnchor.x, pasteAnchor.y, resolvedActiveSubScreenId);
+    const nextPanels = [...grid, ...newCells];
+    const overlaps = findOverlaps(nextPanels, cellRect);
+    if (overlaps.length && !allowOverlaps) {
+      setOverlapNotice(
+        `Paste cancelled: it would overlap ${overlaps.length} panel pair${overlaps.length === 1 ? "" : "s"}. Enable "Allow overlaps" to override.`,
+      );
+      return;
+    }
+    setOverlapNotice(
+      overlaps.length ? `${overlaps.length} overlapping panel pair${overlaps.length === 1 ? "" : "s"} kept by override.` : null,
+    );
+    commitGridUpdate(() => nextPanels);
+    setSelectedCells(new Set(newCells.map((c) => c.id)));
+    setSelectedId(null);
+    setIsPasting(false);
+    setPasteAnchor(null);
   };
 
   const assignSignalPanel = (target: Cell) => {
@@ -3824,7 +4151,11 @@ const exportJson = () => {
     });
   };
 
-  const rotateSelectedPanels = () => {
+  // Rotates every selected panel in place by deltaDeg (any angle, not just a
+  // multiple of 90). Each panel spins around its own centre - positions never
+  // move - so a multi-selected group's arrangement and spacing relative to
+  // each other is preserved automatically.
+  const rotateSelectedPanels = (deltaDeg: number = 90) => {
     const keys = getSelectedIds(selectedCells, selectedId);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
@@ -3832,7 +4163,7 @@ const exportJson = () => {
       keys.forEach((key) => {
         const target = findCellById(next, key);
         if (!target || !isActiveCell(target)) return;
-        target.rotation = ((target.rotation ?? 0) + 90) % 360;
+        target.rotation = (((target.rotation ?? 0) + deltaDeg) % 360 + 360) % 360;
       });
       return next;
     });
@@ -3939,6 +4270,27 @@ const exportJson = () => {
           onCancel={() => setShowDeleteConfirm(false)}
         />
       ) : null}
+      {showGridSizeConfirm ? (
+        <GridSizeConfirmModal
+          onConfirm={() => {
+            setShowGridSizeConfirm(false);
+            performApplyGridSize();
+          }}
+          onCancel={() => setShowGridSizeConfirm(false)}
+        />
+      ) : null}
+      {showDownloadFormatModal ? (
+        <DownloadFormatModal
+          format={downloadFormat}
+          onFormatChange={setDownloadFormat}
+          onCancel={() => setShowDownloadFormatModal(false)}
+          onDownload={() => {
+            setShowDownloadFormatModal(false);
+            if (downloadFormat === "mp4") downloadMovingTestPatternMp4();
+            else downloadMovingTestPatternVideo();
+          }}
+        />
+      ) : null}
       {importPreview ? (
         <ImportPreviewModal
           result={importPreview}
@@ -3988,15 +4340,27 @@ const exportJson = () => {
                 <FileText className="h-4 w-4" />Generate PDF
               </Button>
               <Button intent="primary" onClick={exportTestPatternPng}>
-                <ImageDown className="h-4 w-4" />PNG Test Pattern
+                <ImageDown className="h-4 w-4" />Test Pattern
               </Button>
-              <Button intent="primary" onClick={openVideoTestPatternTab}>
-                <Video className="h-4 w-4" />Video Test Pattern
+              <Button intent="primary" onClick={openMovingTestPatternTab}>
+                <Video className="h-4 w-4" />Moving Test Pattern
               </Button>
-              <Button intent="primary" onClick={downloadVideoTestPattern} disabled={isRecordingVideo}>
+              <Button
+                intent="primary"
+                onClick={() => setShowDownloadFormatModal(true)}
+                disabled={isRecordingVideo || isEncodingMp4}
+              >
                 <Download className="h-4 w-4" />
-                {isRecordingVideo ? `Recording… ${videoRecordSeconds.toFixed(0)}/${LOOP_SECONDS}s` : "Download Video Test Pattern"}
+                {isEncodingMp4
+                  ? `Encoding MP4… ${Math.round(mp4EncodeProgress * 100)}%`
+                  : isRecordingVideo
+                    ? `Recording… ${videoRecordSeconds.toFixed(0)}/${LOOP_SECONDS}s`
+                    : "Download Moving Test Pattern"}
               </Button>
+              <label className="flex items-center gap-1 px-1 text-xs text-slate-200" title="Include the vertical centre indicator in the PDF's Panel Layout pages">
+                <input type="checkbox" checked={includeCentreLineInExport} onChange={() => setIncludeCentreLineInExport((prev) => !prev)} />
+                Include Centre Line
+              </label>
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">
               <Button intent="secondary" onClick={exportJson}>
@@ -4196,7 +4560,7 @@ const exportJson = () => {
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
                   <div>Panels: {totalPanels} active across {panelBands.length} row band{panelBands.length === 1 ? "" : "s"}</div>
-                  <div>Size: {wallWidthM}m × {wallHeightM}m</div>
+                  <div>Size: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
                   <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
                   <div>Resolution: {wallPixelW} × {wallPixelH}</div>
                   <div>Aspect: {aspectRatio}</div>
@@ -4339,163 +4703,241 @@ const exportJson = () => {
         <Card className="border-slate-700 bg-slate-800 print-card" data-panel-layout collapsible>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({wallWidthM}m x {wallHeightM}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
-              <div className="flex items-center gap-2 no-print">
-                <StatusChip tone={isFlippedView ? "amber" : "sky"}>{isFlippedView ? "Front View" : "Back View"}</StatusChip>
-                <Button intent="secondary" size="sm" onClick={(e) => { e.stopPropagation(); setIsFlippedView((prev) => !prev); }}>
-                  {isFlippedView ? "Show Back View" : "Show Front View"}
-                </Button>
-              </div>
+              <CardTitle className="text-white [text-shadow:0_0_2px_black]">Panel Layout ({formatMeters(wallWidthM)}m x {formatMeters(wallHeightM)}m) - {patchMode === "signal" ? "Signal" : "Power"} patching</CardTitle>
             </div>
+            {subScreens.length > 0 ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs no-print">
+                {resolvedActiveSubScreenId !== null ? (
+                  <>
+                    <StatusChip tone="sky">
+                      Editing sub-screen: {subScreens.find((s) => s.id === resolvedActiveSubScreenId)?.name ?? "Unknown"}
+                    </StatusChip>
+                    <span className="text-slate-300">Other panels are hidden while a sub-screen is active.</span>
+                    <Button intent="ghost" size="sm" onClick={(e) => { e.stopPropagation(); selectSubScreen(null); }}>
+                      All Screens
+                    </Button>
+                  </>
+                ) : (
+                  <StatusChip tone="emerald">All Screens - showing the complete layout</StatusChip>
+                )}
+              </div>
+            ) : null}
           </CardHeader>
           <CardContent>
-            <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 p-2 text-xs text-white [text-shadow:0_0_2px_black] no-print">
-              <Button
-                intent="secondary"
-                size="sm"
-                active={editMode === "patch"}
-                activeAccent="sky"
-                onClick={() => setEditMode("patch")}
-                title="Click or drag panels to patch the active signal port / power plug"
-              >
-                Patch
-              </Button>
-              <Button
-                intent="secondary"
-                size="sm"
-                active={editMode === "select"}
-                activeAccent="emerald"
-                onClick={() => {
-                  setEditMode((prev) => {
-                    if (prev === "select") {
-                      setSelectedId(null);
-                      setSelectedCells(new Set());
-                      return "patch";
-                    }
-                    return "select";
-                  });
-                }}
-                title="Click panels or drag a box to select (Shift adds)"
-              >
-                Select
-              </Button>
-              <Button
-                intent="secondary"
-                size="sm"
-                active={editMode === "move"}
-                activeAccent="amber"
-                onClick={() => setEditMode((prev) => (prev === "move" ? "patch" : "move"))}
-                title="Drag panels to reposition them freely; edges snap together"
-              >
-                Move
-              </Button>
-              <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
-              {editMode === "move" ? (
-                <>
-                  <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
-                    <input type="checkbox" checked={snapEnabled} onChange={() => setSnapEnabled((prev) => !prev)} />
-                    <span>Snap</span>
-                  </label>
-                  <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
-                    <input type="checkbox" checked={moveJoinedGroup} onChange={() => setMoveJoinedGroup((prev) => !prev)} />
-                    <span>Move joined group</span>
-                  </label>
-                  <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1" title="Permit intentional panel overlaps">
-                    <input type="checkbox" checked={allowOverlaps} onChange={() => setAllowOverlaps((prev) => !prev)} />
-                    <span>Allow overlaps</span>
-                  </label>
-                </>
-              ) : null}
-              <select
-                className="rounded-lg border border-slate-500 bg-white p-1.5 text-xs text-black"
-                value={String(zoom)}
-                onChange={(e) => setZoom(Number(e.target.value))}
-                title="Workspace zoom"
-              >
-                <option value="0.5">50%</option>
-                <option value="0.75">75%</option>
-                <option value="1">100%</option>
-                <option value="1.5">150%</option>
-              </select>
-              <Button
-                intent="secondary"
-                size="sm"
-                onClick={() => {
-                  commitGridUpdate((prev) => [
-                    ...prev,
-                    makePanelAt(wallBBox.x, wallBBox.y + wallBBox.h + MODULE_MM, panelType, resolvedActiveSubScreenId),
-                  ]);
-                  setEditMode("move");
-                }}
-                title="Add a new panel below the wall, ready to move into place"
-              >
-                + Add Panel
-              </Button>
-              <select
-                className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                disabled={selectedCount === 0}
-                title="Set the panel type for the selected panels (MT spans two 0.5m modules)"
-                value={selectedPanel ? cellPanelType(selectedPanel) : "MG9"}
-                onChange={(e) => applySelectedPanelType(e.target.value as PanelTypeKey)}
-              >
-                {(Object.keys(PANEL_TYPES) as PanelTypeKey[]).map((key) => (
-                  <option key={key} value={key}>{PANEL_TYPES[key].name} panel</option>
-                ))}
-              </select>
-              <select
-                className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                disabled={selectedCount === 0 || (selectedPanel ? cellPanelType(selectedPanel) !== "MG9" : false)}
-                value={selectedPanel?.panelVariant ?? "STANDARD"}
-                onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
-              >
-                {(Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).map((key) => (
-                  <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
-                ))}
-              </select>
-              <Button intent="secondary" size="sm" onClick={rotateSelectedPanels} disabled={selectedCount === 0}>Rotate 🔄</Button>
-              <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
-              <Button intent="danger" size="sm" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete</Button>
-              <Button intent="success" size="sm" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore</Button>
-              <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
-              <Button intent="ghost" size="sm" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="h-4 w-4" />Redo</Button>
-              {subScreens.length > 0 ? (
-                <>
-                  <select
-                    className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                    value={assignTargetSubScreenId}
-                    onChange={(e) => setAssignTargetSubScreenId(e.target.value)}
+            <div className="mb-3 flex flex-wrap items-start gap-2 text-xs text-white [text-shadow:0_0_2px_black] no-print">
+              <ControlGroup label="Selection & editing">
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  active={editMode === "patch"}
+                  activeAccent="sky"
+                  onClick={() => setEditMode("patch")}
+                  title="Click or drag panels to patch the active signal port / power plug"
+                >
+                  Patch
+                </Button>
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  active={editMode === "select"}
+                  activeAccent="emerald"
+                  onClick={() => {
+                    setEditMode((prev) => {
+                      if (prev === "select") {
+                        setSelectedId(null);
+                        setSelectedCells(new Set());
+                        return "patch";
+                      }
+                      return "select";
+                    });
+                  }}
+                  title="Click panels or drag a box to select (Shift adds)"
+                >
+                  Select
+                </Button>
+                <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  onClick={() => {
+                    commitGridUpdate((prev) => [
+                      ...prev,
+                      makePanelAt(wallBBox.x, wallBBox.y + wallBBox.h + MODULE_MM, panelType, resolvedActiveSubScreenId),
+                    ]);
+                    setEditMode("move");
+                  }}
+                  title="Add a new panel below the wall, ready to move into place"
+                >
+                  + Add Panel
+                </Button>
+                <select
+                  className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
+                  disabled={selectedCount === 0}
+                  title="Set the panel type for the selected panels (MT spans two 0.5m modules)"
+                  value={selectedPanel ? cellPanelType(selectedPanel) : "MG9"}
+                  onChange={(e) => applySelectedPanelType(e.target.value as PanelTypeKey)}
+                >
+                  {(Object.keys(PANEL_TYPES) as PanelTypeKey[]).map((key) => (
+                    <option key={key} value={key}>{PANEL_TYPES[key].name} panel</option>
+                  ))}
+                </select>
+                <select
+                  className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
+                  disabled={selectedCount === 0 || (selectedPanel ? cellPanelType(selectedPanel) !== "MG9" : false)}
+                  value={selectedPanel?.panelVariant ?? "STANDARD"}
+                  onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
+                >
+                  {(Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).map((key) => (
+                    <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
+                  ))}
+                </select>
+                <Button intent="secondary" size="sm" onClick={copySelectedPanels} disabled={selectedCount === 0} title="Copy selected panels (Ctrl/Cmd+C)">Copy</Button>
+                <Button
+                  intent={isPasting ? "primary" : "secondary"}
+                  size="sm"
+                  onClick={() => (isPasting ? cancelPaste() : startPaste())}
+                  disabled={!clipboard}
+                  title={isPasting ? "Click on the layout to place, Esc/right-click to cancel" : "Paste copied panels (Ctrl/Cmd+V)"}
+                >
+                  {isPasting ? "Click to Place…" : "Paste"}
+                </Button>
+                <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
+                <Button intent="danger" size="sm" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete</Button>
+                <Button intent="success" size="sm" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore</Button>
+                <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
+                <Button intent="ghost" size="sm" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="h-4 w-4" />Redo</Button>
+                {subScreens.length > 0 ? (
+                  <>
+                    <select
+                      className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
+                      value={assignTargetSubScreenId}
+                      onChange={(e) => setAssignTargetSubScreenId(e.target.value)}
+                      disabled={selectedCount === 0}
+                      title="Choose which sub-screen to assign the selected panels to"
+                    >
+                      <option value="">Choose a sub-screen...</option>
+                      {subScreens.map((screen) => (
+                        <option key={screen.id} value={screen.id}>
+                          {screen.name}
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      intent="secondary"
+                      size="sm"
+                      onClick={() => {
+                        if (assignTargetSubScreenId) assignSelectedToSubScreen(assignTargetSubScreenId);
+                      }}
+                      disabled={selectedCount === 0 || !assignTargetSubScreenId}
+                    >
+                      Assign Selected ({selectedCount})
+                    </Button>
+                    <Button intent="ghost" size="sm" onClick={removeSelectedFromSubScreen} disabled={selectedCount === 0}>
+                      Remove from Sub-Screen
+                    </Button>
+                  </>
+                ) : null}
+              </ControlGroup>
+
+              <ControlGroup label="Move, align & snap">
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  active={editMode === "move"}
+                  activeAccent="amber"
+                  onClick={() => setEditMode((prev) => (prev === "move" ? "patch" : "move"))}
+                  title="Drag panels to reposition them freely; edges snap together"
+                >
+                  Move
+                </Button>
+                {editMode === "move" ? (
+                  <>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                      <input type="checkbox" checked={snapEnabled} onChange={() => setSnapEnabled((prev) => !prev)} />
+                      <span>Snap</span>
+                    </label>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                      <input type="checkbox" checked={moveJoinedGroup} onChange={() => setMoveJoinedGroup((prev) => !prev)} />
+                      <span>Move joined group</span>
+                    </label>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1" title="Permit intentional panel overlaps">
+                      <input type="checkbox" checked={allowOverlaps} onChange={() => setAllowOverlaps((prev) => !prev)} />
+                      <span>Allow overlaps</span>
+                    </label>
+                  </>
+                ) : null}
+              </ControlGroup>
+
+              <ControlGroup label="Rotation & transforms">
+                <Button intent="secondary" size="sm" onClick={() => rotateSelectedPanels(45)} disabled={selectedCount === 0} title="Rotate selected panels 45° clockwise">Rotate 45° 🔄</Button>
+                <Button intent="secondary" size="sm" onClick={() => rotateSelectedPanels(90)} disabled={selectedCount === 0} title="Rotate selected panels 90° clockwise">Rotate 90° 🔄</Button>
+                <div className="flex items-center gap-1 rounded-lg border border-slate-500 bg-white p-1">
+                  <input
+                    type="number"
+                    className="w-16 rounded border border-slate-300 p-1 text-sm text-black"
+                    value={customRotationDeg}
+                    onChange={(e) => setCustomRotationDeg(e.target.value)}
+                    title="Custom rotation angle in degrees"
                     disabled={selectedCount === 0}
-                    title="Choose which sub-screen to assign the selected panels to"
-                  >
-                    <option value="">Choose a sub-screen...</option>
-                    {subScreens.map((screen) => (
-                      <option key={screen.id} value={screen.id}>
-                        {screen.name}
-                      </option>
-                    ))}
-                  </select>
+                  />
                   <Button
                     intent="secondary"
                     size="sm"
                     onClick={() => {
-                      if (assignTargetSubScreenId) assignSelectedToSubScreen(assignTargetSubScreenId);
+                      const deg = Number.parseFloat(customRotationDeg);
+                      if (Number.isFinite(deg)) rotateSelectedPanels(deg);
                     }}
-                    disabled={selectedCount === 0 || !assignTargetSubScreenId}
+                    disabled={selectedCount === 0 || !Number.isFinite(Number.parseFloat(customRotationDeg))}
+                    title="Rotate selected panels by the entered angle"
                   >
-                    Assign Selected ({selectedCount})
+                    Rotate °
                   </Button>
-                  <Button intent="ghost" size="sm" onClick={removeSelectedFromSubScreen} disabled={selectedCount === 0}>
-                    Remove from Sub-Screen
-                  </Button>
-                </>
-              ) : null}
+                </div>
+              </ControlGroup>
+
+              <ControlGroup label="View, zoom & navigation">
+                <StatusChip tone={isFlippedView ? "amber" : "sky"}>{isFlippedView ? "Front View" : "Back View"}</StatusChip>
+                <Button intent="secondary" size="sm" onClick={() => setIsFlippedView((prev) => !prev)}>
+                  {isFlippedView ? "Show Back View" : "Show Front View"}
+                </Button>
+                <select
+                  className="rounded-lg border border-slate-500 bg-white p-1.5 text-xs text-black"
+                  value={String(zoom)}
+                  onChange={(e) => setZoom(Number(e.target.value))}
+                  title="Workspace zoom"
+                >
+                  <option value="0.5">50%</option>
+                  <option value="0.75">75%</option>
+                  <option value="1">100%</option>
+                  <option value="1.5">150%</option>
+                </select>
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  onClick={fitToView}
+                  title="Zoom so the entire layout - including any wide/tall imported project - fits in the visible workspace"
+                >
+                  Fit to View
+                </Button>
+              </ControlGroup>
+
+              <ControlGroup label="Overlays & display">
+                <Button
+                  intent={showCentreLine ? "primary" : "secondary"}
+                  size="sm"
+                  onClick={() => setShowCentreLine((prev) => !prev)}
+                  title="Toggle the vertical centre indicator"
+                >
+                  {showCentreLine ? "Hide Centre Line" : "Show Centre Line"}
+                </Button>
+              </ControlGroup>
             </div>
             {overlapNotice ? (
               <div className="mb-3 rounded-lg border border-amber-400 bg-amber-500/15 px-3 py-2 text-sm text-amber-200 no-print">
                 ⚠ {overlapNotice}
               </div>
             ) : null}
-            <div className="w-full overflow-auto rounded-xl bg-white/5 p-4 select-none">
+            <div ref={workspaceViewportRef} className="w-full overflow-auto rounded-xl bg-white/5 p-4 select-none">
               <div
                 ref={workspaceRef}
                 className="relative"
@@ -4649,6 +5091,13 @@ const exportJson = () => {
                 </svg>
 
                 {grid.map((cell) => {
+                  // Sub-screen isolation: while a sub-screen is active, every panel not
+                  // assigned to it (including unassigned panels - reassignment is done
+                  // from All Screens via the "Assign Selected" dropdown, not while the
+                  // target screen is active) is fully hidden, not just dimmed, so it
+                  // can't be selected/moved/removed/patched by accident.
+                  const isDimmed = isPanelDimmed(cell);
+                  if (isDimmed) return null;
                   const rect = rectToPx(displayRectOf(cell));
                   const isMoving = !!moveDrag && moveDrag.ids.includes(cell.id);
                   const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
@@ -4656,7 +5105,6 @@ const exportJson = () => {
                   const { signalRing, powerRing } = getPanelIndicators(cell);
                   const isSelected = selectedCells.has(cell.id) || selectedId === cell.id;
                   const isRemoved = cell.isRemoved;
-                  const isDimmed = isPanelDimmed(cell);
                   const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
                   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
                   // Match the canvas/PDF base shapes (and the YES TECH layout
@@ -4688,13 +5136,11 @@ const exportJson = () => {
                         width: rect.w,
                         height: rect.h,
                         zIndex: isMoving ? 30 : isSelected ? 25 : 10,
-                        opacity: isRemoved ? undefined : isDimmed ? 0.28 : isMoving ? 0.85 : 1,
-                        pointerEvents: isDimmed ? "none" : undefined,
+                        opacity: isRemoved ? undefined : isMoving ? 0.85 : 1,
                         background: "transparent",
                         border: `2px ${isRemoved ? "dashed" : "solid"} ${isMoving ? "#fbbf24" : isSelected ? "#ffffff" : isRemoved ? "#64748b" : "transparent"}`,
                         boxShadow: "none",
                         color: isRemoved ? "#94a3b8" : "#020617",
-                        cursor: isDimmed ? "default" : undefined,
                       }}
                       className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                     >
@@ -4771,6 +5217,37 @@ const exportJson = () => {
                   {cableHops.map((hop) => cableArrowHead(hop))}
                 </svg>
 
+                {/* Vertical centre indicator: marks the horizontal centre of the whole
+                    layout's TRUE outer bounds (trueOuterBBox - includes any panel
+                    rotated to a non-cardinal angle, not just the axis-aligned wallBBox).
+                    Sits above the panels (thin/dashed/translucent) so it's always
+                    visible without covering panel text. */}
+                {showCentreLine && trueOuterBBox.w > 0 ? (() => {
+                  const centreTrueX = trueOuterBBox.x + trueOuterBBox.w / 2;
+                  const centreDisplayTrueX = isFlippedView ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
+                  const lineX = mmToPx(centreDisplayTrueX - workspaceOrigin.x);
+                  const yTop = mmToPx(trueOuterBBox.y - workspaceOrigin.y);
+                  const yBottom = mmToPx(trueOuterBBox.y + trueOuterBBox.h - workspaceOrigin.y);
+                  return (
+                    <svg className="pointer-events-none absolute inset-0 z-[36]" width={svgW} height={svgH}>
+                      <line
+                        x1={lineX}
+                        y1={yTop}
+                        x2={lineX}
+                        y2={yBottom}
+                        stroke="#facc15"
+                        strokeWidth={1.5}
+                        strokeDasharray="6 4"
+                        strokeOpacity={0.75}
+                      />
+                      <rect x={lineX - 20} y={Math.max(0, yTop - 16)} width={40} height={14} rx={3} fill="#facc15" opacity={0.9} />
+                      <text x={lineX} y={Math.max(11, yTop - 5)} textAnchor="middle" fontSize={10} fontWeight="bold" fill="#1e293b">
+                        Centre
+                      </text>
+                    </svg>
+                  );
+                })() : null}
+
                 {/* Live snap/join guide: ghost of the snapped landing position + join edges. */}
                 {snapGuide ? (
                   <>
@@ -4805,6 +5282,50 @@ const exportJson = () => {
                       />
                     );
                   })()
+                ) : null}
+
+                {/* Paste-placement mode: an invisible hit-layer captures the click that
+                    commits the paste (so it works even over existing panels, which
+                    normally stop propagation of their own mousedown), plus a dashed
+                    preview of the copied panels following the cursor. */}
+                {isPasting && clipboard ? (
+                  <>
+                    <div
+                      className="absolute inset-0 z-[45]"
+                      style={{ cursor: "copy" }}
+                      onMouseMove={updatePastePreviewFromEvent}
+                      onMouseDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.preventDefault();
+                        commitPaste();
+                      }}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        cancelPaste();
+                      }}
+                    />
+                    {pasteAnchor
+                      ? buildPastedCells(pasteAnchor.x, pasteAnchor.y, null).map((cell, i) => {
+                          const rect = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
+                          const px = rectToPx(rect);
+                          return (
+                            <div
+                              key={`paste-preview-${i}`}
+                              className="pointer-events-none absolute z-[45] rounded-sm border-2 border-dashed border-sky-300"
+                              style={{
+                                left: px.x,
+                                top: px.y,
+                                width: px.w,
+                                height: px.h,
+                                background: "rgba(56,189,248,0.18)",
+                                transform: `rotate(${cell.rotation ?? 0}deg)`,
+                                transformOrigin: "center",
+                              }}
+                            />
+                          );
+                        })
+                      : null}
+                  </>
                 ) : null}
               </div>
             </div>
@@ -4932,15 +5453,6 @@ const exportJson = () => {
           onWholeCanvasInputChange={setWholeCanvasInputId}
         />
 
-        <NovaStarExportPanel
-          hasProcessorModel={Boolean(processorModel)}
-          summary={novaStarValidation?.summary ?? null}
-          errors={novaStarValidation?.errors ?? []}
-          warnings={novaStarValidation?.warnings ?? []}
-          onDownload={downloadNovaStarConfig}
-          downloading={isGeneratingNovaStarFile}
-        />
-
         <Card className="border-slate-700 bg-slate-800 print-card" collapsible defaultOpen={false}>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -5017,6 +5529,15 @@ const exportJson = () => {
             )}
           </CardContent>
         </Card>
+
+        <NovaStarExportPanel
+          hasProcessorModel={Boolean(processorModel)}
+          summary={novaStarValidation?.summary ?? null}
+          errors={novaStarValidation?.errors ?? []}
+          warnings={novaStarValidation?.warnings ?? []}
+          onDownload={downloadNovaStarConfig}
+          downloading={isGeneratingNovaStarFile}
+        />
       </div>
     </div>
   );

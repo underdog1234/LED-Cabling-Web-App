@@ -1,7 +1,7 @@
 {
   "name": "led-cabling-web",
   "private": true,
-  "version": "0.23.0",
+  "version": "0.25.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,9 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
     "@tailwindcss/vite": "^4.2.2",
     "fflate": "^0.8.3",
     "html2canvas": "^1.4.1",

@@ -70,7 +70,7 @@ export default function SubScreenPanel({
               activeSubScreenId === null ? "border-sky-300 bg-sky-500/20" : "border-slate-600 bg-slate-900 hover:bg-slate-700/60"
             }`}
           >
-            <span className="font-semibold">Canvas View</span>
+            <span className="font-semibold">All Screens</span>
             <span className="text-xs text-slate-300">whole layout{unassignedCount ? ` · ${unassignedCount} unassigned` : ""}</span>
           </button>
 
