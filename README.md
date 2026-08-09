@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.25.0`
+Version `0.25.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,11 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.25.1
+
+- Fixed a real regression from v0.25.0's DPI-aware live Moving Test Pattern rendering: the RGB checkerboard tiles no longer lined up with panel boundaries (each flat-coloured square could span multiple panels). Root cause was `drawTestPatternFrame` resetting the canvas transform to a hard-coded identity to draw its pre-rendered pattern layer, which only stays correct when the canvas is 1:1 with its content (true for the recorded video/PNG/PDF exports) - once the live view started rendering at a devicePixelRatio/fit-to-window scale, that hard reset drew the pattern at the wrong size. It now resets to whichever transform the caller had active instead of a literal identity
+- Regrouped the Panel Layout toolbar: **Patch**, **Select**, **Move** and **Clear Patching** now live together in one "Panel tools" group (previously split across two groups), with the Snap/Move joined group/Allow overlaps options staying alongside Move
 
 ## Recent Changes In v0.25.0
 

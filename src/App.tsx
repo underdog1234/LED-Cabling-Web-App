@@ -40,7 +40,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.25.0";
+const APP_VERSION = "0.25.1";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -4725,7 +4725,7 @@ const exportJson = () => {
           </CardHeader>
           <CardContent>
             <div className="mb-3 flex flex-wrap items-start gap-2 text-xs text-white [text-shadow:0_0_2px_black] no-print">
-              <ControlGroup label="Selection & editing">
+              <ControlGroup label="Panel tools">
                 <Button
                   intent="secondary"
                   size="sm"
@@ -4755,7 +4755,37 @@ const exportJson = () => {
                 >
                   Select
                 </Button>
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  active={editMode === "move"}
+                  activeAccent="amber"
+                  onClick={() => setEditMode((prev) => (prev === "move" ? "patch" : "move"))}
+                  title="Drag panels to reposition them freely; edges snap together"
+                >
+                  Move
+                </Button>
+                <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
                 <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
+                {editMode === "move" ? (
+                  <>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                      <input type="checkbox" checked={snapEnabled} onChange={() => setSnapEnabled((prev) => !prev)} />
+                      <span>Snap</span>
+                    </label>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                      <input type="checkbox" checked={moveJoinedGroup} onChange={() => setMoveJoinedGroup((prev) => !prev)} />
+                      <span>Move joined group</span>
+                    </label>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1" title="Permit intentional panel overlaps">
+                      <input type="checkbox" checked={allowOverlaps} onChange={() => setAllowOverlaps((prev) => !prev)} />
+                      <span>Allow overlaps</span>
+                    </label>
+                  </>
+                ) : null}
+              </ControlGroup>
+
+              <ControlGroup label="Selection & editing">
                 <Button
                   intent="secondary"
                   size="sm"
@@ -4801,7 +4831,6 @@ const exportJson = () => {
                 >
                   {isPasting ? "Click to Place…" : "Paste"}
                 </Button>
-                <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
                 <Button intent="danger" size="sm" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete</Button>
                 <Button intent="success" size="sm" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore</Button>
                 <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
@@ -4835,35 +4864,6 @@ const exportJson = () => {
                     <Button intent="ghost" size="sm" onClick={removeSelectedFromSubScreen} disabled={selectedCount === 0}>
                       Remove from Sub-Screen
                     </Button>
-                  </>
-                ) : null}
-              </ControlGroup>
-
-              <ControlGroup label="Move, align & snap">
-                <Button
-                  intent="secondary"
-                  size="sm"
-                  active={editMode === "move"}
-                  activeAccent="amber"
-                  onClick={() => setEditMode((prev) => (prev === "move" ? "patch" : "move"))}
-                  title="Drag panels to reposition them freely; edges snap together"
-                >
-                  Move
-                </Button>
-                {editMode === "move" ? (
-                  <>
-                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
-                      <input type="checkbox" checked={snapEnabled} onChange={() => setSnapEnabled((prev) => !prev)} />
-                      <span>Snap</span>
-                    </label>
-                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
-                      <input type="checkbox" checked={moveJoinedGroup} onChange={() => setMoveJoinedGroup((prev) => !prev)} />
-                      <span>Move joined group</span>
-                    </label>
-                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1" title="Permit intentional panel overlaps">
-                      <input type="checkbox" checked={allowOverlaps} onChange={() => setAllowOverlaps((prev) => !prev)} />
-                      <span>Allow overlaps</span>
-                    </label>
                   </>
                 ) : null}
               </ControlGroup>

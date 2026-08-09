@@ -540,6 +540,17 @@ export const drawBouncingLogo = (ctx: CanvasRenderingContext2D, layout: TestPatt
 export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout, timeSeconds: number) => {
   const { W, H } = layout;
   if (W <= 0 || H <= 0) return;
+  // The caller's transform when this function was entered - identity for the
+  // WebM/MP4 recorder and PNG/PDF exports (canvas backing store == layout.W x
+  // layout.H 1:1), but the live browser tab (TestPatternView.tsx) pre-applies
+  // a devicePixelRatio/fit-to-window scale so the canvas stays crisp on
+  // high-DPI displays. The per-panel loop below has to reset to THIS base
+  // transform (not a hardcoded identity) before drawing the pre-rendered
+  // world-space pattern layer, or that layer gets drawn at 1 source px = 1
+  // physical px instead of 1 source px = 1 logical unit - which is exactly
+  // what made the RGB tiles stop lining up with panel boundaries once the
+  // live view started rendering at more than 1 physical pixel per unit.
+  const baseTransform = ctx.getTransform();
   ctx.imageSmoothingEnabled = false;
 
   const rgbTile = getRgbTile(layout.tileWidthPx, layout.tileHeightPx);
@@ -605,7 +616,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     applyPanelFrame(ctx, r.x, r.y, r.w, r.h, rotation, true);
     tracePanelShapePath(ctx, r.w, r.h, shape);
     ctx.clip();
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.setTransform(baseTransform);
     ctx.drawImage(layerCanvas, 0, 0);
     ctx.restore();
 
