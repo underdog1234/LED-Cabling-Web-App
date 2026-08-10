@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { ChevronUp, ChevronDown, FileText } from "lucide-react";
-import { PANEL_TYPES, type PanelTypeKey } from "../App";
+import { PANEL_TYPES, POWER_DISTROS, type PanelTypeKey, type PowerDistroKey } from "../App";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, Select } from "../components/ui";
 
 // Must match QUICK_LAYOUT_TRANSFER_KEY in App.tsx.
@@ -54,6 +54,28 @@ export default function QuickLayoutView() {
 
   const ratioDivisor = gcd(pixelW, pixelH) || 1;
   const ratioLabel = `${pixelW / ratioDivisor}:${pixelH / ratioDivisor}`;
+
+  // Power draw and distro sizing - uses the same per-panel power spec and
+  // safe-panels-per-outlet default as the main Layout Tool (no per-panel
+  // patching here, so this is an aggregate/sizing estimate, not a real
+  // phase-balanced plan).
+  const powerSpec = panel.power;
+  const totalMaxW = totalPanels * powerSpec.maxW;
+  const totalMaxA = totalPanels * powerSpec.maxA;
+  const totalAvgW = totalPanels * powerSpec.avgW;
+  const totalAvgA = totalPanels * powerSpec.avgA;
+  const safePanelsPerOutlet = panel.defaults.powerPanelsPerOutlet;
+  const summarizeDistro = (key: PowerDistroKey) => {
+    const distro = POWER_DISTROS[key];
+    const circuits = totalPanels > 0 ? Math.ceil(totalPanels / Math.max(safePanelsPerOutlet, 1)) : 0;
+    const units = circuits > 0 ? Math.ceil(circuits / distro.portCount) : 0;
+    // Each distro unit has 3 phases, each rated to distro.safePhaseWatts.
+    const capacityW = units * distro.safePhaseWatts * 3;
+    const utilisationPct = capacityW > 0 ? (totalMaxW / capacityW) * 100 : 0;
+    return { distro, circuits, units, capacityW, utilisationPct };
+  };
+  const distro32 = summarizeDistro("32A");
+  const distro63 = summarizeDistro("63A");
 
   // Largest 16:9 rect that fits inside the wall's pixel resolution, nudged
   // up/down within whatever vertical slack is available (fitShift).
@@ -115,6 +137,9 @@ export default function QuickLayoutView() {
       stat("Resolution", `${pixelW} x ${pixelH} px (${totalPixels.toLocaleString()} px total)`);
       stat("Aspect Ratio", ratioLabel);
       stat("16:9 Content Area", `${Math.round(fitW)} x ${Math.round(fitH)} px`);
+      stat("Total Power Draw", `Max ${totalMaxW.toLocaleString()} W / ${totalMaxA.toFixed(2)} A (Avg ${totalAvgW.toLocaleString()} W)`);
+      stat("32A Distro", `${distro32.circuits} circuits, ${distro32.units} unit(s), ${distro32.utilisationPct.toFixed(1)}% used`);
+      stat("63A Distro", `${distro63.circuits} circuits, ${distro63.units} unit(s), ${distro63.utilisationPct.toFixed(1)}% used`);
 
       const warnings: string[] = [];
       if (wallBelowFullHd) warnings.push("Wall resolution is below 1920x1080 (Full HD).");
@@ -223,25 +248,33 @@ export default function QuickLayoutView() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Width (m)</div>
-                  <Input
-                    type="number"
-                    min={panel.w}
-                    step={panel.w}
-                    value={wallWidthM}
-                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWidthM(Number(e.target.value))}
-                    className="text-center"
-                  />
+                  <div className="flex items-center gap-1">
+                    <Button size="sm" intent="secondary" onClick={() => setWidthM(wallWidthM - panel.w)}>-</Button>
+                    <Input
+                      type="number"
+                      min={panel.w}
+                      step={panel.w}
+                      value={wallWidthM}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setWidthM(Number(e.target.value))}
+                      className="text-center"
+                    />
+                    <Button size="sm" intent="secondary" onClick={() => setWidthM(wallWidthM + panel.w)}>+</Button>
+                  </div>
                 </div>
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Height (m)</div>
-                  <Input
-                    type="number"
-                    min={panel.h}
-                    step={panel.h}
-                    value={wallHeightM}
-                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setHeightM(Number(e.target.value))}
-                    className="text-center"
-                  />
+                  <div className="flex items-center gap-1">
+                    <Button size="sm" intent="secondary" onClick={() => setHeightM(wallHeightM - panel.h)}>-</Button>
+                    <Input
+                      type="number"
+                      min={panel.h}
+                      step={panel.h}
+                      value={wallHeightM}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => setHeightM(Number(e.target.value))}
+                      className="text-center"
+                    />
+                    <Button size="sm" intent="secondary" onClick={() => setHeightM(wallHeightM + panel.h)}>+</Button>
+                  </div>
                 </div>
               </div>
 
@@ -379,6 +412,35 @@ export default function QuickLayoutView() {
             </CardContent>
           </Card>
         </div>
+
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle>Power</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 md:grid-cols-3">
+              <div className="rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 text-sm">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Total power draw</div>
+                <div>Max: {totalMaxW.toLocaleString()} W / {totalMaxA.toFixed(2)} A</div>
+                <div>Avg: {totalAvgW.toLocaleString()} W / {totalAvgA.toFixed(2)} A</div>
+              </div>
+              {([["32A", distro32], ["63A", distro63]] as const).map(([key, summary]) => (
+                <div key={key} className="rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 text-sm">
+                  <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">{summary.distro.label}</div>
+                  <div>Circuits needed: {summary.circuits}</div>
+                  <div>Distro units needed: {summary.units || 0}</div>
+                  <div>Capacity used: {summary.utilisationPct.toFixed(1)}% of {summary.capacityW.toLocaleString()} W</div>
+                  {summary.utilisationPct > 100 ? (
+                    <div className="mt-1 text-amber-400">⚠ Over safe capacity - add another {key} distro</div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Estimated sizing only - assumes {safePanelsPerOutlet} panels per outlet and even load across all phases (no per-panel patching in this tool).
+            </div>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );

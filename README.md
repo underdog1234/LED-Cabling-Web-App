@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.25.1`
+Version `0.26.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,11 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.26.0
+
+- Added a **Power** summary to the standalone Quick Panel Layout tool: total power draw (max/avg W and A) plus, for both a 32A and a 63A distro, the circuits needed, distro units needed, and percentage of safe capacity used - reusing the same per-panel power spec and safe-panels-per-outlet defaults as the main Layout Tool, also included in its PDF export
+- Added +/- stepper buttons next to the Width (m) and Height (m) fields in Quick Panel Layout, matching the existing Columns/Rows steppers, for easier use on mobile/touch
 
 ## Recent Changes In v0.25.1
 
