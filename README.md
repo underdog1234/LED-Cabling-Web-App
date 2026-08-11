@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.26.0`
+Version `0.28.2`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -12,7 +12,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Position the whole layout or individual sub-screens within a configurable-resolution **Output Canvas** (drag, numeric entry, align/snap tools, boundary/overlap warnings) for multi-processor / media-server mapping
 - Select a **NovaStar processor model** (`VX1000 Pro` / `VX2000 Pro`), see its live pixel/port capacity vs. current usage, assign a video input per sub-screen or one input for the whole canvas, and generate a real, importable `.uprj` processor configuration file - validated against the selected processor's port count, per-port and total pixel limits, and canvas size, with a summary of what will be exported and any blocking errors or warnings before download
 - Import projects from the Creative Layout Tool
-- Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected
+- Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected. The first panel of each signal chain shows its port number in a blue circle (top-left) and the first panel of each power chain shows its port number in an orange circle (top-right), in both the Panel Layout and the PDF Report. With **Do backup signal loop** enabled, the chain's last panel also shows the backup port number (the second half of the available signal ports, e.g. port 11 backs up port 1 on a 20-port setup) - the number of signal ports itself follows the selected NovaStar processor (10 for VX1000 Pro, 20 for VX2000 Pro, 20 if none is selected), and the backup half is hatched and unselectable in the Signal Patching panel
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape
 - Export a native-resolution Test Pattern image, a full-screen canvas-only live Moving Test Pattern (top-left anchored, scaled to fit the browser window without stretching/cropping, with a small bouncing logo browser-side only), or a downloadable looping WebM or MP4 video of it
@@ -21,6 +21,33 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.28.2
+
+- Added a "Show 16:9 content area" checkbox to the standalone Quick Panel Layout tool, controlling the dashed overlay box, its up/down nudge controls, its resolution stat, and its Full-HD warning, on both the web page and the PDF export - when shown, the PDF now also includes a short explanation of what the dashed box means
+- Added an optional Project Name field to Quick Panel Layout, shown as a header on its PDF export and carried forward to become the main tool's Project Name when using **Send to Main Layout Tool**
+
+## Recent Changes In v0.28.1
+
+- Tidied the Quick Panel Layout PDF export: stats are now grouped under clear "Panel", "Power" and "Weight" section headers in a compact multi-column layout, replacing the old flat list that ran off the bottom of the page
+
+## Recent Changes In v0.28.0
+
+- Moved the orange power-port badge to sit directly beside the blue signal-port badge(s), all in the panel's top-left corner (was previously in the opposite corner) - neatly spaced, non-overlapping, in both the Panel Layout and the PDF Report
+- Added an automatic weight estimate to the standalone Quick Panel Layout tool: panel weight, flying hardware (fly bars + slings/shackles, assuming a Flown deployment), estimated cable weight (power + signal, assuming cables snake left-to-right and alternate direction each row), and total flown weight - no manual rigging or cable input needed, clearly labelled as an indicative estimate rather than a certified rigging calculation, and included in its PDF export
+
+## Recent Changes In v0.27.1
+
+- Restored the shape-hugging signal/power chain-start ring indicators (removed in v0.27.0) - they're now shown together with the new port-number badges, not instead of them
+- Moved each panel's info text (row/column label, assigned signal/power port, shape symbol) to the bottom of the panel, in both the Panel Layout and the PDF Report, to keep the top corners clear for the port-number badges
+- The NovaStar processor model now defaults to VX2000 Pro for a new project instead of none selected
+
+## Recent Changes In v0.27.0
+
+- Added port-number badges to the first panel of every signal and power chain, in both the Panel Layout and the PDF Report: a blue circle (top-left) with the signal port number, and an orange circle (top-right) with the power port number - replacing the old shape-hugging "chain start" ring outlines. Badges are drawn outside the panel's own rotate transform so the digit stays upright and legible even on a rotated panel, and follow the panel when it's moved, rotated, or the layout is exported
+- Added backup signal port numbering: with **Do backup signal loop** enabled, the chain's last panel also gets a badge with the backup port number - the second half of the available signal ports backs up the first half (e.g. port 11 backs up port 1 on a 20-port setup; port 6 backs up port 1 on a 10-port setup)
+- The number of selectable signal ports now follows the selected NovaStar processor model (10 for VX1000 Pro, 20 for VX2000 Pro) instead of always offering 20 regardless of processor; falls back to 20 when no processor is selected
+- With the backup signal loop enabled, the second half of the port range is reserved for backups: hatched and unselectable in the Signal Patching panel, and automatically excluded from Auto Snake / manual port assignment, so primary signal-port capacity updates automatically
 
 ## Recent Changes In v0.26.0
 

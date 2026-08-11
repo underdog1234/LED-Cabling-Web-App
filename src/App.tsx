@@ -40,7 +40,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.26.0";
+const APP_VERSION = "0.28.2";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -282,7 +282,7 @@ type LayoutSnapshot = {
 // src/quickLayout/QuickLayoutView.tsx), written to localStorage right before
 // it navigates this same tab back to the plain app URL.
 const QUICK_LAYOUT_TRANSFER_KEY = "ledCablingQuickLayoutTransfer:v1";
-type QuickLayoutTransfer = { panelType: PanelTypeKey; cols: number; rows: number };
+type QuickLayoutTransfer = { panelType: PanelTypeKey; cols: number; rows: number; projectName?: string };
 
 type SignalPortStat = {
   panels: number;
@@ -365,8 +365,8 @@ const gcd = (a: number, b: number): number => {
   return gcd(absB, absA % absB);
 };
 
-const makeSignalPorts = () =>
-  Array.from({ length: SIGNAL_PORT_COUNT }, (_, i) => ({
+const makeSignalPorts = (count: number) =>
+  Array.from({ length: count }, (_, i) => ({
     id: i + 1,
     name: `Port ${i + 1}`,
     color: PORT_COLORS[i % PORT_COLORS.length],
@@ -968,7 +968,7 @@ const drawPanelShape = (
   fill: string,
   stroke: string,
   lineWidth = 2,
-  options: { hatchStep?: number; signalRing?: boolean; powerRing?: boolean; mirrorX?: boolean } = {},
+  options: { hatchStep?: number; signalBadges?: number[]; powerBadge?: number | null; mirrorX?: boolean } = {},
 ) => {
   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
   const traceShape = () => tracePanelShapePath(ctx, w, h, variant.shape);
@@ -998,30 +998,73 @@ const drawPanelShape = (
   }
   ctx.restore();
 
-  // Chain-start indicator rings that FOLLOW the panel shape. Blue = signal chain
-  // start (and backup-loop end), orange = power chain start. Clipping to the
-  // shape and stroking the outline gives a constant-thickness outline that hugs
-  // the true edge; when both apply the wider (power) band is drawn first and the
-  // signal band sits on top, so they nest concentrically and stay distinct.
-  if (options.signalRing || options.powerRing) {
+  // Chain-start indicator rings that FOLLOW the panel shape - shown together
+  // with the port-number badges below (both requested). Blue = signal chain
+  // start (and backup-loop end, when the backup badge below applies), orange
+  // = power chain start. Clipping to the shape and stroking the outline
+  // gives a constant-thickness outline that hugs the true edge; when both
+  // apply the wider (power) band is drawn first and the signal band sits on
+  // top, so they nest concentrically and stay distinct.
+  const hasSignalRing = (options.signalBadges ?? []).length > 0;
+  const hasPowerRing = !!options.powerBadge;
+  if (hasSignalRing || hasPowerRing) {
     const ringW = Math.max(2, Math.round(Math.min(w, h) * 0.06));
     ctx.save();
     applyFrame();
     traceShape();
     ctx.clip();
-    if (options.powerRing) {
+    if (hasPowerRing) {
       ctx.strokeStyle = POWER_START_COLOR;
-      ctx.lineWidth = ringW * 2 * (options.signalRing ? 2 : 1);
+      ctx.lineWidth = ringW * 2 * (hasSignalRing ? 2 : 1);
       traceShape();
       ctx.stroke();
     }
-    if (options.signalRing) {
+    if (hasSignalRing) {
       ctx.strokeStyle = SIGNAL_START_COLOR;
       ctx.lineWidth = ringW * 2;
       traceShape();
       ctx.stroke();
     }
     ctx.restore();
+  }
+
+  // Port-number badges: small filled circles with the port number, all in
+  // the panel's own top-left corner, side by side (signal first, then
+  // power) - a single neatly-spaced, non-overlapping row. Deliberately
+  // drawn in absolute (x,y,w,h) space, OUTSIDE the panel's rotate/mirror
+  // frame (applyFrame, used above only for the fill/outline) - the digit
+  // always stays upright and legible even on a rotated panel, and
+  // "top-left" always means the panel's own unrotated footprint corner. A
+  // chain's first panel gets its primary signal port number; when the
+  // backup signal loop is enabled, the chain's last panel also gets a
+  // second signal badge with the backup port number (see
+  // getPanelIndicators) - if a chain is a single panel, both land on it.
+  const signalBadges = options.signalBadges ?? [];
+  const cornerBadges: Array<{ color: string; text: string }> = signalBadges.map((portNum) => ({ color: SIGNAL_START_COLOR, text: String(portNum) }));
+  if (options.powerBadge) cornerBadges.push({ color: POWER_START_COLOR, text: String(options.powerBadge) });
+  if (cornerBadges.length) {
+    const badgeR = Math.max(6, Math.round(Math.min(w, h) * 0.15));
+    const pad = Math.max(2, Math.round(badgeR * 0.35));
+    const fontPx = Math.round(badgeR * 1.15);
+    const drawBadge = (cx: number, cy: number, color: string, text: string) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(cx, cy, badgeR, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = `bold ${fontPx}px Arial`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, cx, cy + 0.5);
+      ctx.restore();
+    };
+    cornerBadges.forEach((b, i) => {
+      drawBadge(x + pad + badgeR + i * (badgeR * 2 + pad), y + pad + badgeR, b.color, b.text);
+    });
   }
 };
 
@@ -1309,7 +1352,6 @@ function QuickLayoutTransferModal({
 }
 
 export default function App() {
-  const signalPorts = useMemo(() => makeSignalPorts(), []);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const workspaceRef = useRef<HTMLDivElement | null>(null);
@@ -1395,9 +1437,12 @@ export default function App() {
   const [wholeLayoutCanvasY, setWholeLayoutCanvasY] = useState(0);
   const [canvasSnapEnabled, setCanvasSnapEnabled] = useState(true);
   // --- NovaStar processor configuration export -----------------------------
-  // "" = no processor selected yet (older saved projects load into this
-  // state, per the format-migration requirement - see openJson).
-  const [processorModel, setProcessorModel] = useState<ProcessorModelId | "">("");
+  // Defaults to VX2000 Pro for a new project. "" (no processor selected) is
+  // still a valid state - openJson always explicitly sets this from the
+  // loaded file (falling back to "" when absent/invalid), so this default
+  // only affects a brand-new project, never the format-migration behaviour
+  // for older saved files.
+  const [processorModel, setProcessorModel] = useState<ProcessorModelId | "">("VX2000_PRO");
   // "perEntry" (default, original behavior): a separate input per sub-screen
   // (or a single whole-layout entry). "whole": one input for the entire
   // output canvas regardless of sub-screen boundaries.
@@ -1423,6 +1468,18 @@ export default function App() {
   const powerSpec = panel.power;
   const distro = POWER_DISTROS[powerDistro];
   const powerPorts = useMemo(() => makePowerPorts(distro.portCount), [distro.portCount]);
+  // Total selectable signal ports matches the selected NovaStar processor's
+  // Ethernet output count (10 for VX1000 Pro, 20 for VX2000 Pro) so the
+  // Signal Patching UI never offers more ports than the processor actually
+  // has; falls back to the pre-NovaStar default of 20 when none is selected.
+  const totalSignalPorts = processorModel ? PROCESSOR_SPECS[processorModel].ethernetOutputCount : SIGNAL_PORT_COUNT;
+  // With the backup signal loop enabled, the second half of the ports are
+  // reserved as backups for the first half - port N backs up port
+  // (N - primarySignalPortCount), e.g. for a 20-port processor, port 11
+  // backs up port 1 (see getPanelIndicators's backup badge below) - so only
+  // the first half remains available for primary assignment.
+  const primarySignalPortCount = backupSignalLoop ? Math.max(1, Math.floor(totalSignalPorts / 2)) : totalSignalPorts;
+  const signalPorts = useMemo(() => makeSignalPorts(totalSignalPorts), [totalSignalPorts]);
 
   const [panelsPerPowerOutlet, setPanelsPerPowerOutlet] = useState<number>(panel.defaults.powerPanelsPerOutlet);
   const [panelsPerSignalPort, setPanelsPerSignalPort] = useState<number>(panel.defaults.signalPanelsPerPort);
@@ -1679,6 +1736,7 @@ export default function App() {
       setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
       setSelectedId(null);
       setSelectedCells(new Set());
+      if (payload.projectName) setProjectName(payload.projectName);
     } else {
       setPendingQuickLayoutTransfer(payload);
     }
@@ -1690,6 +1748,7 @@ export default function App() {
     const payload = pendingQuickLayoutTransfer;
     if (!payload) return;
     pushUndoSnapshot();
+    if (payload.projectName) setProjectName(payload.projectName);
     if (mode === "replace") {
       setCols(payload.cols);
       setRows(payload.rows);
@@ -1971,16 +2030,24 @@ export default function App() {
     return stats;
   }, [scopedGrid, powerPorts, powerSpec.maxW, powerSpec.maxA, powerSpec.avgW, powerSpec.avgA]);
 
-  // Chain-start indicators for a panel, shared by the live layout and every export.
-  // Blue ring: first panel of its signal chain (and the last panel too when the
-  // backup signal loop is enabled). Orange ring: first panel of its power chain.
+  // Chain-start port-number badges for a panel, shared by the live layout and
+  // every export. Signal: the chain's first panel gets its primary port
+  // number; when the backup signal loop is enabled, the chain's LAST panel
+  // also gets a badge with the backup port number (primary port +
+  // primarySignalPortCount) - see the totalSignalPorts/primarySignalPortCount
+  // comment above for the numbering scheme. Power: the chain's first panel
+  // gets its power port number.
   const getPanelIndicators = (cell: Cell) => {
     const key = cell.id;
     const sStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
-    const signalRing = !!sStat && (sStat.firstKey === key || (backupSignalLoop && sStat.lastKey === key));
+    const signalBadges: number[] = [];
+    if (sStat && cell.assignedPort) {
+      if (sStat.firstKey === key) signalBadges.push(cell.assignedPort);
+      if (backupSignalLoop && sStat.lastKey === key) signalBadges.push(cell.assignedPort + primarySignalPortCount);
+    }
     const pStat = cell.assignedPowerPort ? powerPortStats[cell.assignedPowerPort] : null;
-    const powerRing = !!pStat && pStat.firstKey === key;
-    return { signalRing, powerRing };
+    const powerBadge = pStat && pStat.firstKey === key ? cell.assignedPowerPort : null;
+    return { signalBadges, powerBadge };
   };
 
   const powerPortsUsed = useMemo(() => Object.values(powerPortStats).filter((stat) => stat.panels > 0).length, [powerPortStats]);
@@ -2414,8 +2481,8 @@ export default function App() {
       if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
-      const { signalRing, powerRing } = getPanelIndicators(cell);
-      drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalRing, powerRing, mirrorX: flipped });
+      const { signalBadges, powerBadge } = getPanelIndicators(cell);
+      drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalBadges, powerBadge, mirrorX: flipped });
     });
 
     // Only clutter the diagram with canvas-position labels once the user has
@@ -2428,15 +2495,30 @@ export default function App() {
       ctx.fillStyle = "#020617";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
-      ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, r.y + 18);
-      if (cell.assignedPort) ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, r.y + 34);
-      if (cell.assignedPowerPort) ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, r.y + 50);
+      // Stack all per-panel info text from the BOTTOM of the panel upward,
+      // leaving the top corners clear for the signal/power port-number
+      // badges (drawn by drawPanelShape above, in the same top-left/top-right
+      // spots as the live workspace).
+      let by = r.y + r.h - 6;
       const variantSymbol = getPanelSymbol(cell);
-      if (variantSymbol) ctx.fillText(variantSymbol, cx, r.y + r.h - 6);
+      if (variantSymbol) {
+        ctx.fillText(variantSymbol, cx, by);
+        by -= 14;
+      }
       if (showCanvasLabels) {
         const finalPos = getFinalCanvasPositionOf(cell);
-        ctx.fillText(`CX ${finalPos.x} CY ${finalPos.y}`, cx, r.y + r.h - 6 - (variantSymbol ? 14 : 0));
+        ctx.fillText(`CX ${finalPos.x} CY ${finalPos.y}`, cx, by);
+        by -= 16;
       }
+      if (cell.assignedPowerPort) {
+        ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, by);
+        by -= 16;
+      }
+      if (cell.assignedPort) {
+        ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, by);
+        by -= 16;
+      }
+      ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, by);
     });
 
     // Arrowheads last so the signal/power direction stays visible in front.
@@ -3667,7 +3749,7 @@ const exportJson = () => {
   const applyManualSignalPatch = (value: string) => {
     if (!selectedId) return;
     const nextPort = value === "" ? null : Number.parseInt(value, 10);
-    if (nextPort !== null && (!Number.isFinite(nextPort) || nextPort < 1 || nextPort > SIGNAL_PORT_COUNT)) return;
+    if (nextPort !== null && (!Number.isFinite(nextPort) || nextPort < 1 || nextPort > primarySignalPortCount)) return;
 
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -3755,16 +3837,18 @@ const exportJson = () => {
         // Live capacity-aware walk (mirrors the power loop below): unlike the
         // old blind port/seq counters, this queries actual port occupancy so
         // it correctly skips ports another sub-screen has already filled,
-        // instead of assuming every port starts empty.
+        // instead of assuming every port starts empty. Bounded by
+        // primarySignalPortCount (not the full port list) so auto-patching
+        // never assigns into the range reserved for the backup signal loop.
         let portIndex = 0;
         const advanceToPortWithCapacity = () => {
-          while (portIndex < SIGNAL_PORT_COUNT && getPortPanelCount(next, "assignedPort", portIndex + 1) >= safePanelsPerSignalPort) {
+          while (portIndex < primarySignalPortCount && getPortPanelCount(next, "assignedPort", portIndex + 1) >= safePanelsPerSignalPort) {
             portIndex += 1;
           }
         };
         const assignToSignalPort = (cell: Cell) => {
           advanceToPortWithCapacity();
-          if (portIndex >= SIGNAL_PORT_COUNT) return;
+          if (portIndex >= primarySignalPortCount) return;
           const port = portIndex + 1;
           cell.assignedPort = port;
           cell.sequence = getNextSequence(next, "assignedPort", "sequence", port);
@@ -3777,7 +3861,7 @@ const exportJson = () => {
           // in which case it must split).
           if (letterMode) {
             advanceToPortWithCapacity();
-            if (portIndex < SIGNAL_PORT_COUNT) {
+            if (portIndex < primarySignalPortCount) {
               const currentCount = getPortPanelCount(next, "assignedPort", portIndex + 1);
               const fitsFullPort = segment.length <= safePanelsPerSignalPort;
               const fitsRemaining = currentCount + segment.length <= safePanelsPerSignalPort;
@@ -3788,7 +3872,7 @@ const exportJson = () => {
           // Each loop-together segment starts on a fresh port.
           if (!letterMode && segments.length > 1) {
             advanceToPortWithCapacity();
-            if (portIndex < SIGNAL_PORT_COUNT && getPortPanelCount(next, "assignedPort", portIndex + 1) > 0) portIndex += 1;
+            if (portIndex < primarySignalPortCount && getPortPanelCount(next, "assignedPort", portIndex + 1) > 0) portIndex += 1;
           }
         });
       }
@@ -5102,7 +5186,7 @@ const exportJson = () => {
                   const isMoving = !!moveDrag && moveDrag.ids.includes(cell.id);
                   const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
                   const isEdge = signalStat?.firstKey === cell.id || signalStat?.lastKey === cell.id;
-                  const { signalRing, powerRing } = getPanelIndicators(cell);
+                  const { signalBadges, powerBadge } = getPanelIndicators(cell);
                   const isSelected = selectedCells.has(cell.id) || selectedId === cell.id;
                   const isRemoved = cell.isRemoved;
                   const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
@@ -5142,7 +5226,7 @@ const exportJson = () => {
                         boxShadow: "none",
                         color: isRemoved ? "#94a3b8" : "#020617",
                       }}
-                      className="flex cursor-pointer select-none flex-col items-center justify-center gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
+                      className="flex cursor-pointer select-none flex-col items-center justify-end gap-[2px] p-1 text-[9px] font-semibold leading-tight tracking-tight"
                     >
                       {isRemoved ? (
                         null
@@ -5161,11 +5245,12 @@ const exportJson = () => {
                               transformOrigin: "center",
                             }}
                           />
-                          {/* Chain-start indicators that follow the true panel shape (triangle /
-                              curve / rect), mirrored with the panel in the front view. Blue =
-                              signal chain start / backup end; orange = power chain start, drawn
-                              just inside so both stay visible together. */}
-                          {signalRing || powerRing ? (
+                          {/* Chain-start indicator rings that follow the true panel shape
+                              (triangle / curve / rect), mirrored with the panel in the front
+                              view - shown together with the port-number badges below (both
+                              requested). Blue = signal chain start / backup end; orange = power
+                              chain start, drawn just inside so both stay visible together. */}
+                          {signalBadges.length || powerBadge ? (
                             <svg
                               className="pointer-events-none absolute inset-0 z-[6]"
                               width="100%"
@@ -5180,17 +5265,17 @@ const exportJson = () => {
                                 WebkitPrintColorAdjust: "exact",
                               }}
                             >
-                              {powerRing ? (
+                              {powerBadge ? (
                                 <path
                                   d={variantOutlineSvgPath(variant.shape)}
                                   fill="none"
                                   stroke={POWER_START_COLOR}
                                   strokeWidth={6}
                                   strokeLinejoin="round"
-                                  transform={signalRing ? "translate(50 50) scale(0.78) translate(-50 -50)" : undefined}
+                                  transform={signalBadges.length ? "translate(50 50) scale(0.78) translate(-50 -50)" : undefined}
                                 />
                               ) : null}
-                              {signalRing ? (
+                              {signalBadges.length ? (
                                 <path
                                   d={variantOutlineSvgPath(variant.shape)}
                                   fill="none"
@@ -5201,6 +5286,46 @@ const exportJson = () => {
                               ) : null}
                             </svg>
                           ) : null}
+                          {/* Port-number badges: small filled circles with the port number, all
+                              in the panel's own top-left corner as actually displayed (front or
+                              back view - rect/left/top already reflect whichever is showing, so
+                              no extra mirroring here) - signal (blue) first, then power (orange),
+                              side by side in one neatly-spaced, non-overlapping row. Deliberately
+                              NOT rotated with the panel (unlike the shape-fill div above) so the
+                              digit stays upright and legible on a rotated panel. A chain's first
+                              panel gets its primary port number; when the backup signal loop is
+                              enabled, the chain's last panel also gets a badge with the backup
+                              port number (see getPanelIndicators) - a single-panel chain shows
+                              both signal badges plus the power badge, all in the same row. */}
+                          {signalBadges.length || powerBadge ? (() => {
+                            const badgeD = Math.max(12, Math.round(Math.min(rect.w, rect.h) * 0.3));
+                            const pad = Math.max(2, Math.round(badgeD * 0.18));
+                            const badgeStyle: React.CSSProperties = {
+                              position: "absolute",
+                              top: pad,
+                              width: badgeD,
+                              height: badgeD,
+                              borderRadius: "50%",
+                              border: "1px solid #0f172a",
+                              color: "#ffffff",
+                              fontSize: Math.round(badgeD * 0.55),
+                              fontWeight: 700,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              lineHeight: 1,
+                              zIndex: 20,
+                              printColorAdjust: "exact",
+                              WebkitPrintColorAdjust: "exact",
+                            };
+                            const cornerBadges: Array<{ color: string; text: number }> = signalBadges.map((portNum) => ({ color: SIGNAL_START_COLOR, text: portNum }));
+                            if (powerBadge) cornerBadges.push({ color: POWER_START_COLOR, text: powerBadge });
+                            return cornerBadges.map((b, i) => (
+                              <div key={`cb-${i}`} style={{ ...badgeStyle, left: pad + i * (badgeD + pad), background: b.color }}>
+                                {b.text}
+                              </div>
+                            ));
+                          })() : null}
                           <div className="relative z-10">{`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`}</div>
                           {cell.assignedPort ? <div className="relative z-10 whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
                           {cell.assignedPowerPort ? <div className="relative z-10 whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
@@ -5343,20 +5468,36 @@ const exportJson = () => {
               const stat = signalPortStats[port.id];
               const loadPercent = safePanelsPerSignalPort > 0 ? (stat.panels / safePanelsPerSignalPort) * 100 : 0;
               const indicator = getStatusColor(loadPercent);
+              // Reserved for the backup signal loop (the second half of the
+              // port range, only when the loop is enabled) - not selectable
+              // as a primary patch target; hatched to make that clear at a
+              // glance, matching the port-number badge each backup panel
+              // shows (see getPanelIndicators/drawPanelShape).
+              const isBackupPort = backupSignalLoop && port.id > primarySignalPortCount;
+              const baseBg = activePort === port.id && patchMode === "signal" ? port.color : "#1e293b";
               return (
                 <div
                   key={port.id}
                   onClick={() => {
+                    if (isBackupPort) return;
                     setPatchMode("signal");
                     setActivePort(port.id);
                   }}
-                  className="cursor-pointer rounded border p-3"
-                  style={{ background: activePort === port.id && patchMode === "signal" ? port.color : "#1e293b", borderColor: port.color }}
+                  className={`rounded border p-3 ${isBackupPort ? "cursor-not-allowed" : "cursor-pointer"}`}
+                  style={{
+                    background: isBackupPort ? `repeating-linear-gradient(135deg, transparent 0 6px, rgba(15,23,42,0.5) 6px 8px), ${baseBg}` : baseBg,
+                    borderColor: port.color,
+                    opacity: isBackupPort ? 0.7 : 1,
+                  }}
+                  title={isBackupPort ? `Reserved: backup for S${port.id - primarySignalPortCount}` : undefined}
                 >
                   <div className="flex justify-between text-sm text-white [text-shadow:0_0_2px_black]">
                     <span>{`S${port.id}`}</span>
                     <span>{`${stat.panels}`}</span>
                   </div>
+                  {isBackupPort ? (
+                    <div className="text-[10px] text-slate-300">{`Backup for S${port.id - primarySignalPortCount}`}</div>
+                  ) : null}
                   <div className="mt-2 h-2 rounded border border-white/30 bg-black/30">
                     <div style={{ width: `${Math.min(loadPercent, 100)}%`, background: indicator, height: "100%" }} />
                   </div>

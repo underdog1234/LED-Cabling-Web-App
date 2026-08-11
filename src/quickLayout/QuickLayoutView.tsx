@@ -43,6 +43,10 @@ export default function QuickLayoutView() {
   // -1 (top) .. 0 (centred) .. 1 (bottom); only has visible effect when the
   // wall has vertical slack around the 16:9 box (see fitSlackY below).
   const [fitShift, setFitShift] = useState(0);
+  const [showFitBox, setShowFitBox] = useState(true);
+  // Optional project name - shown as a header on the PDF export and carried
+  // forward to become the main tool's project name via Send to Main Layout Tool.
+  const [projectName, setProjectName] = useState("");
 
   const panel = PANEL_TYPES[panelType];
   const wallWidthM = cols * panel.w;
@@ -77,6 +81,28 @@ export default function QuickLayoutView() {
   const distro32 = summarizeDistro("32A");
   const distro63 = summarizeDistro("63A");
 
+  // Weight estimate - fully automatic (deployment assumed Flown, no manual
+  // rigging/cable input needed), reusing the same per-panel constants as the
+  // main Layout Tool's own weight breakdown. Indicative planning figure
+  // only, not a certified rigging calculation.
+  const panelWeight = totalPanels * panel.weight;
+  // Uniform grid, so every column has exactly one panel in the top row.
+  const topRowPanelCount = totalPanels > 0 ? cols : 0;
+  const flyBarWeight = topRowPanelCount * panel.defaults.flyBarWeight;
+  const slingShackleWeight = topRowPanelCount * panel.defaults.slingWeight;
+  const flyingHardwareWeight = flyBarWeight + slingShackleWeight;
+  // Cable weight assumes cables snake left-to-right, alternating direction
+  // each row (the same pattern Auto Snake uses) - at the port-count level
+  // this only affects how many ports/outlets that pattern needs, not the
+  // exact route, so it's the same ceil() math as the power/signal port
+  // sizing above.
+  const signalPortsUsedForCable = totalPanels > 0 ? Math.ceil(totalPanels / Math.max(panel.defaults.signalPanelsPerPort, 1)) : 0;
+  const powerPortsUsedForCable = totalPanels > 0 ? Math.ceil(totalPanels / Math.max(safePanelsPerOutlet, 1)) : 0;
+  const powerCableWeight = powerPortsUsedForCable * 3;
+  const signalCableWeight = signalPortsUsedForCable * 1;
+  const cableWeight = powerCableWeight + signalCableWeight;
+  const totalFlownWeight = panelWeight + flyingHardwareWeight + cableWeight;
+
   // Largest 16:9 rect that fits inside the wall's pixel resolution, nudged
   // up/down within whatever vertical slack is available (fitShift).
   const fitsWide = pixelW / pixelH > 16 / 9;
@@ -97,10 +123,16 @@ export default function QuickLayoutView() {
     setCols(1);
     setRows(1);
     setFitShift(0);
+    setShowFitBox(true);
+    setProjectName("");
   };
 
   const sendToMainTool = () => {
-    localStorage.setItem(QUICK_LAYOUT_TRANSFER_KEY, JSON.stringify({ panelType, cols, rows }));
+    const trimmedName = projectName.trim();
+    localStorage.setItem(
+      QUICK_LAYOUT_TRANSFER_KEY,
+      JSON.stringify({ panelType, cols, rows, projectName: trimmedName || undefined }),
+    );
     window.location.href = window.location.pathname;
   };
 
@@ -121,29 +153,90 @@ export default function QuickLayoutView() {
       pdf.setTextColor(100, 116, 139);
       pdf.text(`Printed ${new Date().toLocaleString()}`, pageW - 10, 14, { align: "right" });
 
-      let statsY = 28;
-      const stat = (label: string, value: string) => {
-        pdf.setFontSize(9);
-        pdf.setTextColor(100, 116, 139);
-        pdf.text(label, 10, statsY);
+      const trimmedProjectName = projectName.trim();
+      if (trimmedProjectName) {
         pdf.setFontSize(12);
+        pdf.setFont("helvetica", "bold");
+        pdf.setTextColor(51, 65, 85);
+        pdf.text(trimmedProjectName, 10, 21);
+        pdf.setFont("helvetica", "normal");
         pdf.setTextColor(15, 23, 42);
-        pdf.text(value, 10, statsY + 6);
-        statsY += 14;
+      }
+
+      // Stats are grouped into headed sections (Panel / Power / Weight) laid
+      // out in a compact grid so the whole block - plus warnings - comfortably
+      // fits above the diagram's left edge (diagAreaX below) within one page.
+      let statsY = trimmedProjectName ? 30 : 26;
+      const statsX = 10;
+      const statsColW = 92;
+
+      const sectionHeader = (title: string) => {
+        pdf.setFontSize(10);
+        pdf.setFont("helvetica", "bold");
+        pdf.setTextColor(37, 99, 235);
+        pdf.text(title.toUpperCase(), statsX, statsY);
+        pdf.setDrawColor(37, 99, 235);
+        pdf.setLineWidth(0.4);
+        pdf.line(statsX, statsY + 1.3, statsX + statsColW, statsY + 1.3);
+        pdf.setFont("helvetica", "normal");
+        pdf.setTextColor(15, 23, 42);
+        statsY += 7;
       };
-      stat("Panel Type", panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)");
-      stat("Grid", `${cols} columns x ${rows} rows (${totalPanels} panels)`);
-      stat("Wall Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`);
-      stat("Resolution", `${pixelW} x ${pixelH} px (${totalPixels.toLocaleString()} px total)`);
-      stat("Aspect Ratio", ratioLabel);
-      stat("16:9 Content Area", `${Math.round(fitW)} x ${Math.round(fitH)} px`);
-      stat("Total Power Draw", `Max ${totalMaxW.toLocaleString()} W / ${totalMaxA.toFixed(2)} A (Avg ${totalAvgW.toLocaleString()} W)`);
-      stat("32A Distro", `${distro32.circuits} circuits, ${distro32.units} unit(s), ${distro32.utilisationPct.toFixed(1)}% used`);
-      stat("63A Distro", `${distro63.circuits} circuits, ${distro63.units} unit(s), ${distro63.utilisationPct.toFixed(1)}% used`);
+      const statGrid = (items: Array<[string, string]>, columns: 1 | 2) => {
+        const colW = statsColW / columns;
+        const rowH = columns === 1 ? 10.5 : 11.5;
+        const startY = statsY;
+        items.forEach(([label, value], i) => {
+          const col = i % columns;
+          const row = Math.floor(i / columns);
+          const x = statsX + col * colW;
+          const y = startY + row * rowH;
+          pdf.setFontSize(7.5);
+          pdf.setTextColor(100, 116, 139);
+          pdf.text(label, x, y);
+          pdf.setFontSize(10);
+          pdf.setTextColor(15, 23, 42);
+          pdf.text(value, x, y + 4.5);
+        });
+        const rowCount = Math.ceil(items.length / columns);
+        statsY = startY + rowCount * rowH + 5;
+      };
+
+      const panelStats: Array<[string, string]> = [
+        ["Panel Type", panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)"],
+        ["Grid", `${cols} x ${rows} (${totalPanels} panels)`],
+        ["Wall Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`],
+        ["Resolution", `${pixelW} x ${pixelH} px`],
+        ["Aspect Ratio", ratioLabel],
+      ];
+      if (showFitBox) panelStats.push(["16:9 Content Area", `${Math.round(fitW)} x ${Math.round(fitH)} px`]);
+      sectionHeader("Panel");
+      statGrid(panelStats, 2);
+
+      sectionHeader("Power");
+      statGrid(
+        [
+          ["Total Power Draw", `Max ${totalMaxW.toLocaleString()} W / ${totalMaxA.toFixed(2)} A (Avg ${totalAvgW.toLocaleString()} W)`],
+          ["32A Distro", `${distro32.circuits} circuits, ${distro32.units} unit(s), ${distro32.utilisationPct.toFixed(1)}% used`],
+          ["63A Distro", `${distro63.circuits} circuits, ${distro63.units} unit(s), ${distro63.utilisationPct.toFixed(1)}% used`],
+        ],
+        1,
+      );
+
+      sectionHeader("Weight (Flown Estimate)");
+      statGrid(
+        [
+          ["Panel Weight", `${panelWeight.toFixed(1)} kg`],
+          ["Flying Hardware", `${flyingHardwareWeight.toFixed(1)} kg`],
+          ["Cable Weight", `${cableWeight.toFixed(1)} kg`],
+          ["Total Flown Weight", `${totalFlownWeight.toFixed(1)} kg`],
+        ],
+        2,
+      );
 
       const warnings: string[] = [];
       if (wallBelowFullHd) warnings.push("Wall resolution is below 1920x1080 (Full HD).");
-      if (!wallBelowFullHd && contentBelowFullHd) warnings.push("The 16:9 content area is below 1920x1080 (Full HD).");
+      if (showFitBox && !wallBelowFullHd && contentBelowFullHd) warnings.push("The 16:9 content area is below 1920x1080 (Full HD).");
       if (warnings.length) {
         pdf.setFontSize(9);
         pdf.setTextColor(180, 83, 9);
@@ -178,15 +271,26 @@ export default function QuickLayoutView() {
         pdf.line(boxX, y, boxX + boxW, y);
       }
 
-      const rectX = boxX + (fitOffsetX / pixelW) * boxW;
-      const rectY = boxY + (fitOffsetY / pixelH) * boxH;
-      const rectW = (fitW / pixelW) * boxW;
-      const rectH = (fitH / pixelH) * boxH;
-      pdf.setDrawColor(245, 158, 11);
-      pdf.setLineWidth(0.5);
-      pdf.setLineDashPattern([1.5, 1], 0);
-      pdf.rect(rectX, rectY, rectW, rectH);
-      pdf.setLineDashPattern([], 0);
+      if (showFitBox) {
+        const rectX = boxX + (fitOffsetX / pixelW) * boxW;
+        const rectY = boxY + (fitOffsetY / pixelH) * boxH;
+        const rectW = (fitW / pixelW) * boxW;
+        const rectH = (fitH / pixelH) * boxH;
+        pdf.setDrawColor(245, 158, 11);
+        pdf.setLineWidth(0.5);
+        pdf.setLineDashPattern([1.5, 1], 0);
+        pdf.rect(rectX, rectY, rectW, rectH);
+        pdf.setLineDashPattern([], 0);
+
+        pdf.setFontSize(7.5);
+        pdf.setTextColor(146, 64, 14);
+        pdf.text(
+          "Dashed box = largest 16:9 area that fits within the wall - recommended safe area for 16:9 content.",
+          diagAreaX,
+          pageH - 8,
+        );
+        pdf.setTextColor(15, 23, 42);
+      }
 
       pdf.setFontSize(7);
       pdf.setTextColor(100, 116, 139);
@@ -237,6 +341,16 @@ export default function QuickLayoutView() {
               <CardTitle>Grid</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div>
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Project Name (optional)</div>
+                <Input
+                  type="text"
+                  value={projectName}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => setProjectName(e.target.value)}
+                  placeholder="Used as the PDF header - carries to Main Layout Tool"
+                />
+              </div>
+
               <div>
                 <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Panel Type</div>
                 <Select value={panelType} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setPanelType(e.target.value as PanelTypeKey)}>
@@ -321,8 +435,12 @@ export default function QuickLayoutView() {
                   <dd>{pixelW} × {pixelH} px ({totalPixels.toLocaleString()} px total)</dd>
                   <dt className="text-slate-400">Aspect ratio</dt>
                   <dd>{ratioLabel}</dd>
-                  <dt className="text-slate-400">16:9 content area</dt>
-                  <dd>{Math.round(fitW)} × {Math.round(fitH)} px</dd>
+                  {showFitBox ? (
+                    <>
+                      <dt className="text-slate-400">16:9 content area</dt>
+                      <dd>{Math.round(fitW)} × {Math.round(fitH)} px</dd>
+                    </>
+                  ) : null}
                 </dl>
               </div>
 
@@ -331,7 +449,7 @@ export default function QuickLayoutView() {
                   ⚠ Wall resolution is below 1920×1080 (Full HD).
                 </div>
               ) : null}
-              {!wallBelowFullHd && contentBelowFullHd ? (
+              {showFitBox && !wallBelowFullHd && contentBelowFullHd ? (
                 <div className="rounded-lg border border-amber-500 bg-amber-500/15 p-2 text-xs text-amber-200">
                   ⚠ The 16:9 content area is below 1920×1080 (Full HD).
                 </div>
@@ -377,37 +495,53 @@ export default function QuickLayoutView() {
                     backgroundSize: `${100 / cols}% ${100 / rows}%`,
                   }}
                 >
-                  <div
-                    className="absolute border-2 border-dashed border-amber-400/90 bg-amber-400/10"
-                    style={{
-                      left: `${(fitOffsetX / pixelW) * 100}%`,
-                      top: `${(fitOffsetY / pixelH) * 100}%`,
-                      width: `${(fitW / pixelW) * 100}%`,
-                      height: `${(fitH / pixelH) * 100}%`,
-                    }}
-                  />
+                  {showFitBox ? (
+                    <div
+                      className="absolute border-2 border-dashed border-amber-400/90 bg-amber-400/10"
+                      style={{
+                        left: `${(fitOffsetX / pixelW) * 100}%`,
+                        top: `${(fitOffsetY / pixelH) * 100}%`,
+                        width: `${(fitW / pixelW) * 100}%`,
+                        height: `${(fitH / pixelH) * 100}%`,
+                      }}
+                    />
+                  ) : null}
                 </div>
               </div>
-              <div className="mt-2 flex items-center justify-center gap-2 text-xs text-slate-400">
-                <span>Dashed box = 16:9</span>
-                <Button
-                  size="sm"
-                  intent="secondary"
-                  disabled={fitSlackY <= 0 || fitShift <= -1}
-                  onClick={() => setFitShift((f) => Math.max(-1, f - FIT_SHIFT_STEP))}
-                  title="Move 16:9 area up"
-                >
-                  <ChevronUp className="h-3.5 w-3.5" />
-                </Button>
-                <Button
-                  size="sm"
-                  intent="secondary"
-                  disabled={fitSlackY <= 0 || fitShift >= 1}
-                  onClick={() => setFitShift((f) => Math.min(1, f + FIT_SHIFT_STEP))}
-                  title="Move 16:9 area down"
-                >
-                  <ChevronDown className="h-3.5 w-3.5" />
-                </Button>
+              <div className="mt-2 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-400">
+                <label className="flex cursor-pointer items-center gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={showFitBox}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setShowFitBox(e.target.checked)}
+                    className="h-3.5 w-3.5 accent-amber-400"
+                  />
+                  Show 16:9 content area
+                </label>
+                {showFitBox ? (
+                  <>
+                    <span className="text-slate-600">|</span>
+                    <span>Dashed box = 16:9</span>
+                    <Button
+                      size="sm"
+                      intent="secondary"
+                      disabled={fitSlackY <= 0 || fitShift <= -1}
+                      onClick={() => setFitShift((f) => Math.max(-1, f - FIT_SHIFT_STEP))}
+                      title="Move 16:9 area up"
+                    >
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      intent="secondary"
+                      disabled={fitSlackY <= 0 || fitShift >= 1}
+                      onClick={() => setFitShift((f) => Math.min(1, f + FIT_SHIFT_STEP))}
+                      title="Move 16:9 area down"
+                    >
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </Button>
+                  </>
+                ) : null}
               </div>
             </CardContent>
           </Card>
@@ -438,6 +572,37 @@ export default function QuickLayoutView() {
             </div>
             <div className="mt-2 text-xs text-slate-500">
               Estimated sizing only - assumes {safePanelsPerOutlet} panels per outlet and even load across all phases (no per-panel patching in this tool).
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mt-4">
+          <CardHeader>
+            <CardTitle>Weight (Flown Estimate)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 md:grid-cols-4">
+              <div className="rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 text-sm">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Panel weight</div>
+                <div className="text-lg font-semibold">{panelWeight.toFixed(1)} kg</div>
+              </div>
+              <div className="rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 text-sm">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Flying hardware</div>
+                <div className="text-lg font-semibold">{flyingHardwareWeight.toFixed(1)} kg</div>
+                <div className="mt-1 text-xs text-slate-400">Fly bars + slings/shackles, {topRowPanelCount} top-row panel(s)</div>
+              </div>
+              <div className="rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 text-sm">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Cable weight</div>
+                <div className="text-lg font-semibold">{cableWeight.toFixed(1)} kg</div>
+                <div className="mt-1 text-xs text-slate-400">{powerPortsUsedForCable} power + {signalPortsUsedForCable} signal run(s)</div>
+              </div>
+              <div className="rounded-lg border border-sky-700/70 bg-sky-900/20 p-3 text-sm">
+                <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Total flown weight</div>
+                <div className="text-lg font-semibold">{totalFlownWeight.toFixed(1)} kg</div>
+              </div>
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Indicative estimate only, not a certified rigging calculation. Assumes a Flown deployment and cables snaking left-to-right, alternating direction each row - always confirm rigging with a qualified rigger before flying a screen.
             </div>
           </CardContent>
         </Card>
