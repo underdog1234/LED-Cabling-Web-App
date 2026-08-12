@@ -40,7 +40,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.28.2";
+const APP_VERSION = "0.29.0";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -1960,6 +1960,38 @@ export default function App() {
     return `${wallPixelW / g}:${wallPixelH / g}`;
   }, [wallPixelW, wallPixelH]);
 
+  // MT is a transparent panel missing every second LED row, so its vertical
+  // pixel pitch is twice its horizontal pitch - wallPixelW/H (its native LED
+  // grid) isn't a square-pixel raster and its own aspect ratio (above)
+  // doesn't match the wall's true physical proportions. Only meaningful for
+  // a wall built entirely from one such panel type - a mixed MG9+MT wall's
+  // pixel grid is already an approximation (see the wallPixels comment
+  // above), so it keeps today's plain resolution/aspect display instead of
+  // inventing a blended "content resolution" for it.
+  const isMtOnlyWall = totalPanels > 0 && panelTypeCounts.MT === totalPanels;
+  const mtContentScaleY = (PANEL_TYPES.MT.h * 1000 / PANEL_TYPES.MT.pixH) / (PANEL_TYPES.MT.w * 1000 / PANEL_TYPES.MT.pixW);
+  const contentPixelW = wallPixelW;
+  const contentPixelH = isMtOnlyWall ? Math.round(wallPixelH * mtContentScaleY) : wallPixelH;
+  // Physical Aspect Ratio - derived from the wall's true physical size (mm,
+  // exact gcd reduction), not the raw LED pixel grid.
+  const physicalRatioLabel = useMemo(() => {
+    if (wallBBox.w <= 0 || wallBBox.h <= 0) return "-";
+    const g = gcd(wallBBox.w, wallBBox.h);
+    return `${wallBBox.w / g}:${wallBBox.h / g}`;
+  }, [wallBBox.w, wallBBox.h]);
+  const wallSizeLabel = isMtOnlyWall ? "Physical Size" : "Size";
+  // Shared by both the Wall Summary card and the PDF export (see below) -
+  // plain "x" separators to match the PDF's existing text style; the JSX
+  // Wall Summary card renders its own "×" version directly instead of
+  // reusing this array, to match that card's existing style.
+  const wallResolutionSummaryLines = isMtOnlyWall
+    ? [
+        `LED Wall Resolution: ${wallPixelW} x ${wallPixelH}`,
+        `Recommended Content Resolution: ${contentPixelW} x ${contentPixelH}`,
+        `Physical Aspect Ratio: ${physicalRatioLabel}`,
+      ]
+    : [`Resolution: ${wallPixelW} x ${wallPixelH}`, `Aspect ratio: ${aspectRatio}`, `Reduced ratio: ${ratioLabel}`];
+
   const signalPortStats = useMemo(() => {
     const stats: Record<number, SignalPortStat> = Object.fromEntries(
       signalPorts.map((port) => [port.id, { panels: 0, path: [], firstKey: null, lastKey: null }]),
@@ -3096,11 +3128,11 @@ const exportJson = () => {
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
       pdf.text(`Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`, 10, 38);
 
-      pdf.text(`Size: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`, 105, 20);
+      pdf.text(`${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
-      pdf.text(`Resolution: ${wallPixelW} x ${wallPixelH}`, 105, 32);
-      pdf.text(`Aspect ratio: ${aspectRatio}`, 105, 38);
-      pdf.text(`Reduced ratio: ${ratioLabel}`, 105, 44);
+      pdf.text(wallResolutionSummaryLines[0], 105, 32);
+      pdf.text(wallResolutionSummaryLines[1], 105, 38);
+      pdf.text(wallResolutionSummaryLines[2], 105, 44);
 
       const usableWidth = pageWidth - 20;
       const usableHeight = pageHeight - 58;
@@ -3240,10 +3272,8 @@ const exportJson = () => {
       `Panel type: ${panelTypeSummary}`,
       `Power distro: ${distro.label}`,
       `Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`,
-      `Size: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`,
-      `Resolution: ${wallPixelW} x ${wallPixelH}`,
-      `Aspect ratio: ${aspectRatio}`,
-      `Reduced ratio: ${ratioLabel}`,
+      `${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`,
+      ...wallResolutionSummaryLines,
     ], 10, 24, 66, 48);
 
     drawInfoBox("Power", [
@@ -4644,11 +4674,21 @@ const exportJson = () => {
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
                   <div>Panels: {totalPanels} active across {panelBands.length} row band{panelBands.length === 1 ? "" : "s"}</div>
-                  <div>Size: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
+                  <div>{wallSizeLabel}: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
                   <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
-                  <div>Resolution: {wallPixelW} × {wallPixelH}</div>
-                  <div>Aspect: {aspectRatio}</div>
-                  <div>Ratio: {ratioLabel}</div>
+                  {isMtOnlyWall ? (
+                    <>
+                      <div>LED Wall Resolution: {wallPixelW} × {wallPixelH}</div>
+                      <div>Recommended Content Resolution: {contentPixelW} × {contentPixelH}</div>
+                      <div>Physical Aspect Ratio: {physicalRatioLabel}</div>
+                    </>
+                  ) : (
+                    <>
+                      <div>Resolution: {wallPixelW} × {wallPixelH}</div>
+                      <div>Aspect: {aspectRatio}</div>
+                      <div>Ratio: {ratioLabel}</div>
+                    </>
+                  )}
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">{panel.name} Guts</div>

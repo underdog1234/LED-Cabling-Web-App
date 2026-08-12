@@ -51,13 +51,35 @@ export default function QuickLayoutView() {
   const panel = PANEL_TYPES[panelType];
   const wallWidthM = cols * panel.w;
   const wallHeightM = rows * panel.h;
+  // LED Wall Pixel Count - the panel's own native pixel grid (e.g. MT is
+  // 256x64 per panel), not a physical-size scaling of anything.
   const pixelW = cols * panel.pixW;
   const pixelH = rows * panel.pixH;
   const totalPanels = cols * rows;
   const totalPixels = pixelW * pixelH;
 
-  const ratioDivisor = gcd(pixelW, pixelH) || 1;
-  const ratioLabel = `${pixelW / ratioDivisor}:${pixelH / ratioDivisor}`;
+  // MT is a transparent panel missing every second LED row, so its vertical
+  // pixel pitch (7.8mm) is twice its horizontal pitch (3.9mm) - the raw
+  // pixW x pixH grid isn't a square-pixel raster and doesn't match the
+  // panel's true physical aspect ratio. Recommended Content Resolution scales
+  // the LED pixel height back up so content authored at that resolution
+  // (square pixels) matches the wall's real proportions. Always exactly 1x
+  // for panels like MG9 where the pitch already matches on both axes, so
+  // everything below collapses back to today's plain single-resolution
+  // behaviour for them.
+  const pitchXmm = (panel.w * 1000) / panel.pixW;
+  const pitchYmm = (panel.h * 1000) / panel.pixH;
+  const hasSquarePixels = Math.abs(pitchYmm / pitchXmm - 1) < 1e-6;
+  const contentPixelW = pixelW;
+  const contentPixelH = hasSquarePixels ? pixelH : Math.round(pixelH * (pitchYmm / pitchXmm));
+
+  // Physical Aspect Ratio - derived from the wall's true physical size (mm,
+  // so the gcd reduction is exact), not the raw LED pixel grid, which for
+  // non-square-pixel panels like MT gives a different (wrong) ratio.
+  const wallWidthMm = Math.round(wallWidthM * 1000);
+  const wallHeightMm = Math.round(wallHeightM * 1000);
+  const ratioDivisor = gcd(wallWidthMm, wallHeightMm) || 1;
+  const ratioLabel = wallHeightMm > 0 ? `${wallWidthMm / ratioDivisor}:${wallHeightMm / ratioDivisor}` : "-";
 
   // Power draw and distro sizing - uses the same per-panel power spec and
   // safe-panels-per-outlet default as the main Layout Tool (no per-panel
@@ -103,13 +125,17 @@ export default function QuickLayoutView() {
   const cableWeight = powerCableWeight + signalCableWeight;
   const totalFlownWeight = panelWeight + flyingHardwareWeight + cableWeight;
 
-  // Largest 16:9 rect that fits inside the wall's pixel resolution, nudged
-  // up/down within whatever vertical slack is available (fitShift).
-  const fitsWide = pixelW / pixelH > 16 / 9;
-  const fitW = fitsWide ? (pixelH * 16) / 9 : pixelW;
-  const fitH = fitsWide ? pixelH : (pixelW * 9) / 16;
-  const fitOffsetX = (pixelW - fitW) / 2;
-  const fitSlackY = pixelH - fitH;
+  // Largest 16:9 rect that fits inside the wall's RECOMMENDED CONTENT
+  // resolution (square-pixel space, not the raw LED grid - see
+  // contentPixelW/H above), nudged up/down within whatever vertical slack is
+  // available (fitShift). Using the raw LED pixel grid here would produce a
+  // box (and, for the preview/diagram shapes below, a wall outline) that's
+  // visibly the wrong shape for non-square-pixel panels like MT.
+  const fitsWide = contentPixelW / contentPixelH > 16 / 9;
+  const fitW = fitsWide ? (contentPixelH * 16) / 9 : contentPixelW;
+  const fitH = fitsWide ? contentPixelH : (contentPixelW * 9) / 16;
+  const fitOffsetX = (contentPixelW - fitW) / 2;
+  const fitSlackY = contentPixelH - fitH;
   const fitOffsetY = (fitSlackY / 2) * (1 + fitShift);
 
   const wallBelowFullHd = pixelW < 1920 || pixelH < 1080;
@@ -205,10 +231,17 @@ export default function QuickLayoutView() {
       const panelStats: Array<[string, string]> = [
         ["Panel Type", panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)"],
         ["Grid", `${cols} x ${rows} (${totalPanels} panels)`],
-        ["Wall Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`],
-        ["Resolution", `${pixelW} x ${pixelH} px`],
-        ["Aspect Ratio", ratioLabel],
+        [hasSquarePixels ? "Wall Size" : "Physical Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`],
       ];
+      if (hasSquarePixels) {
+        panelStats.push(["Resolution", `${pixelW} x ${pixelH} px`], ["Aspect Ratio", ratioLabel]);
+      } else {
+        panelStats.push(
+          ["LED Wall Resolution", `${pixelW} x ${pixelH} px`],
+          ["Recommended Content Resolution", `${contentPixelW} x ${contentPixelH} px`],
+          ["Physical Aspect Ratio", ratioLabel],
+        );
+      }
       if (showFitBox) panelStats.push(["16:9 Content Area", `${Math.round(fitW)} x ${Math.round(fitH)} px`]);
       sectionHeader("Panel");
       statGrid(panelStats, 2);
@@ -245,16 +278,17 @@ export default function QuickLayoutView() {
       }
 
       // Diagram, scaled to fit its reserved area (small top/left margin for
-      // the ruler labels) while preserving the wall's true aspect ratio.
+      // the ruler labels) while preserving the wall's true PHYSICAL aspect
+      // ratio (contentPixelW/H, not the raw LED pixel grid - see above).
       const diagAreaX = 110;
       const diagAreaY = 34;
       const diagAreaW = pageW - diagAreaX - 12;
       const diagAreaH = pageH - diagAreaY - 16;
-      const scale = Math.min(diagAreaW / pixelW, diagAreaH / pixelH);
+      const scale = Math.min(diagAreaW / contentPixelW, diagAreaH / contentPixelH);
       const boxX = diagAreaX;
       const boxY = diagAreaY;
-      const boxW = pixelW * scale;
-      const boxH = pixelH * scale;
+      const boxW = contentPixelW * scale;
+      const boxH = contentPixelH * scale;
 
       pdf.setDrawColor(100, 116, 139);
       pdf.setLineWidth(0.3);
@@ -272,10 +306,10 @@ export default function QuickLayoutView() {
       }
 
       if (showFitBox) {
-        const rectX = boxX + (fitOffsetX / pixelW) * boxW;
-        const rectY = boxY + (fitOffsetY / pixelH) * boxH;
-        const rectW = (fitW / pixelW) * boxW;
-        const rectH = (fitH / pixelH) * boxH;
+        const rectX = boxX + (fitOffsetX / contentPixelW) * boxW;
+        const rectY = boxY + (fitOffsetY / contentPixelH) * boxH;
+        const rectW = (fitW / contentPixelW) * boxW;
+        const rectH = (fitH / contentPixelH) * boxH;
         pdf.setDrawColor(245, 158, 11);
         pdf.setLineWidth(0.5);
         pdf.setLineDashPattern([1.5, 1], 0);
@@ -429,12 +463,25 @@ export default function QuickLayoutView() {
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5">
                   <dt className="text-slate-400">Panel count</dt>
                   <dd>{totalPanels}</dd>
-                  <dt className="text-slate-400">Wall size</dt>
+                  <dt className="text-slate-400">{hasSquarePixels ? "Wall size" : "Physical size"}</dt>
                   <dd>{formatM(wallWidthM)} × {formatM(wallHeightM)}</dd>
-                  <dt className="text-slate-400">Resolution</dt>
-                  <dd>{pixelW} × {pixelH} px ({totalPixels.toLocaleString()} px total)</dd>
-                  <dt className="text-slate-400">Aspect ratio</dt>
-                  <dd>{ratioLabel}</dd>
+                  {hasSquarePixels ? (
+                    <>
+                      <dt className="text-slate-400">Resolution</dt>
+                      <dd>{pixelW} × {pixelH} px ({totalPixels.toLocaleString()} px total)</dd>
+                      <dt className="text-slate-400">Aspect ratio</dt>
+                      <dd>{ratioLabel}</dd>
+                    </>
+                  ) : (
+                    <>
+                      <dt className="text-slate-400">LED wall resolution</dt>
+                      <dd>{pixelW} × {pixelH} px</dd>
+                      <dt className="text-slate-400">Recommended content resolution</dt>
+                      <dd>{contentPixelW} × {contentPixelH} px</dd>
+                      <dt className="text-slate-400">Physical aspect ratio</dt>
+                      <dd>{ratioLabel}</dd>
+                    </>
+                  )}
                   {showFitBox ? (
                     <>
                       <dt className="text-slate-400">16:9 content area</dt>
@@ -489,7 +536,11 @@ export default function QuickLayoutView() {
                 <div
                   className="relative overflow-hidden rounded-lg border border-slate-600 bg-slate-950"
                   style={{
-                    aspectRatio: `${pixelW} / ${pixelH}`,
+                    // Shaped by the wall's true PHYSICAL aspect ratio
+                    // (contentPixelW/H), not the raw LED pixel grid - for
+                    // MT those differ, and the raw grid's shape would look
+                    // wrong here (see contentPixelH above).
+                    aspectRatio: `${contentPixelW} / ${contentPixelH}`,
                     backgroundImage:
                       "linear-gradient(to right, rgba(148,163,184,0.45) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.45) 1px, transparent 1px)",
                     backgroundSize: `${100 / cols}% ${100 / rows}%`,
@@ -499,10 +550,10 @@ export default function QuickLayoutView() {
                     <div
                       className="absolute border-2 border-dashed border-amber-400/90 bg-amber-400/10"
                       style={{
-                        left: `${(fitOffsetX / pixelW) * 100}%`,
-                        top: `${(fitOffsetY / pixelH) * 100}%`,
-                        width: `${(fitW / pixelW) * 100}%`,
-                        height: `${(fitH / pixelH) * 100}%`,
+                        left: `${(fitOffsetX / contentPixelW) * 100}%`,
+                        top: `${(fitOffsetY / contentPixelH) * 100}%`,
+                        width: `${(fitW / contentPixelW) * 100}%`,
+                        height: `${(fitH / contentPixelH) * 100}%`,
                       }}
                     />
                   ) : null}

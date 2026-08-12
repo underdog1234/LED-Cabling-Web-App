@@ -40,6 +40,11 @@ export type TestPatternLayout = {
   wallBBox: RectMm;
   W: number;
   H: number;
+  /** Recommended Content Resolution height - equals H unless every active
+   * panel is MT (a transparent panel missing every second LED row, so its
+   * vertical pixel pitch is twice its horizontal pitch and H alone doesn't
+   * represent the wall's true physical aspect ratio) - see drawInfoText. */
+  contentPixelH: number;
   /** Each panel's TRUE native-resolution pixel rect (back view, unmirrored),
    * keyed by cell id - see computeTestPatternLayout. */
   panelPixelRects: Map<string, RectMm>;
@@ -233,11 +238,19 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
   const tileWidthPx = tileSpec.pixW;
   const tileHeightPx = tileSpec.pixH;
 
+  // MT's pixel pitch is 2x taller than it is wide (see contentPixelH above) -
+  // only apply the correction when EVERY active panel is MT, matching the
+  // same conservative scope used elsewhere (a mixed MG9+MT wall doesn't get
+  // a blended "content resolution").
+  const allMt = activePanels.length > 0 && activePanels.every((cell) => cellPanelType(cell) === "MT");
+  const contentPixelH = allMt ? H * 2 : H;
+
   return {
     activePanels,
     wallBBox,
     W,
     H,
+    contentPixelH,
     panelPixelRects,
     totalPanels: activePanels.length,
     activeColsCount: occupiedCols.size,
@@ -283,8 +296,10 @@ const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) 
   const lines: string[] = [];
   if (layout.projectName) lines.push(layout.projectName);
   if (layout.surfaceName) lines.push(layout.surfaceName);
+  const isContentResScaled = layout.contentPixelH !== layout.H;
+  lines.push(`${isContentResScaled ? "LED Wall Resolution" : "Resolution"}: ${layout.W} x ${layout.H} px`);
+  if (isContentResScaled) lines.push(`Recommended Content Resolution: ${layout.W} x ${layout.contentPixelH} px`);
   lines.push(
-    `Resolution: ${layout.W} x ${layout.H} px`,
     `Physical Size: ${layout.wallWidthM.toFixed(1)} x ${layout.wallHeightM.toFixed(1)} m`,
     `Panels: ${layout.totalPanels}`,
     `Grid: ${layout.activeColsCount} columns x ${layout.activeRowsCount} rows`,

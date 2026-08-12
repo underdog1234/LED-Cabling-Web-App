@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.28.2`
+Version `0.29.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,10 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.29.0
+
+- Correctly handle MT's non-square LED pixel pitch (3.9mm horizontal x 7.8mm vertical - every second LED row is physically missing on this transparent panel) everywhere a wall's resolution or aspect ratio is shown. For an MT-only wall, Quick Panel Layout and the main tool's Wall Summary now show **LED Wall Resolution** (the panel's real 256x64 pixel grid), **Recommended Content Resolution** (LED height doubled, so content authored at this resolution has the correct proportions), and a corrected **Physical Aspect Ratio** (from the wall's true physical size, not its raw pixel grid) - previously the "Aspect Ratio" stat was silently wrong for MT walls (e.g. showing 8:1 for a wall that's physically 4:1), and Quick Panel Layout's preview diagram and 16:9 content-area overlay were the wrong shape too. MG9 walls are unaffected, since its pixel and physical aspect ratios already match. The PDF exports from both tools, and the on-screen info text baked into the Test Pattern image/video, all reflect the same distinction for MT.
 
 ## Recent Changes In v0.28.2
 
