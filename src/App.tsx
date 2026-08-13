@@ -40,7 +40,19 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.30.1";
+const APP_VERSION = "0.31.0";
+
+// Target resolution for the Panel Layout PNG embedded in the full PDF
+// report (see buildLayoutCanvas) - a fixed print DPI at the page's own
+// print size, not a flat pixel multiplier. The image always ends up
+// shrunk to fit the SAME ~277x152mm page area (drawLayoutPage's usable
+// width/height below) regardless of the wall's actual size, so scaling
+// canvas resolution with the wall's mm dimensions (as a flat multiplier
+// does) makes huge walls render at far more pixels - and file size - than
+// that fixed print area could ever show, with zero visible quality gain.
+const PDF_LAYOUT_IMAGE_DPI = 300;
+const PDF_LAYOUT_USABLE_WIDTH_MM = 277; // matches drawLayoutPage's usableWidth (pageWidth - 20)
+const PDF_LAYOUT_USABLE_HEIGHT_MM = 152; // matches drawLayoutPage's usableHeight (pageHeight - 58)
 
 export const PANEL_TYPES = {
   MG9: {
@@ -1736,6 +1748,8 @@ export default function App() {
       pushUndoSnapshot();
       setCols(payload.cols);
       setRows(payload.rows);
+      setDraftCols(String(payload.cols));
+      setDraftRows(String(payload.rows));
       setPanelType(payload.panelType);
       setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
       setSelectedId(null);
@@ -1756,6 +1770,8 @@ export default function App() {
     if (mode === "replace") {
       setCols(payload.cols);
       setRows(payload.rows);
+      setDraftCols(String(payload.cols));
+      setDraftRows(String(payload.rows));
       setPanelType(payload.panelType);
       setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
       // Replace wipes the whole project's panels - any existing sub-screens
@@ -1765,6 +1781,11 @@ export default function App() {
       setSelectedId(null);
       setSelectedCells(new Set());
     } else {
+      // Add keeps the existing panels (and their own cols/rows/type stay
+      // whatever they already were), but the Panel Type selector should
+      // still switch to match the batch that was just added, same as
+      // picking a new type for "+ Add Panel" would.
+      setPanelType(payload.panelType);
       const bbox = activeBBox(activePanels.map(cellRect));
       const GAP_MM = 500;
       const offsetX = bbox.w > 0 ? bbox.x + bbox.w + GAP_MM : 0;
@@ -2470,14 +2491,28 @@ export default function App() {
   };
 
   const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
-    const scale = 2;
     const px = CELL_SIZE / MODULE_MM; // export scale, independent of on-screen zoom
     const margin = 52;
     const wallW = Math.max(1, Math.round(wallBBox.w * px));
     const wallH = Math.max(1, Math.round(wallBBox.h * px));
+    const contentW = wallW + margin * 2;
+    const contentH = wallH + margin * 2 + 20;
+
+    // How big this image will actually print, so we can render it at just
+    // enough pixel density to hit PDF_LAYOUT_IMAGE_DPI there - see the
+    // constant's own comment for why this can't be a flat multiplier.
+    const contentRatio = contentW / contentH;
+    let printWidthMm = PDF_LAYOUT_USABLE_WIDTH_MM;
+    let printHeightMm = printWidthMm / contentRatio;
+    if (printHeightMm > PDF_LAYOUT_USABLE_HEIGHT_MM) {
+      printHeightMm = PDF_LAYOUT_USABLE_HEIGHT_MM;
+      printWidthMm = printHeightMm * contentRatio;
+    }
+    const scale = (PDF_LAYOUT_IMAGE_DPI / 25.4) * (printWidthMm / contentW);
+
     const canvas = document.createElement("canvas");
-    canvas.width = (wallW + margin * 2) * scale;
-    canvas.height = (wallH + margin * 2 + 20) * scale;
+    canvas.width = Math.max(1, Math.round(contentW * scale));
+    canvas.height = Math.max(1, Math.round(contentH * scale));
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("Canvas context unavailable");
     ctx.scale(scale, scale);
@@ -3094,7 +3129,7 @@ const exportJson = () => {
   const generatePdf = async () => {
   try {
     const jsPDF = (await import("jspdf")).default;
-    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape", compress: true });
     const printedAt = new Date().toLocaleString();
     const usedSignalPorts = signalPorts.filter((port) => signalPortStats[port.id].panels > 0);
     const usedPowerPorts = powerPorts.filter((port) => powerPortStats[port.id].panels > 0);
@@ -3163,7 +3198,16 @@ const exportJson = () => {
         drawHeight = usableHeight;
         drawWidth = drawHeight * layoutRatio;
       }
-      pdf.addImage(canvas.toDataURL("image/png"), "PNG", 10 + (usableWidth - drawWidth) / 2, 50 + (usableHeight - drawHeight) / 2, drawWidth, drawHeight);
+      pdf.addImage(
+        canvas.toDataURL("image/png"),
+        "PNG",
+        10 + (usableWidth - drawWidth) / 2,
+        50 + (usableHeight - drawHeight) / 2,
+        drawWidth,
+        drawHeight,
+        undefined,
+        "SLOW",
+      );
     };
 
     const drawStockTable = (startIndex: number, startY: number, maxY: number) => {

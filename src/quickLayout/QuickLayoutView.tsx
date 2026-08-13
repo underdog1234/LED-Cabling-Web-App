@@ -176,7 +176,7 @@ export default function QuickLayoutView() {
   const exportPdf = async () => {
     try {
       const jsPDF = (await import("jspdf")).default;
-      const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape" });
+      const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape", compress: true });
       const pageW = pdf.internal.pageSize.getWidth();
       const pageH = pdf.internal.pageSize.getHeight();
 

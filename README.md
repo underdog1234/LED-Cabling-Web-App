@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.30.1`
+Version `0.31.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,11 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.31.0
+
+- Fixed the Quick Panel Layout -> Main Layout Tool hand-off: when sending into a tab that already has an existing project (the Replace/Add prompt), the panel type now actually switches to match, and Columns/Rows now update too - previously only the fresh-project hand-off applied these correctly
+- Cut the full PDF report's file size dramatically (a large wall could reach ~20MB) by rendering the embedded Panel Layout images at a fixed 300 DPI for their actual printed size on the page, instead of a flat pixel multiplier that scaled with the wall's real-world size - a huge wall always prints at the same page-sized image regardless of how big it is, so the old approach wasted enormous, invisible resolution on big projects. Typical/small projects are unaffected (the same ~300 DPI they already got); a 1200-panel test wall dropped from a projected ~20MB+ to well under 1MB with no visible quality loss. Also enabled PDF stream compression on both PDF exports
 
 ## Recent Changes In v0.30.1
 
