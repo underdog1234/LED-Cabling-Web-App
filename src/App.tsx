@@ -40,7 +40,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.29.0";
+const APP_VERSION = "0.30.1";
 
 export const PANEL_TYPES = {
   MG9: {
@@ -815,18 +815,22 @@ const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
   return ordered;
 };
 
+// `required` is always the raw quantity needed to build the wall, with no
+// spare or packaging rounding folded in - `rounded` (required + spare,
+// packaging-rounded where relevant) is the real order/pull quantity, so
+// `net` (shortfall) is checked against THAT, not the bare required count.
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
   required: number,
   method: string,
   spare = 0,
-  rounded = required,
+  rounded = required + spare,
 ): StockRow => ({
   code: item.code,
   name: item.name,
   required,
   stock: item.stock,
-  net: item.stock - required,
+  net: item.stock - rounded,
   method,
   spare,
   rounded,
@@ -2173,8 +2177,7 @@ export default function App() {
   const signalCableBaseRequired = signalPortsUsed;
   const signalCableWithBackupRequired = backupSignalLoop ? signalCableBaseRequired * 2 : signalCableBaseRequired;
   const signalCableSpare = Math.ceil(signalCableWithBackupRequired * panel.defaults.signalSpareRatio);
-  const signalCableTotalRequired = signalCableWithBackupRequired + signalCableSpare;
-  const powerCableTotalRequired = circuitsUsedMax + Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
+  const powerCableSpare = Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
   const distroRequired = Math.max(1, Math.ceil(powerPortsUsed / distro.portCount));
 
   const cornerJoinStats = useMemo(() => {
@@ -2216,17 +2219,27 @@ export default function App() {
     const mtStockCat = PANEL_TYPES.MT.stock as Record<string, number>;
     const stock = mg9StockCat;
     const rowsOut: StockRow[] = [];
-    const pushBaseRow = (code: string, name: string, required: number, stockQty: number, method: string) => {
-      rowsOut.push({ code, name, required, stock: stockQty, net: stockQty - required, method });
+    // `required` is always the raw quantity needed to build the wall - `spare`
+    // and `rounded` (defaulting to required + spare) carry the real order/pull
+    // quantity, and `net` (shortfall) is checked against THAT, not the bare
+    // required count.
+    const pushBaseRow = (code: string, name: string, required: number, stockQty: number, method: string, spare = 0, rounded = required + spare) => {
+      rowsOut.push({ code, name, required, spare, rounded, stock: stockQty, net: stockQty - rounded, method });
     };
 
     if (mg9Count > 0) {
       const standardCount = panelVariantCounts.STANDARD;
       const standardSpare = Math.ceil(standardCount * mg9Defaults.spareRatio);
       const standardRounded = roundUpToBox(standardCount + standardSpare, mg9Defaults.panelsPerBox);
-      pushBaseRow("12224", "MG9 LED Panel", standardRounded, mg9StockCat.panels ?? 0, `${standardCount} + ${standardSpare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`);
-      rowsOut[rowsOut.length - 1].spare = standardSpare;
-      rowsOut[rowsOut.length - 1].rounded = standardRounded;
+      pushBaseRow(
+        "12224",
+        "MG9 LED Panel",
+        standardCount,
+        mg9StockCat.panels ?? 0,
+        `${standardCount} + ${standardSpare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`,
+        standardSpare,
+        standardRounded,
+      );
 
       // Shaped panels (triangle / quarter circle) are one-way physical pieces:
       // each rotation orientation (LU/LD/RU/RD) is its own stock line, checked
@@ -2244,11 +2257,11 @@ export default function App() {
           pushBaseRow(
             `${item.code}-${orientationKey}`,
             `${variant.label} ${orientation.icon} ${orientation.label}`,
-            count + spare,
+            count,
             stockQty,
             `${count} placed at this orientation + ${spare} spare`,
+            spare,
           );
-          rowsOut[rowsOut.length - 1].spare = spare;
         });
       });
 
@@ -2259,15 +2272,13 @@ export default function App() {
         if (item && count > 0) {
           const spare = Math.ceil(count * mg9Defaults.spareRatio);
           const rounded = roundUpToBox(count + spare, mg9Defaults.panelsPerBox);
-          rowsOut.push(makeStockRow(item, rounded, `${count} selected + ${spare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`, spare, rounded));
+          rowsOut.push(makeStockRow(item, count, `${count} selected + ${spare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`, spare, rounded));
         }
       }
     }
 
     if (mtCount > 0) {
-      const mtWithSpare = mtCount + mtSpare;
-      pushBaseRow("12223", "MT Mesh Panel", mtWithSpare, mtStockCat.panels ?? 0, `${mtCount} + ${mtSpare} spare`);
-      rowsOut[rowsOut.length - 1].spare = mtSpare;
+      pushBaseRow("12223", "MT Mesh Panel", mtCount, mtStockCat.panels ?? 0, `${mtCount} + ${mtSpare} spare`, mtSpare);
     }
 
     rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
@@ -2310,10 +2321,15 @@ export default function App() {
       method: "selected distro",
     });
 
-    pushBaseRow("12254", "15m PowerCON Cable", powerCableTotalRequired, stock.powerCable15m ?? 0, `${circuitsUsedMax} + ${Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio)} spare`);
-    rowsOut[rowsOut.length - 1].spare = Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
-    pushBaseRow("12263", "15m Signal Cable", signalCableTotalRequired, stock.signalCable15m ?? 0, `${signalCableWithBackupRequired}${backupSignalLoop ? ` (${signalCableBaseRequired} x 2 backup loop)` : ""} + ${signalCableSpare} spare`);
-    rowsOut[rowsOut.length - 1].spare = signalCableSpare;
+    pushBaseRow("12254", "15m PowerCON Cable", circuitsUsedMax, stock.powerCable15m ?? 0, `${circuitsUsedMax} + ${powerCableSpare} spare`, powerCableSpare);
+    pushBaseRow(
+      "12263",
+      "15m Signal Cable",
+      signalCableWithBackupRequired,
+      stock.signalCable15m ?? 0,
+      `${signalCableWithBackupRequired}${backupSignalLoop ? ` (${signalCableBaseRequired} x 2 backup loop)` : ""} + ${signalCableSpare} spare`,
+      signalCableSpare,
+    );
 
     if (backupSignalLoop) {
       const joinerRequired = signalPortsUsed;
@@ -2372,9 +2388,13 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableTotalRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableTotalRequired, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
 
-  const shortfallRows = stockRows.filter((row) => row.required > 0 && row.net < 0);
+  // The on-screen table, PDF table and CSV export all list order/pull
+  // quantities, not raw internal line items - a row whose real order
+  // quantity (rounded, spare included) comes out to 0 is just noise there.
+  const visibleStockRows = useMemo(() => stockRows.filter((row) => (row.rounded ?? row.required) > 0), [stockRows]);
+  const shortfallRows = visibleStockRows.filter((row) => row.net < 0);
   const safeProjectName = projectName.trim() || "Untitled Project";
   const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
   // Describe the panel mix for exports and headings.
@@ -2717,7 +2737,7 @@ const exportJson = () => {
 
   const exportStockCsv = () => {
     try {
-      const lines = ["Code,Required", ...stockRows.map((row) => `${row.code},${row.required}`)];
+      const lines = ["Code,Order Qty", ...visibleStockRows.map((row) => `${row.code},${row.rounded ?? row.required}`)];
       const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -3157,15 +3177,15 @@ const exportJson = () => {
         pdf.text("Item", 34, y);
         pdf.text("Required", 174, y, { align: "right" });
         pdf.text("Spare", 198, y, { align: "right" });
-        pdf.text("Rounded", 226, y, { align: "right" });
+        pdf.text("Rounded + Spare", 226, y, { align: "right" });
         pdf.text("Stock", 252, y, { align: "right" });
         pdf.text("Net", 282, y, { align: "right" });
         y += 6;
         pdf.setFont("helvetica", "normal");
       };
       drawHeader();
-      for (let index = startIndex; index < stockRows.length; index += 1) {
-        const row = stockRows[index];
+      for (let index = startIndex; index < visibleStockRows.length; index += 1) {
+        const row = visibleStockRows[index];
         if (y > maxY) return index;
         if (row.net < 0) {
           pdf.setFillColor(254, 226, 226);
@@ -3180,7 +3200,7 @@ const exportJson = () => {
         pdf.text(formatNumber(row.net), 282, y, { align: "right" });
         y += 6;
       }
-      return stockRows.length;
+      return visibleStockRows.length;
     };
 
     const drawStockPage = (startIndex = 0) => {
@@ -3189,7 +3209,7 @@ const exportJson = () => {
       pdf.setFontSize(16);
       pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
       let nextIndex = drawStockTable(startIndex, 22, 190);
-      while (nextIndex < stockRows.length) {
+      while (nextIndex < visibleStockRows.length) {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
@@ -3261,6 +3281,74 @@ const exportJson = () => {
       }
     };
 
+    // Full per-port breakdown, as two side-by-side tables. A single fixed
+    // page (no pagination) is always enough: signal ports are hard-capped at
+    // 20 (the largest supported NovaStar processor) and power outputs at 18
+    // (the 63A distro's port count) - both comfortably fit in one column of
+    // rows well within the page height.
+    const drawPortsInUsePage = () => {
+      if (!usedSignalPorts.length && !usedPowerPorts.length) return;
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(`${safeProjectName} - Signal & Power Ports In Use`, 10, 12);
+
+      const colW = 133;
+      type PortColumn = { label: string; x: number; align?: "right" };
+      const drawPortTable = (x: number, title: string, columns: PortColumn[], rows: string[][], emptyLabel: string) => {
+        let y = 22;
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(12);
+        pdf.text(title, x, y);
+        y += 6;
+        pdf.setFillColor(226, 232, 240);
+        pdf.rect(x, y - 5, colW, 7, "F");
+        pdf.setFontSize(8);
+        columns.forEach((col) => pdf.text(col.label, x + col.x, y, col.align ? { align: col.align } : undefined));
+        y += 6;
+        pdf.setFont("helvetica", "normal");
+        if (!rows.length) {
+          pdf.text(emptyLabel, x, y);
+          return;
+        }
+        rows.forEach((cells) => {
+          columns.forEach((col, i) => pdf.text(cells[i], x + col.x, y, col.align ? { align: col.align } : undefined));
+          y += 6;
+        });
+      };
+
+      drawPortTable(
+        10,
+        `Signal Ports (${usedSignalPorts.length} of ${signalPorts.length} in use)`,
+        [
+          { label: "Port", x: 0 },
+          { label: "Panels", x: 40, align: "right" },
+          { label: "Chain (first -> last)", x: 48 },
+        ],
+        usedSignalPorts.map((port) => {
+          const stat = signalPortStats[port.id];
+          return [port.name, formatNumber(stat.panels), stat.firstKey ? `${stat.firstKey} -> ${stat.lastKey}` : "-"];
+        }),
+        "No signal ports in use.",
+      );
+
+      drawPortTable(
+        154,
+        `Power Outputs (${usedPowerPorts.length} of ${powerPorts.length} in use)`,
+        [
+          { label: "Plug", x: 0 },
+          { label: "Panels", x: 40, align: "right" },
+          { label: "Max W / A", x: 75, align: "right" },
+          { label: "Phase", x: 110 },
+        ],
+        usedPowerPorts.map((port) => {
+          const stat = powerPortStats[port.id];
+          return [port.name, formatNumber(stat.panels), `${formatNumber(stat.maxWatts)}W / ${formatNumber(stat.maxAmps, 2)}A`, stat.phase || "-"];
+        }),
+        "No power outputs in use.",
+      );
+    };
+
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
     pdf.text(safeProjectName, 10, 12);
@@ -3308,19 +3396,20 @@ const exportJson = () => {
       `Phase ${phase.replace("P", "")}: ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A (${formatNumber(stat.utilisation, 1)}%)`
     ), 10, 78, 92, 44);
 
-    drawInfoBox("Signal Ports In Use", usedSignalPorts.length
-      ? usedSignalPorts.map((port) => {
-          const stat = signalPortStats[port.id];
-          return `${port.name}: ${stat.panels} panels${stat.firstKey ? `, ${stat.firstKey} -> ${stat.lastKey}` : ""}`;
-        })
-      : ["No signal ports in use"], 106, 78, 88, 44);
+    // Full per-port detail lives on its own page (drawPortsInUsePage below) -
+    // these boxes are just a compact count, since the old approach (one line
+    // per port crammed into a small fixed-height box) silently dropped any
+    // ports past ~7 with no indication once a project used more than that
+    // (easy to hit - VX2000 Pro alone offers up to 20 signal ports).
+    drawInfoBox("Signal Ports In Use", [
+      `${usedSignalPorts.length} of ${signalPorts.length} ports in use`,
+      "See Signal & Power Ports page for full detail.",
+    ], 106, 78, 88, 44);
 
-    drawInfoBox("Power Outputs In Use", usedPowerPorts.length
-      ? usedPowerPorts.map((port) => {
-          const stat = powerPortStats[port.id];
-          return `${port.name}: ${stat.panels} panels, ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A`;
-        })
-      : ["No power outputs in use"], 198, 78, 88, 44);
+    drawInfoBox("Power Outputs In Use", [
+      `${usedPowerPorts.length} of ${powerPorts.length} outputs in use`,
+      "See Signal & Power Ports page for full detail.",
+    ], 198, 78, 88, 44);
 
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(12);
@@ -3329,7 +3418,8 @@ const exportJson = () => {
 
     const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
     const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
-    if (nextStockIndex < stockRows.length) drawStockPage(nextStockIndex);
+    if (nextStockIndex < visibleStockRows.length) drawStockPage(nextStockIndex);
+    drawPortsInUsePage();
     if (subScreens.length > 0) drawSubScreensSummaryPage();
     drawLayoutPage(backLayoutCanvas, "Back View");
     drawLayoutPage(frontLayoutCanvas, "Front View");
@@ -5669,17 +5759,23 @@ const exportJson = () => {
                 <thead className="bg-slate-900">
                   <tr>
                     <th className="w-24 px-3 py-2">Code</th>
-                    <th className="w-28 px-3 py-2 text-right">Required</th>
                     <th className="px-3 py-2">Item</th>
-                    <th className="w-28 px-3 py-2 text-right">Net Stock</th>
+                    <th className="w-24 px-3 py-2 text-right">Required</th>
+                    <th className="w-20 px-3 py-2 text-right">Spare</th>
+                    <th className="w-32 px-3 py-2 text-right">Rounded + Spare</th>
+                    <th className="w-20 px-3 py-2 text-right">Stock</th>
+                    <th className="w-24 px-3 py-2 text-right">Net</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {stockRows.map((row) => (
+                  {visibleStockRows.map((row) => (
                     <tr key={`${row.code}-${row.name}`} className={`border-t border-slate-700 ${row.net < 0 ? "bg-red-500/10" : ""}`}>
                       <td className={`px-3 py-2 whitespace-nowrap ${row.net < 0 ? "text-red-200" : ""}`}>{row.code}</td>
-                      <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
                       <td className="px-3 py-2 truncate">{row.name}</td>
+                      <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
+                      <td className="px-3 py-2 text-right">{formatNumber(row.spare ?? 0)}</td>
+                      <td className="px-3 py-2 text-right">{formatNumber(row.rounded ?? row.required)}</td>
+                      <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
                       <td className={`px-3 py-2 text-right font-semibold ${row.net < 0 ? "text-red-300" : "text-emerald-300"}`}>{formatNumber(row.net)}</td>
                     </tr>
                   ))}
@@ -5699,7 +5795,7 @@ const exportJson = () => {
                 {shortfallRows.map((row) => (
                   <div key={`short-${row.code}-${row.name}`} className="rounded border border-red-500/40 bg-red-500/10 p-3">
                     <div className="font-semibold">{row.name}</div>
-                    <div className="text-sm">Need {formatNumber(row.required)}, stock {formatNumber(row.stock)}, short by {formatNumber(Math.abs(row.net))}</div>
+                    <div className="text-sm">Need {formatNumber(row.rounded ?? row.required)}, stock {formatNumber(row.stock)}, short by {formatNumber(Math.abs(row.net))}</div>
                   </div>
                 ))}
               </div>

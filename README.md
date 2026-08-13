@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.29.0`
+Version `0.30.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,16 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.30.1
+
+- Relabelled the stock table's "Rounded" column to "Rounded + Spare" (on-screen and PDF) to make clear it's the order quantity, spare included
+- Added Spare Panels Needed and Rounded To Full Boxes to the standalone Quick Panel Layout tool (on-screen and its PDF export), using the same per-panel-type spare ratio and box size as the main tool's own stock maths
+
+## Recent Changes In v0.30.0
+
+- Reworked the required-stock calculation so **Required** is always the raw quantity needed to build the wall (no spare folded in), and **Rounded** consistently adds each item's spare (plus packaging rounding, e.g. boxes of 10 for MG9 panels) - fixing several rows (MG9/MT/corner/shaped panels, power cable, signal cable) that previously showed an already-spared number in "Required". Stock shortfalls are now checked against the real order quantity (Rounded), not the bare required count. Items whose final order quantity comes out to 0 are hidden from the on-screen table, the PDF stock table, and the CSV export (which now exports the Rounded order quantity, not the raw required count) - the on-screen table also gained Spare/Rounded/Stock columns to match the PDF
+- Fixed the PDF's "Signal Ports In Use" and "Power Outputs In Use" boxes silently dropping any ports past about 7 with no indication (easy to hit - VX2000 Pro alone offers up to 20 signal ports). Those boxes now show a compact in-use count, and a new dedicated "Signal & Power Ports In Use" PDF page lists every used signal port and power outlet in full, with no truncation
 
 ## Recent Changes In v0.29.0
 

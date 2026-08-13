@@ -12,6 +12,8 @@ const clampCells = (n: number) => Math.min(MAX_CELLS, Math.max(MIN_CELLS, Math.r
 
 const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
 
+const roundUpToBox = (value: number, boxSize: number) => (boxSize > 0 ? Math.ceil(Math.max(value, 0) / boxSize) * boxSize : Math.max(value, 0));
+
 const formatM = (n: number) => `${n.toFixed(2)} m`;
 
 // How far apart to space ruler marks along an axis so a large wall doesn't
@@ -57,6 +59,12 @@ export default function QuickLayoutView() {
   const pixelH = rows * panel.pixH;
   const totalPanels = cols * rows;
   const totalPixels = pixelW * pixelH;
+
+  // Spare panels + box rounding, matching the main Layout Tool's own stock
+  // maths (same spareRatio/panelsPerBox defaults per panel type) - shown as
+  // an early heads-up here, before any real patching/stock-list exists.
+  const sparePanels = Math.ceil(totalPanels * panel.defaults.spareRatio);
+  const panelsRoundedToBoxes = totalPanels > 0 ? roundUpToBox(totalPanels + sparePanels, panel.defaults.panelsPerBox) : 0;
 
   // MT is a transparent panel missing every second LED row, so its vertical
   // pixel pitch (7.8mm) is twice its horizontal pitch (3.9mm) - the raw
@@ -231,6 +239,8 @@ export default function QuickLayoutView() {
       const panelStats: Array<[string, string]> = [
         ["Panel Type", panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)"],
         ["Grid", `${cols} x ${rows} (${totalPanels} panels)`],
+        ["Spare Panels Needed", `${sparePanels}`],
+        ["Rounded To Full Boxes", `${panelsRoundedToBoxes} (boxes of ${panel.defaults.panelsPerBox})`],
         [hasSquarePixels ? "Wall Size" : "Physical Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`],
       ];
       if (hasSquarePixels) {
@@ -463,6 +473,10 @@ export default function QuickLayoutView() {
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5">
                   <dt className="text-slate-400">Panel count</dt>
                   <dd>{totalPanels}</dd>
+                  <dt className="text-slate-400">Spare panels needed</dt>
+                  <dd>{sparePanels}</dd>
+                  <dt className="text-slate-400">Rounded to full boxes</dt>
+                  <dd>{panelsRoundedToBoxes} <span className="text-slate-500">(boxes of {panel.defaults.panelsPerBox})</span></dd>
                   <dt className="text-slate-400">{hasSquarePixels ? "Wall size" : "Physical size"}</dt>
                   <dd>{formatM(wallWidthM)} × {formatM(wallHeightM)}</dd>
                   {hasSquarePixels ? (
