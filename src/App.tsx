@@ -40,7 +40,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.31.0";
+const APP_VERSION = "0.32.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -440,6 +440,53 @@ export const makeGridPanels = (cols: number, rows: number, panelType: PanelTypeK
 };
 
 export const cellPanelType = (cell: Cell): PanelTypeKey => cell.panelType ?? "MG9";
+
+// Spare-panel bucketing: MG9's shaped variants (Triangle/Curved) and its
+// Corner variant are each a separate physical stock item from Standard MG9,
+// and MT is a separate panel type entirely - so spare stock is computed per
+// bucket, not as one combined MG9 number (a single combined ceil() would
+// under-count once several buckets each need their own rounding-up). See
+// sparePanelSurfaces in the App component for the per-surface breakdown
+// this feeds.
+export type SpareBucketKey = "MG9_STANDARD" | "MG9_TRIANGLE" | "MG9_CURVED" | "MG9_CORNER" | "MT";
+export const SPARE_BUCKETS: Array<{ key: SpareBucketKey; label: string }> = [
+  { key: "MG9_STANDARD", label: "MG9 Standard" },
+  { key: "MG9_TRIANGLE", label: "MG9 Triangle" },
+  { key: "MG9_CURVED", label: "MG9 Curved" },
+  { key: "MG9_CORNER", label: "MG9 Corner" },
+  { key: "MT", label: "MT" },
+];
+export const spareBucketOfCell = (cell: Cell): SpareBucketKey => {
+  if (cellPanelType(cell) !== "MG9") return "MT";
+  const variant = cell.panelVariant ?? "STANDARD";
+  if (variant === "TRIANGLE") return "MG9_TRIANGLE";
+  if (variant === "CURVED") return "MG9_CURVED";
+  if (variant === "CORNER") return "MG9_CORNER";
+  return "MG9_STANDARD";
+};
+const SPARE_BUCKET_RATIO: Record<SpareBucketKey, number> = {
+  MG9_STANDARD: PANEL_TYPES.MG9.defaults.spareRatio,
+  MG9_TRIANGLE: PANEL_TYPES.MG9.defaults.spareRatio,
+  MG9_CURVED: PANEL_TYPES.MG9.defaults.spareRatio,
+  MG9_CORNER: PANEL_TYPES.MG9.defaults.spareRatio,
+  MT: PANEL_TYPES.MT.defaults.spareRatio,
+};
+// Box size to round each bucket's (used + spare) up to - null means shaped
+// panels (Triangle/Curved), which are one-way physical pieces bought
+// individually, not boxed, so the spare is just added as-is, unrounded.
+const SPARE_BUCKET_BOX_SIZE: Record<SpareBucketKey, number | null> = {
+  MG9_STANDARD: PANEL_TYPES.MG9.defaults.panelsPerBox,
+  MG9_TRIANGLE: null,
+  MG9_CURVED: null,
+  MG9_CORNER: PANEL_TYPES.MG9.defaults.panelsPerBox,
+  MT: PANEL_TYPES.MT.defaults.panelsPerBox,
+};
+export const spareForBucket = (used: number, bucket: SpareBucketKey): { spare: number; rounded: number } => {
+  const spare = Math.ceil(used * SPARE_BUCKET_RATIO[bucket]);
+  const boxSize = SPARE_BUCKET_BOX_SIZE[bucket];
+  const rounded = boxSize ? roundUpToBox(used + spare, boxSize) : used + spare;
+  return { spare, rounded };
+};
 
 // Footprint in workspace mm, honouring rotation (90/270 swaps width/height).
 export const cellSizeMm = (cell: Cell) => {
@@ -1948,6 +1995,65 @@ export default function App() {
     });
     return counts;
   }, [activePanels]);
+  // Spare-panel breakdown by surface (each sub-screen, plus "Unassigned" if
+  // any panels aren't in one, or just "Whole Layout" when there are no
+  // sub-screens) and by panel type bucket - always re-derived from the FULL
+  // grid (not the scoped activePanels, which only ever reflects one
+  // sub-screen - or none - at a time), so every surface shows at once
+  // regardless of which one is currently being edited. Mirrors how the PDF's
+  // sub-screens table is built.
+  const sparePanelSurfaces = useMemo(() => {
+    const zeroBuckets = () => Object.fromEntries(SPARE_BUCKETS.map((b) => [b.key, 0])) as Record<SpareBucketKey, number>;
+    const activeGrid = grid.filter((cell) => !cell.isRemoved);
+    const surfaces: Array<{ id: string; name: string; buckets: Record<SpareBucketKey, number>; total: number }> = [];
+
+    const tally = (cells: Cell[]) => {
+      const buckets = zeroBuckets();
+      cells.forEach((cell) => {
+        buckets[spareBucketOfCell(cell)] += 1;
+      });
+      return buckets;
+    };
+
+    if (subScreens.length > 0) {
+      subScreens.forEach((screen) => {
+        const cells = activeGrid.filter((cell) => cell.subScreenId === screen.id);
+        if (cells.length === 0) return;
+        surfaces.push({ id: screen.id, name: screen.name, buckets: tally(cells), total: cells.length });
+      });
+      const unassigned = activeGrid.filter((cell) => cell.subScreenId === null);
+      if (unassigned.length > 0) {
+        surfaces.push({ id: "unassigned", name: "Unassigned", buckets: tally(unassigned), total: unassigned.length });
+      }
+    } else if (activeGrid.length > 0) {
+      surfaces.push({ id: "whole", name: "Whole Layout", buckets: tally(activeGrid), total: activeGrid.length });
+    }
+
+    return surfaces;
+  }, [grid, subScreens]);
+  // Per-surface bucket tallies -> renderable rows with spare/rounded already
+  // computed, plus each surface's own subtotal and a project-wide grand
+  // total - shared by the on-screen breakdown and the PDF report.
+  const sparePanelSummary = useMemo(() => {
+    const surfaceRows = sparePanelSurfaces.map((surface) => {
+      const bucketRows = SPARE_BUCKETS.map((b) => {
+        const used = surface.buckets[b.key];
+        if (used === 0) return null;
+        const { spare, rounded } = spareForBucket(used, b.key);
+        return { label: b.label, used, spare, rounded };
+      }).filter((row): row is { label: string; used: number; spare: number; rounded: number } => row !== null);
+      const subtotal = bucketRows.reduce(
+        (acc, row) => ({ used: acc.used + row.used, spare: acc.spare + row.spare, rounded: acc.rounded + row.rounded }),
+        { used: 0, spare: 0, rounded: 0 },
+      );
+      return { name: surface.name, bucketRows, subtotal };
+    });
+    const grandTotal = surfaceRows.reduce(
+      (acc, s) => ({ used: acc.used + s.subtotal.used, spare: acc.spare + s.subtotal.spare, rounded: acc.rounded + s.subtotal.rounded }),
+      { used: 0, spare: 0, rounded: 0 },
+    );
+    return { surfaceRows, grandTotal, multiSurface: surfaceRows.length > 1 };
+  }, [sparePanelSurfaces]);
   // Occupied 0.5m module columns/rows across the wall bbox - used by the
   // frame/floor deployment stock formulas (rectangle-oriented hardware).
   const activeColsCount = useMemo(() => {
@@ -3393,6 +3499,82 @@ const exportJson = () => {
       );
     };
 
+    // Spare-panel breakdown: one table per surface (sub-screen, "Unassigned"
+    // if any panels aren't in one, or just "Whole Layout" with no
+    // sub-screens), each type bucket its own row (see sparePanelSummary) -
+    // paginates itself since the number of surfaces is open-ended.
+    const drawSparePanelsPage = () => {
+      if (!sparePanelSummary.surfaceRows.length) return;
+      const colX = { type: 10, used: 140, spare: 178, rounded: 225 };
+      let y = 0;
+      const startPage = (continued: boolean) => {
+        pdf.addPage("a4", "landscape");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(16);
+        pdf.text(`${safeProjectName} - Spare Panels by Surface${continued ? " (continued)" : ""}`, 10, 12);
+        y = 24;
+        if (!continued) {
+          pdf.setFont("helvetica", "normal");
+          pdf.setFontSize(9);
+          pdf.setTextColor(100, 116, 139);
+          pdf.text(
+            `Spare = ${formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 0)}% of panels used, per panel type, rounded up to full boxes where that type is boxed (shaped panels are one-way pieces bought individually, not boxed).`,
+            10,
+            18,
+          );
+          pdf.setTextColor(15, 23, 42);
+        }
+      };
+      const ensureRoom = (rowsNeeded: number) => {
+        if (y === 0 || y + rowsNeeded * 5.5 > 195) startPage(y !== 0);
+      };
+
+      sparePanelSummary.surfaceRows.forEach((surface) => {
+        ensureRoom(surface.bucketRows.length + 3);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(12);
+        pdf.text(surface.name, colX.type, y);
+        y += 6;
+        pdf.setFillColor(226, 232, 240);
+        pdf.rect(10, y - 5, 274, 7, "F");
+        pdf.setFontSize(8);
+        pdf.text("Panel Type", colX.type, y);
+        pdf.text("Used", colX.used, y, { align: "right" });
+        pdf.text(`Spare (${formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 0)}%)`, colX.spare, y, { align: "right" });
+        pdf.text("Rounded + Spare", colX.rounded, y, { align: "right" });
+        y += 6;
+        pdf.setFont("helvetica", "normal");
+        surface.bucketRows.forEach((row) => {
+          pdf.text(row.label, colX.type, y);
+          pdf.text(formatNumber(row.used), colX.used, y, { align: "right" });
+          pdf.text(formatNumber(row.spare), colX.spare, y, { align: "right" });
+          pdf.text(formatNumber(row.rounded), colX.rounded, y, { align: "right" });
+          y += 5.5;
+        });
+        pdf.setFont("helvetica", "bold");
+        pdf.text("Subtotal", colX.type, y);
+        pdf.text(formatNumber(surface.subtotal.used), colX.used, y, { align: "right" });
+        pdf.text(formatNumber(surface.subtotal.spare), colX.spare, y, { align: "right" });
+        pdf.text(formatNumber(surface.subtotal.rounded), colX.rounded, y, { align: "right" });
+        pdf.setFont("helvetica", "normal");
+        y += 10;
+      });
+
+      if (sparePanelSummary.multiSurface) {
+        ensureRoom(2);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(11);
+        pdf.setTextColor(3, 105, 161);
+        pdf.text(
+          `Grand total: ${formatNumber(sparePanelSummary.grandTotal.used)} used, ${formatNumber(sparePanelSummary.grandTotal.spare)} spare, ${formatNumber(sparePanelSummary.grandTotal.rounded)} incl. spare`,
+          colX.type,
+          y,
+        );
+        pdf.setTextColor(15, 23, 42);
+        pdf.setFont("helvetica", "normal");
+      }
+    };
+
     pdf.setFont("helvetica", "bold");
     pdf.setFontSize(18);
     pdf.text(safeProjectName, 10, 12);
@@ -3429,7 +3611,7 @@ const exportJson = () => {
     drawInfoBox("Deployment + Stock", [
       `Spare panels: ${sparePanels}`,
       `Panels incl. spare: ${totalPanelsWithSpare}`,
-      `Boxes: ${boxCount} (${boxSparePanels} spare in boxes)`,
+      `Boxes: ${boxCount} (${boxSparePanels} additional spare)`,
       `Backup signal loop: ${backupSignalLoop ? `Yes, effective signal ports ${effectiveSignalPortsUsed}` : "No"}`,
       `Reinforcement plate: ${includeReinforcementPlate ? "Yes" : "No"}`,
       `Deployment type: ${deploymentType || "Not selected"}`,
@@ -3463,6 +3645,7 @@ const exportJson = () => {
     const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
     const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
     if (nextStockIndex < visibleStockRows.length) drawStockPage(nextStockIndex);
+    drawSparePanelsPage();
     drawPortsInUsePage();
     if (subScreens.length > 0) drawSubScreensSummaryPage();
     drawLayoutPage(backLayoutCanvas, "Back View");
@@ -5778,24 +5961,69 @@ const exportJson = () => {
             </div>
           </CardHeader>
           <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
-            <div className="grid gap-3 md:grid-cols-4">
+            <div className="grid gap-3 md:grid-cols-3">
               <div className="rounded border border-slate-700 bg-slate-900 p-3">
                 <div className="text-xs text-slate-300">Spare ratio</div>
-                <div className="text-lg font-semibold">{formatNumber(panel.defaults.spareRatio * 100, 1)}%</div>
+                <div className="text-lg font-semibold">{formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 1)}%</div>
               </div>
               <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                <div className="text-xs text-slate-300">Spare panels</div>
-                <div className="text-lg font-semibold">{sparePanels}</div>
+                <div className="text-xs text-slate-300">Total spare panels</div>
+                <div className="text-lg font-semibold">{sparePanelSummary.grandTotal.spare}</div>
               </div>
               <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                <div className="text-xs text-slate-300">Panels incl. spare</div>
-                <div className="text-lg font-semibold">{totalPanelsWithSpare}</div>
+                <div className="text-xs text-slate-300">Total incl. spare</div>
+                <div className="text-lg font-semibold">{sparePanelSummary.grandTotal.rounded}</div>
               </div>
-              <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                <div className="text-xs text-slate-300">Boxes</div>
-                <div className="text-lg font-semibold">{boxCount}</div>
-                <div className="text-xs text-slate-400">Box spare panels: {boxSparePanels}</div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Spare Panels by Surface{sparePanelSummary.multiSurface ? " & Type" : ""}
               </div>
+              {sparePanelSummary.surfaceRows.length === 0 ? (
+                <div className="text-sm text-slate-400">No panels placed yet.</div>
+              ) : (
+                sparePanelSummary.surfaceRows.map((surface) => (
+                  <div key={surface.name} className="overflow-x-auto rounded border border-slate-700">
+                    <table className="min-w-full table-fixed text-left text-sm">
+                      <thead className="bg-slate-900">
+                        {sparePanelSummary.multiSurface ? (
+                          <tr>
+                            <th className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-300" colSpan={4}>{surface.name}</th>
+                          </tr>
+                        ) : null}
+                        <tr>
+                          <th className="w-40 px-3 py-2">Panel Type</th>
+                          <th className="w-24 px-3 py-2 text-right">Used</th>
+                          <th className="w-28 px-3 py-2 text-right">Spare ({formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 0)}%)</th>
+                          <th className="w-32 px-3 py-2 text-right">Rounded + Spare</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {surface.bucketRows.map((row) => (
+                          <tr key={row.label} className="border-t border-slate-700">
+                            <td className="px-3 py-1.5">{row.label}</td>
+                            <td className="px-3 py-1.5 text-right">{formatNumber(row.used)}</td>
+                            <td className="px-3 py-1.5 text-right">{formatNumber(row.spare)}</td>
+                            <td className="px-3 py-1.5 text-right font-semibold">{formatNumber(row.rounded)}</td>
+                          </tr>
+                        ))}
+                        <tr className="border-t border-slate-600 bg-slate-900/60 font-semibold">
+                          <td className="px-3 py-1.5">Subtotal</td>
+                          <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.used)}</td>
+                          <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.spare)}</td>
+                          <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.rounded)}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                ))
+              )}
+              {sparePanelSummary.multiSurface ? (
+                <div className="rounded border border-sky-700/60 bg-sky-900/20 p-3 text-sm">
+                  <span className="font-semibold">Grand total:</span> {formatNumber(sparePanelSummary.grandTotal.used)} used, {formatNumber(sparePanelSummary.grandTotal.spare)} spare, {formatNumber(sparePanelSummary.grandTotal.rounded)} incl. spare
+                </div>
+              ) : null}
             </div>
 
             <div className="overflow-x-auto rounded border border-slate-700">

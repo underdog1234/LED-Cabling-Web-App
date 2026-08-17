@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.31.0`
+Version `0.32.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,15 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.32.1
+
+- Reverted MT's spare ratio back to 0% (a deliberate catalog choice, not an oversight - v0.32.0 had mistakenly changed it to match MG9's 7%)
+- Reworded the PDF's "Boxes: X (Y spare in boxes)" line to "Boxes: X (Y additional spare)" - the old wording used "spare" twice in a confusing way
+
+## Recent Changes In v0.32.0
+
+- Reworked how spare panels are shown: a new "Spare Panels by Surface" breakdown lists panels used, spare (7% of used), and spare rounded up to a full box, for each surface (each Sub-Screen plus "Unassigned" if any panels aren't in one, or just "Whole Layout" with no Sub-Screens) and each panel type (MG9 Standard, MG9 Corner, MG9 Triangle, MG9 Curved, MT) - with a subtotal per surface and a grand total when there's more than one. MG9 Standard/Corner round up to boxes of 10 and MT rounds up to boxes of 6; shaped panels (Triangle/Curved) are bought individually so their spare is added as-is, unrounded. MT panels now also get the same 7% spare allowance as MG9 (previously 0%). Shown in both the web app's Stock Calculations card and its own page in the PDF report
 
 ## Recent Changes In v0.31.0
 
