@@ -4,11 +4,10 @@
 
 The main site (`led-cabling-web`) is just static files with no server behind it — anything placed in its code is visible to anyone who visits the site (view source / browser dev tools). Your Rentman API token can't go there.
 
-So instead, this folder is a *tiny separate program* ("a Worker") that lives on Cloudflare, a free hosting service for exactly this kind of thing. It holds your Rentman token privately and answers three simple questions when the main site asks:
+So instead, this folder is a *tiny separate program* ("a Worker") that lives on Cloudflare, a free hosting service for exactly this kind of thing. It holds your Rentman token privately and answers two simple questions when the main site asks, using this tool's own item codes directly (they already match Rentman's real equipment codes, so there's no separate mapping step to maintain):
 
 1. "What's the current stock for these items?"
-2. "What's available between these two dates?"
-3. "Search Rentman equipment matching this text" (for the mapping picker)
+2. "What's required by other projects between these two dates, and what's left over?"
 
 It never writes anything to Rentman — read-only, one-way.
 
@@ -120,7 +119,7 @@ Wait for it to finish (green checkmark, usually under a minute).
 
 ## Step 9 — Check it worked
 
-Open your live site, expand **Stock Calculations**, then expand the **Rentman Integration** card. The amber "Not configured" message should be gone. Map an item to a Rentman equipment record and click **Refresh Stock** — you should see real numbers appear.
+Open your live site, expand **Stock Calculations**, then expand the **Rentman Integration** card. The amber "Not configured" message should be gone. Click **Get Current Stock** — you should see a comparison of real Rentman numbers against what's currently stored, with no mapping step needed first.
 
 You're done! This was all one-time setup — you won't need to repeat any of it unless you rotate your token or move the site to a new address.
 
@@ -147,13 +146,12 @@ You're done! This was all one-time setup — you won't need to repeat any of it 
 
 For anyone editing the Worker's code rather than just deploying it:
 
-This Worker is a separate deployable from the main site — it is **not** built or deployed by `npm run build` / the GitHub Pages workflow. It has no write access to Rentman at all; all three endpoints are read-only GETs:
+This Worker is a separate deployable from the main site — it is **not** built or deployed by `npm run build` / the GitHub Pages workflow. It has no write access to Rentman at all; both endpoints are read-only GETs, and both look equipment up by `codes` directly (no id-mapping step - this catalog's codes already are Rentman's own equipment codes):
 
 - `GET /equipment-stock?codes=a,b,c` → `{ [code]: { name, currentQuantity } | null }`
-- `GET /equipment-availability?codes=a,b,c&from=YYYY-MM-DD&to=YYYY-MM-DD` → `{ [code]: number | null }` (on-hand stock minus quantity already booked on other Rentman projects whose plan period overlaps the given range)
-- `GET /equipment-search?query=...` → `[{ id, code, name }]` (used by the mapping picker in the app)
+- `GET /equipment-availability?codes=a,b,c&from=YYYY-MM-DD&to=YYYY-MM-DD` → `{ [code]: { totalStock, totalRequired, remaining, projects: [{ projectName, projectNumber, status, quantity, planPeriodStart, planPeriodEnd }] } | null }` - `remaining` (`totalStock - totalRequired`) is deliberately not clamped at 0, since a negative number is the shortage this endpoint exists to surface. `projects` lists every other Rentman project whose plan period overlaps `[from, to]` for that equipment.
 
-All three require a `codes`/`query` param, are CORS-restricted to `ALLOWED_ORIGIN`, and return `502` with an error message if the underlying Rentman API call fails.
+Both require a `codes` param (plus `from`/`to` for availability), are CORS-restricted to `ALLOWED_ORIGIN`, and return `502` with an error message if the underlying Rentman API call fails.
 
 ### Local development
 

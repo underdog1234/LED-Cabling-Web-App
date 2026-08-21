@@ -27,10 +27,11 @@ import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayo
 import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./novastar/processorModels";
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
-import { applyLiveRentmanData, baseCodeOf, isMappableStockRow, type LiveStockEntry } from "./rentman/applyLiveRentmanData";
+import { applyStockOverrides, baseCodeOf, buildStockComparison, loadStockOverrides, saveStockOverrides, type StockComparisonRow, type StockOverrides } from "./rentman/stockOverrides";
 import { fetchEquipmentStock, fetchEquipmentAvailability } from "./rentman/rentmanClient";
-import { loadEquipmentMapping, saveEquipmentMapping, type EquipmentMapping, type RentmanEquipmentRef } from "./rentman/equipmentMapping";
-import RentmanPanel, { type MappableItem } from "./rentman/RentmanPanel";
+import RentmanPanel from "./rentman/RentmanPanel";
+import StockComparisonModal from "./rentman/StockComparisonModal";
+import AvailabilityModal, { type AvailabilityRow } from "./rentman/AvailabilityModal";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -44,7 +45,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.33.0";
+const APP_VERSION = "0.34.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -227,8 +228,6 @@ export type StockRow = {
   method: string;
   spare?: number;
   rounded?: number;
-  /** Live availability for the selected date range, from Rentman - see src/rentman/. */
-  available?: number;
 };
 
 // A panel in the free workspace. x/y are the TOP-LEFT corner in workspace
@@ -1527,17 +1526,19 @@ export default function App() {
   const [wholeCanvasInputId, setWholeCanvasInputId] = useState<number | null>(null);
   const [isGeneratingNovaStarFile, setIsGeneratingNovaStarFile] = useState(false);
   // Rentman Integration (see src/rentman/) - project-specific date range is
-  // regular state (saved/loaded with the project); the code -> Rentman
-  // equipment mapping is account-wide, so it's loaded from/persisted to
-  // localStorage instead (see equipmentMapping.ts), not this project's JSON.
+  // regular state (saved/loaded with the project); confirmed stock overrides
+  // are account-wide, so they're loaded from/persisted to localStorage
+  // instead (see stockOverrides.ts), not this project's JSON.
   const [rentmanDateFrom, setRentmanDateFrom] = useState("");
   const [rentmanDateTo, setRentmanDateTo] = useState("");
-  const [equipmentMapping, setEquipmentMapping] = useState<EquipmentMapping>(() => loadEquipmentMapping());
-  const [liveStock, setLiveStock] = useState<Record<string, LiveStockEntry>>({});
-  const [liveAvailable, setLiveAvailable] = useState<Record<string, number>>({});
-  const [rentmanRefreshing, setRentmanRefreshing] = useState(false);
-  const [rentmanRefreshError, setRentmanRefreshError] = useState<string | null>(null);
-  const [rentmanLastRefreshedAt, setRentmanLastRefreshedAt] = useState<Date | null>(null);
+  const [stockOverrides, setStockOverrides] = useState<StockOverrides>(() => loadStockOverrides());
+  const [stockChecking, setStockChecking] = useState(false);
+  const [stockCheckError, setStockCheckError] = useState<string | null>(null);
+  const [lastStockCheckedAt, setLastStockCheckedAt] = useState<Date | null>(null);
+  const [stockComparisonRows, setStockComparisonRows] = useState<StockComparisonRow[] | null>(null);
+  const [availabilityChecking, setAvailabilityChecking] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+  const [availabilityRows, setAvailabilityRows] = useState<AvailabilityRow[] | null>(null);
   // Drag gesture for repositioning a sub-screen (or the whole layout, id=null)
   // on the output canvas - separate pixel-space analogue of moveDrag.
   const [canvasDrag, setCanvasDrag] = useState<{ id: string | null; startX: number; startY: number; dx: number; dy: number } | null>(null);
@@ -1662,12 +1663,12 @@ export default function App() {
     });
   };
 
-  // Persist the Rentman equipment mapping on every edit (unlike this file's
-  // other localStorage keys, which are one-shot handoffs read once then
-  // removed - see equipmentMapping.ts).
+  // Persist confirmed Rentman stock overrides on every edit (unlike this
+  // file's other localStorage keys, which are one-shot handoffs read once
+  // then removed - see stockOverrides.ts).
   useEffect(() => {
-    saveEquipmentMapping(equipmentMapping);
-  }, [equipmentMapping]);
+    saveStockOverrides(stockOverrides);
+  }, [stockOverrides]);
 
   useEffect(() => {
     setPanelsPerPowerOutlet((prev) => {
@@ -2437,12 +2438,6 @@ export default function App() {
     }
 
     rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
-    if (mg9Boxes > 0) {
-      rowsOut.push({ code: "BOX-MG9", name: "Boxes required (MG9)", required: mg9Boxes, stock: mg9Boxes, net: 0, method: `ceil(${mg9Count + mg9Spare}/${mg9Defaults.panelsPerBox})` });
-    }
-    if (mtBoxes > 0) {
-      rowsOut.push({ code: "BOX-MT", name: "Boxes required (MT)", required: mtBoxes, stock: mtBoxes, net: 0, method: `ceil(${mtCount + mtSpare}/${mtDefaults.panelsPerBox})` });
-    }
 
     if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
       if (topRowBars.mg9 > 0) {
@@ -2548,79 +2543,75 @@ export default function App() {
   // The on-screen table, PDF table and CSV export all list order/pull
   // quantities, not raw internal line items - a row whose real order
   // quantity (rounded, spare included) comes out to 0 is just noise there.
-  // Live Rentman stock/availability (see src/rentman/) is overlaid HERE,
+  // Confirmed Rentman stock overrides (see src/rentman/) are overlaid HERE,
   // inside this one useMemo, rather than as a separate variable each
   // consumer has to remember to switch to - every real consumer (the
   // on-screen table, CSV export, PDF table, and shortfallRows right below)
   // already reads visibleStockRows, so they all become Rentman-aware for
-  // free. Empty liveStock/liveAvailable maps make applyLiveRentmanData a
-  // full no-op, so this is a zero-behaviour-change default.
+  // free. An empty stockOverrides map makes applyStockOverrides a full
+  // no-op, so this is a zero-behaviour-change default until you actually
+  // apply a Get Current Stock result.
   const visibleStockRows = useMemo(
-    () => applyLiveRentmanData(stockRows.filter((row) => (row.rounded ?? row.required) > 0), liveStock, liveAvailable),
-    [stockRows, liveStock, liveAvailable],
+    () => applyStockOverrides(stockRows.filter((row) => (row.rounded ?? row.required) > 0), stockOverrides),
+    [stockRows, stockOverrides],
   );
   const shortfallRows = visibleStockRows.filter((row) => row.net < 0);
-  const hasLiveAvailableColumn = visibleStockRows.some((row) => typeof row.available === "number");
-  // Every real (orientation-normalized, synthetic-box-excluded) stock code
-  // currently on the wall, for the equipment-mapping UI - one entry per
-  // distinct base code, first-seen name wins.
-  const mappableRentmanItems = useMemo<MappableItem[]>(() => {
+  // Every stock code (orientation-normalized) currently on the wall - one
+  // entry per distinct base code, first-seen
+  // name wins. These codes ARE Rentman's own equipment codes (confirmed
+  // live against the real account), so no mapping step is needed - they're
+  // sent to the Worker directly.
+  const rentmanEligibleItems = useMemo(() => {
     const seen = new Map<string, string>();
-    stockRows.filter(isMappableStockRow).forEach((row) => {
+    stockRows.forEach((row) => {
       const code = baseCodeOf(row.code);
       if (!seen.has(code)) seen.set(code, row.name);
     });
     return Array.from(seen, ([code, name]) => ({ code, name }));
   }, [stockRows]);
 
-  const refreshRentmanStock = async () => {
-    // equipmentMapping is keyed by OUR local stock code (e.g. "12224"), but
-    // its value's own .code is Rentman's equipment code (e.g. "877") - the
-    // Worker/Rentman only know about the latter, so the fetch has to go out
-    // keyed by ref.code, then get translated back to our local codes before
-    // being stored (applyLiveRentmanData looks liveStock up by local code).
-    const mappedEntries = mappableRentmanItems
-      .map((item) => ({ localCode: item.code, ref: equipmentMapping[item.code] }))
-      .filter((entry): entry is { localCode: string; ref: RentmanEquipmentRef } => Boolean(entry.ref));
-    if (!mappedEntries.length) return;
-    const rentmanCodes = mappedEntries.map((entry) => entry.ref.code);
-    setRentmanRefreshing(true);
-    setRentmanRefreshError(null);
+  const checkRentmanStock = async () => {
+    if (!rentmanEligibleItems.length) return;
+    const codes = rentmanEligibleItems.map((item) => item.code);
+    setStockChecking(true);
+    setStockCheckError(null);
     try {
-      const stockResult = await fetchEquipmentStock(rentmanCodes);
-      const nextStock: Record<string, LiveStockEntry> = {};
-      mappedEntries.forEach(({ localCode, ref }) => {
-        const entry = stockResult[ref.code];
-        if (entry) nextStock[localCode] = entry;
+      const fetched = await fetchEquipmentStock(codes);
+      const currentRows = rentmanEligibleItems.map((item) => {
+        const effective = visibleStockRows.find((row) => baseCodeOf(row.code) === item.code);
+        return { code: item.code, name: item.name, stock: effective ? effective.stock : 0 };
       });
-      setLiveStock(nextStock);
-
-      if (rentmanDateFrom && rentmanDateTo) {
-        const availabilityResult = await fetchEquipmentAvailability(rentmanCodes, rentmanDateFrom, rentmanDateTo);
-        const nextAvailable: Record<string, number> = {};
-        mappedEntries.forEach(({ localCode, ref }) => {
-          const qty = availabilityResult[ref.code];
-          if (typeof qty === "number") nextAvailable[localCode] = qty;
-        });
-        setLiveAvailable(nextAvailable);
-      } else {
-        setLiveAvailable({});
-      }
-      setRentmanLastRefreshedAt(new Date());
+      setStockComparisonRows(buildStockComparison(currentRows, fetched));
+      setLastStockCheckedAt(new Date());
     } catch (err) {
-      setRentmanRefreshError(err instanceof Error ? err.message : "Rentman refresh failed");
+      setStockCheckError(err instanceof Error ? err.message : "Rentman stock check failed");
     } finally {
-      setRentmanRefreshing(false);
+      setStockChecking(false);
     }
   };
 
-  const setRentmanEquipmentMapping = (code: string, ref: RentmanEquipmentRef | null) => {
-    setEquipmentMapping((prev) => {
-      if (ref) return { ...prev, [code]: ref };
-      const next = { ...prev };
-      delete next[code];
-      return next;
-    });
+  const applyStockComparison = (overrides: Record<string, number>) => {
+    setStockOverrides((prev) => ({ ...prev, ...overrides }));
+    setStockComparisonRows(null);
+  };
+
+  const checkRentmanAvailability = async () => {
+    if (!rentmanEligibleItems.length || !rentmanDateFrom || !rentmanDateTo) return;
+    const codes = rentmanEligibleItems.map((item) => item.code);
+    setAvailabilityChecking(true);
+    setAvailabilityError(null);
+    try {
+      const fetched = await fetchEquipmentAvailability(codes, rentmanDateFrom, rentmanDateTo);
+      const rows: AvailabilityRow[] = rentmanEligibleItems.flatMap((item) => {
+        const entry = fetched[item.code];
+        return entry ? [{ code: item.code, name: item.name, ...entry }] : [];
+      });
+      setAvailabilityRows(rows);
+    } catch (err) {
+      setAvailabilityError(err instanceof Error ? err.message : "Rentman availability check failed");
+    } finally {
+      setAvailabilityChecking(false);
+    }
   };
   const safeProjectName = projectName.trim() || "Untitled Project";
   const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
@@ -3428,15 +3419,7 @@ const exportJson = () => {
       );
     };
 
-    // Two column layouts: the plain 5-numeric-column one used whenever
-    // Rentman availability isn't in play (byte-identical to before this
-    // feature existed), and a 6-column one (Item's wrap narrowed to make
-    // room) only when hasLiveAvailableColumn is actually true - so a
-    // project that isn't using Rentman renders this table exactly as it
-    // always has.
-    const stockCols = hasLiveAvailableColumn
-      ? { itemWrap: 104, required: 160, spare: 182, rounded: 208, stock: 232, net: 256, available: 284 }
-      : { itemWrap: 128, required: 174, spare: 198, rounded: 226, stock: 252, net: 282, available: null };
+    const stockCols = { itemWrap: 128, required: 174, spare: 198, rounded: 226, stock: 252, net: 282 };
     const drawStockTable = (startIndex: number, startY: number, maxY: number) => {
       let y = startY;
       const drawHeader = () => {
@@ -3451,7 +3434,6 @@ const exportJson = () => {
         pdf.text("Rounded + Spare", stockCols.rounded, y, { align: "right" });
         pdf.text("Stock", stockCols.stock, y, { align: "right" });
         pdf.text("Net", stockCols.net, y, { align: "right" });
-        if (stockCols.available) pdf.text("Available", stockCols.available, y, { align: "right" });
         y += 6;
         pdf.setFont("helvetica", "normal");
       };
@@ -3470,7 +3452,6 @@ const exportJson = () => {
         pdf.text(formatNumber(row.rounded ?? row.required), stockCols.rounded, y, { align: "right" });
         pdf.text(formatNumber(row.stock), stockCols.stock, y, { align: "right" });
         pdf.text(formatNumber(row.net), stockCols.net, y, { align: "right" });
-        if (stockCols.available) pdf.text(typeof row.available === "number" ? formatNumber(row.available) : "-", stockCols.available, y, { align: "right" });
         y += 6;
       }
       return visibleStockRows.length;
@@ -6079,14 +6060,20 @@ const exportJson = () => {
           dateTo={rentmanDateTo}
           onDateFromChange={setRentmanDateFrom}
           onDateToChange={setRentmanDateTo}
-          mappableItems={mappableRentmanItems}
-          mapping={equipmentMapping}
-          onMap={setRentmanEquipmentMapping}
-          onRefresh={refreshRentmanStock}
-          refreshing={rentmanRefreshing}
-          refreshError={rentmanRefreshError}
-          lastRefreshedAt={rentmanLastRefreshedAt}
+          onCheckStock={checkRentmanStock}
+          stockChecking={stockChecking}
+          stockCheckError={stockCheckError}
+          lastStockCheckedAt={lastStockCheckedAt}
+          onCheckAvailability={checkRentmanAvailability}
+          availabilityChecking={availabilityChecking}
+          availabilityError={availabilityError}
         />
+        {stockComparisonRows ? (
+          <StockComparisonModal rows={stockComparisonRows} onApply={applyStockComparison} onClose={() => setStockComparisonRows(null)} />
+        ) : null}
+        {availabilityRows ? (
+          <AvailabilityModal rows={availabilityRows} dateFrom={rentmanDateFrom} dateTo={rentmanDateTo} onClose={() => setAvailabilityRows(null)} />
+        ) : null}
 
         <Card className="border-slate-700 bg-slate-800 print-card" collapsible defaultOpen={false}>
           <CardHeader>
@@ -6174,7 +6161,6 @@ const exportJson = () => {
                     <th className="w-32 px-3 py-2 text-right">Rounded + Spare</th>
                     <th className="w-20 px-3 py-2 text-right">Stock</th>
                     <th className="w-24 px-3 py-2 text-right">Net</th>
-                    {hasLiveAvailableColumn ? <th className="w-28 px-3 py-2 text-right">Available (range)</th> : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -6187,9 +6173,6 @@ const exportJson = () => {
                       <td className="px-3 py-2 text-right">{formatNumber(row.rounded ?? row.required)}</td>
                       <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
                       <td className={`px-3 py-2 text-right font-semibold ${row.net < 0 ? "text-red-300" : "text-emerald-300"}`}>{formatNumber(row.net)}</td>
-                      {hasLiveAvailableColumn ? (
-                        <td className="px-3 py-2 text-right">{typeof row.available === "number" ? formatNumber(row.available) : "-"}</td>
-                      ) : null}
                     </tr>
                   ))}
                 </tbody>

@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.33.0`
+Version `0.34.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -19,8 +19,16 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds), optionally included in the PDF export
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
-- Check stock levels, shortfalls, and deployment hardware requirements, optionally overridden with live on-hand stock counts and date-range availability pulled from **Rentman** (see [Rentman Integration](#rentman-integration))
+- Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated) and a per-project availability breakdown for a chosen date range
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.34.0
+
+- Removed the manual "map each item to Rentman equipment" step - this catalog's stock codes already match Rentman's own equipment codes, so **Get Current Stock** looks items up directly, no picker needed
+- **Get Current Stock** now opens a review popup comparing Rentman's quantity against what's currently stored (old vs. new vs. difference, plus Rentman's own name for the item) - nothing is updated until you click Apply
+- Replaced the single "Available (range)" column with a **Check Availability** popup: for each item, total Rentman stock, how much other projects need in the chosen date range, which projects (name, number, status, dates), and what's left over - makes a potential shortage easy to spot before committing to it
+- Removed `BOX-MG9` and `BOX-MT` from Stock Calculations - by the time panel quantity is rounded to full boxes, that number already reflects complete boxes, so a separate boxes-required line added nothing
+- While verifying this catalog's codes against the real Rentman account, found 4 that resolve to a different item than their local name suggests (a Dance Floor floor-reinforcement bar, floor taper pin, and tempered glass cover, plus the Triangle/Curved panel codes being swapped) - not corrected automatically since Rentman's item is the authority here, but the new comparison popup always shows Rentman's real name so a mismatch like this is visible before you apply anything
 
 ## Recent Changes In v0.33.0
 
@@ -395,6 +403,6 @@ Setup (one-time):
 
 1. Deploy the Worker - see [`rentman-proxy/README.md`](./rentman-proxy/README.md) for the full steps (`wrangler secret put`, `wrangler deploy`).
 2. Copy [`.env.example`](./.env.example) to `.env` for local dev, and/or add a `RENTMAN_PROXY_URL` repository **variable** (not secret) under `Settings -> Secrets and variables -> Actions -> Variables`) so the GitHub Pages build picks it up via [`deploy-pages.yml`](./.github/workflows/deploy-pages.yml).
-3. Rebuild/redeploy. The "Rentman Integration" card (in Stock Calculations) will show as configured; map each stock item to its Rentman equipment and click Refresh.
+3. Rebuild/redeploy. The "Rentman Integration" card (in Stock Calculations) will show as configured; click **Get Current Stock** or **Check Availability** - no mapping step needed, since this catalog's codes already match Rentman's own equipment codes.
 
 Left unset, the card just shows "Not configured" and Stock Calculations keeps using its built-in numbers - nothing else changes.

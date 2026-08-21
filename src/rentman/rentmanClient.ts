@@ -4,10 +4,26 @@
 // Worker's own URL isn't secret - it's set at build time via the
 // VITE_RENTMAN_PROXY_URL env var (see led-cabling-web/.env.example) rather
 // than hardcoded, since it depends on the user's own Cloudflare deployment.
-import type { LiveStockEntry } from "./applyLiveRentmanData";
+export type LiveStockEntry = { name: string; currentQuantity: number };
 
-export type { LiveStockEntry };
-export type EquipmentSearchResult = { id: number; code: string; name: string };
+export type EquipmentAvailabilityProject = {
+  projectName: string;
+  projectNumber: number | string;
+  /** The Rentman subproject's status (e.g. "Confirmed") - Rentman has no status field on the project itself, only its subproject(s). Null if the booking's subproject has no status set. */
+  status: string | null;
+  quantity: number;
+  planPeriodStart: string;
+  planPeriodEnd: string;
+};
+
+export type EquipmentAvailability = {
+  totalStock: number;
+  /** Sum of quantity required across every project overlapping the requested range. */
+  totalRequired: number;
+  /** totalStock - totalRequired. Deliberately NOT clamped at 0 - negative means overbooked. */
+  remaining: number;
+  projects: EquipmentAvailabilityProject[];
+};
 
 const PROXY_URL = (import.meta.env.VITE_RENTMAN_PROXY_URL ?? "").replace(/\/$/, "");
 
@@ -37,11 +53,11 @@ export async function fetchEquipmentStock(codes: string[]): Promise<Record<strin
   return proxyGet("/equipment-stock", { codes: codes.join(",") });
 }
 
-export async function fetchEquipmentAvailability(codes: string[], from: string, to: string): Promise<Record<string, number | null>> {
+export async function fetchEquipmentAvailability(
+  codes: string[],
+  from: string,
+  to: string,
+): Promise<Record<string, EquipmentAvailability | null>> {
   if (!codes.length || !from || !to) return {};
   return proxyGet("/equipment-availability", { codes: codes.join(","), from, to });
-}
-
-export async function searchEquipment(query: string): Promise<EquipmentSearchResult[]> {
-  return proxyGet("/equipment-search", { query });
 }
