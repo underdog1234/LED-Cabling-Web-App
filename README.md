@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.32.1`
+Version `0.33.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -19,8 +19,16 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds), optionally included in the PDF export
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
-- Check stock levels, shortfalls, and deployment hardware requirements
+- Check stock levels, shortfalls, and deployment hardware requirements, optionally overridden with live on-hand stock counts and date-range availability pulled from **Rentman** (see [Rentman Integration](#rentman-integration))
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.33.0
+
+- Added a **Rentman Integration** card to Stock Calculations: map each stock item to its matching Rentman equipment record (searchable picker), then click Refresh to pull live on-hand stock counts, overriding the built-in catalog numbers everywhere they're used (on-screen table, CSV export, PDF report, Shortfalls card)
+- Set a date range in the same card to also show an **Available (range)** column - stock minus whatever's already booked on other Rentman projects overlapping those dates - in the on-screen table and PDF stock table
+- Equipment mappings are saved in the browser (per-machine, not per-project); the date range is saved with the project file (v6 format - older saves still open fine)
+- Requires a small separate one-time deployment (a Cloudflare Worker that holds the Rentman API token server-side, since this app is a static site with no backend of its own) - see [Rentman Integration](#rentman-integration) below. Without it, the card just shows "Not configured" and everything else works exactly as before
+- Investigated pushing planned items to an existing Rentman project by number, as originally requested, but Rentman's public API has no way to add equipment to an existing project today (their own roadmap lists it as not yet shipped) - dropped from scope, may revisit if Rentman adds it
 
 ## Recent Changes In v0.32.1
 
@@ -378,3 +386,15 @@ To publish:
 5. Wait for the `Deploy GitHub Pages` workflow to finish.
 
 The site uses a relative Vite base path so it works on repository Pages URLs.
+
+## Rentman Integration
+
+Optional. Lets Stock Calculations pull live on-hand stock counts and date-range availability from [Rentman](https://www.rentman.io/). This app is a static site with no backend, and the Rentman API token must never end up in anything shipped to the browser - so this works through a small separate Cloudflare Worker that holds the token server-side and proxies read-only requests to Rentman.
+
+Setup (one-time):
+
+1. Deploy the Worker - see [`rentman-proxy/README.md`](./rentman-proxy/README.md) for the full steps (`wrangler secret put`, `wrangler deploy`).
+2. Copy [`.env.example`](./.env.example) to `.env` for local dev, and/or add a `RENTMAN_PROXY_URL` repository **variable** (not secret) under `Settings -> Secrets and variables -> Actions -> Variables`) so the GitHub Pages build picks it up via [`deploy-pages.yml`](./.github/workflows/deploy-pages.yml).
+3. Rebuild/redeploy. The "Rentman Integration" card (in Stock Calculations) will show as configured; map each stock item to its Rentman equipment and click Refresh.
+
+Left unset, the card just shows "Not configured" and Stock Calculations keeps using its built-in numbers - nothing else changes.

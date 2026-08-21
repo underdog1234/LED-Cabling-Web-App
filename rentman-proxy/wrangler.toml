@@ -1,0 +1,21 @@
+name = "led-cabling-rentman-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Read-only proxy in front of the Rentman API (api.rentman.net) so the
+# RENTMAN_API_TOKEN never has to live in the led-cabling-web static
+# frontend's source (that site ships everything in src/ to every visitor's
+# browser - see ../src/rentman/rentmanClient.ts for why this exists at all).
+#
+# Set the two values below before your first `wrangler deploy`:
+#
+#   1. RENTMAN_API_TOKEN - a secret, NOT a var. Never put it in this file.
+#      Set it with: npm run secret:token   (prompts, stores encrypted)
+#
+#   2. ALLOWED_ORIGIN - the exact origin (scheme+host, no trailing slash)
+#      the deployed led-cabling-web site is served from, e.g.
+#      "https://<your-github-username>.github.io". Used for the
+#      Access-Control-Allow-Origin response header - deliberately NOT "*",
+#      so only your own deployed app can call this Worker from a browser.
+[vars]
+ALLOWED_ORIGIN = "https://underdog1234.github.io"

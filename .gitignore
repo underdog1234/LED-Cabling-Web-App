@@ -12,6 +12,20 @@ dist
 dist-ssr
 *.local
 
+# Cloudflare Worker (rentman-proxy) local dev artifacts - .dev.vars holds a
+# real RENTMAN_API_TOKEN for local `wrangler dev` testing and must never be
+# committed (the real token lives only as an encrypted `wrangler secret`).
+.wrangler
+.dev.vars
+
+# Local-only VITE_RENTMAN_PROXY_URL overrides (not secret, just per-machine -
+# the deployed build gets this from a GitHub Actions repository variable
+# instead, see .env.example).
+.env
+.env.local
+.env.production
+.env.production.local
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

@@ -35,6 +35,12 @@ jobs:
 
       - name: Build site
         run: npm run build
+        env:
+          # Not secret - just the deployed rentman-proxy Worker's URL. Set as
+          # a repository VARIABLE (Settings -> Secrets and variables ->
+          # Actions -> Variables), not a secret - see rentman-proxy/README.md.
+          # Left unset, the Rentman Integration card just stays unconfigured.
+          VITE_RENTMAN_PROXY_URL: ${{ vars.RENTMAN_PROXY_URL }}
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

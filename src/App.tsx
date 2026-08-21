@@ -27,6 +27,10 @@ import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayo
 import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./novastar/processorModels";
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
+import { applyLiveRentmanData, baseCodeOf, isMappableStockRow, type LiveStockEntry } from "./rentman/applyLiveRentmanData";
+import { fetchEquipmentStock, fetchEquipmentAvailability } from "./rentman/rentmanClient";
+import { loadEquipmentMapping, saveEquipmentMapping, type EquipmentMapping, type RentmanEquipmentRef } from "./rentman/equipmentMapping";
+import RentmanPanel, { type MappableItem } from "./rentman/RentmanPanel";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -40,7 +44,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.32.1";
+const APP_VERSION = "0.33.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -214,7 +218,7 @@ export type PanelVariantKey = keyof typeof PANEL_VARIANTS;
 export type PowerDistroKey = keyof typeof POWER_DISTROS;
 type DeploymentType = (typeof DEPLOYMENT_TYPES)[keyof typeof DEPLOYMENT_TYPES];
 
-type StockRow = {
+export type StockRow = {
   code: string;
   name: string;
   required: number;
@@ -223,6 +227,8 @@ type StockRow = {
   method: string;
   spare?: number;
   rounded?: number;
+  /** Live availability for the selected date range, from Rentman - see src/rentman/. */
+  available?: number;
 };
 
 // A panel in the free workspace. x/y are the TOP-LEFT corner in workspace
@@ -368,6 +374,9 @@ type OpenJsonPayload = {
   inputMode?: InputMode;
   /** v5: used only when inputMode is "whole". */
   wholeCanvasInputId?: number | null;
+  /** v6: Rentman availability date range - see src/rentman/. */
+  rentmanDateFrom?: string;
+  rentmanDateTo?: string;
 };
 
 const gcd = (a: number, b: number): number => {
@@ -1517,6 +1526,18 @@ export default function App() {
   // Used only when inputMode === "whole".
   const [wholeCanvasInputId, setWholeCanvasInputId] = useState<number | null>(null);
   const [isGeneratingNovaStarFile, setIsGeneratingNovaStarFile] = useState(false);
+  // Rentman Integration (see src/rentman/) - project-specific date range is
+  // regular state (saved/loaded with the project); the code -> Rentman
+  // equipment mapping is account-wide, so it's loaded from/persisted to
+  // localStorage instead (see equipmentMapping.ts), not this project's JSON.
+  const [rentmanDateFrom, setRentmanDateFrom] = useState("");
+  const [rentmanDateTo, setRentmanDateTo] = useState("");
+  const [equipmentMapping, setEquipmentMapping] = useState<EquipmentMapping>(() => loadEquipmentMapping());
+  const [liveStock, setLiveStock] = useState<Record<string, LiveStockEntry>>({});
+  const [liveAvailable, setLiveAvailable] = useState<Record<string, number>>({});
+  const [rentmanRefreshing, setRentmanRefreshing] = useState(false);
+  const [rentmanRefreshError, setRentmanRefreshError] = useState<string | null>(null);
+  const [rentmanLastRefreshedAt, setRentmanLastRefreshedAt] = useState<Date | null>(null);
   // Drag gesture for repositioning a sub-screen (or the whole layout, id=null)
   // on the output canvas - separate pixel-space analogue of moveDrag.
   const [canvasDrag, setCanvasDrag] = useState<{ id: string | null; startX: number; startY: number; dx: number; dy: number } | null>(null);
@@ -1640,6 +1661,13 @@ export default function App() {
       return next;
     });
   };
+
+  // Persist the Rentman equipment mapping on every edit (unlike this file's
+  // other localStorage keys, which are one-shot handoffs read once then
+  // removed - see equipmentMapping.ts).
+  useEffect(() => {
+    saveEquipmentMapping(equipmentMapping);
+  }, [equipmentMapping]);
 
   useEffect(() => {
     setPanelsPerPowerOutlet((prev) => {
@@ -2520,8 +2548,80 @@ export default function App() {
   // The on-screen table, PDF table and CSV export all list order/pull
   // quantities, not raw internal line items - a row whose real order
   // quantity (rounded, spare included) comes out to 0 is just noise there.
-  const visibleStockRows = useMemo(() => stockRows.filter((row) => (row.rounded ?? row.required) > 0), [stockRows]);
+  // Live Rentman stock/availability (see src/rentman/) is overlaid HERE,
+  // inside this one useMemo, rather than as a separate variable each
+  // consumer has to remember to switch to - every real consumer (the
+  // on-screen table, CSV export, PDF table, and shortfallRows right below)
+  // already reads visibleStockRows, so they all become Rentman-aware for
+  // free. Empty liveStock/liveAvailable maps make applyLiveRentmanData a
+  // full no-op, so this is a zero-behaviour-change default.
+  const visibleStockRows = useMemo(
+    () => applyLiveRentmanData(stockRows.filter((row) => (row.rounded ?? row.required) > 0), liveStock, liveAvailable),
+    [stockRows, liveStock, liveAvailable],
+  );
   const shortfallRows = visibleStockRows.filter((row) => row.net < 0);
+  const hasLiveAvailableColumn = visibleStockRows.some((row) => typeof row.available === "number");
+  // Every real (orientation-normalized, synthetic-box-excluded) stock code
+  // currently on the wall, for the equipment-mapping UI - one entry per
+  // distinct base code, first-seen name wins.
+  const mappableRentmanItems = useMemo<MappableItem[]>(() => {
+    const seen = new Map<string, string>();
+    stockRows.filter(isMappableStockRow).forEach((row) => {
+      const code = baseCodeOf(row.code);
+      if (!seen.has(code)) seen.set(code, row.name);
+    });
+    return Array.from(seen, ([code, name]) => ({ code, name }));
+  }, [stockRows]);
+
+  const refreshRentmanStock = async () => {
+    // equipmentMapping is keyed by OUR local stock code (e.g. "12224"), but
+    // its value's own .code is Rentman's equipment code (e.g. "877") - the
+    // Worker/Rentman only know about the latter, so the fetch has to go out
+    // keyed by ref.code, then get translated back to our local codes before
+    // being stored (applyLiveRentmanData looks liveStock up by local code).
+    const mappedEntries = mappableRentmanItems
+      .map((item) => ({ localCode: item.code, ref: equipmentMapping[item.code] }))
+      .filter((entry): entry is { localCode: string; ref: RentmanEquipmentRef } => Boolean(entry.ref));
+    if (!mappedEntries.length) return;
+    const rentmanCodes = mappedEntries.map((entry) => entry.ref.code);
+    setRentmanRefreshing(true);
+    setRentmanRefreshError(null);
+    try {
+      const stockResult = await fetchEquipmentStock(rentmanCodes);
+      const nextStock: Record<string, LiveStockEntry> = {};
+      mappedEntries.forEach(({ localCode, ref }) => {
+        const entry = stockResult[ref.code];
+        if (entry) nextStock[localCode] = entry;
+      });
+      setLiveStock(nextStock);
+
+      if (rentmanDateFrom && rentmanDateTo) {
+        const availabilityResult = await fetchEquipmentAvailability(rentmanCodes, rentmanDateFrom, rentmanDateTo);
+        const nextAvailable: Record<string, number> = {};
+        mappedEntries.forEach(({ localCode, ref }) => {
+          const qty = availabilityResult[ref.code];
+          if (typeof qty === "number") nextAvailable[localCode] = qty;
+        });
+        setLiveAvailable(nextAvailable);
+      } else {
+        setLiveAvailable({});
+      }
+      setRentmanLastRefreshedAt(new Date());
+    } catch (err) {
+      setRentmanRefreshError(err instanceof Error ? err.message : "Rentman refresh failed");
+    } finally {
+      setRentmanRefreshing(false);
+    }
+  };
+
+  const setRentmanEquipmentMapping = (code: string, ref: RentmanEquipmentRef | null) => {
+    setEquipmentMapping((prev) => {
+      if (ref) return { ...prev, [code]: ref };
+      const next = { ...prev };
+      delete next[code];
+      return next;
+    });
+  };
   const safeProjectName = projectName.trim() || "Untitled Project";
   const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
   // Describe the panel mix for exports and headings.
@@ -2833,10 +2933,16 @@ export default function App() {
 
 const exportJson = () => {
   try {
-    // formatVersion 5: adds the whole-canvas-vs-per-entry input mode toggle
-    // (v1-v4 files still open, see openJson).
+    // formatVersion 6: adds the Rentman availability date range (v1-v5
+    // files still open, see openJson - the number bump itself is purely
+    // documentation, there's no branching logic tied to it anywhere).
+    // stockRows here is always the plain catalog-based numbers (this file
+    // snapshots the theoretical required/spare/rounded math, not a live
+    // Rentman read that would just go stale the moment the file is
+    // reopened) - the equipment mapping that drives live data is account-
+    // wide and lives in localStorage instead, not in this per-project file.
     const payload = {
-      formatVersion: 5,
+      formatVersion: 6,
       appVersion: APP_VERSION,
       projectName: safeProjectName,
       surfaceName,
@@ -2856,6 +2962,8 @@ const exportJson = () => {
       canvasInputs,
       inputMode,
       wholeCanvasInputId,
+      rentmanDateFrom,
+      rentmanDateTo,
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
@@ -3141,6 +3249,10 @@ const exportJson = () => {
         // the original "perEntry" behavior / no whole-canvas input.
         setInputMode(data.inputMode === "whole" ? "whole" : "perEntry");
         setWholeCanvasInputId(typeof data.wholeCanvasInputId === "number" ? data.wholeCanvasInputId : null);
+        // formatVersion 6: older projects have neither field - default to
+        // no date range set (Rentman availability just stays off).
+        setRentmanDateFrom(typeof data.rentmanDateFrom === "string" ? data.rentmanDateFrom : "");
+        setRentmanDateTo(typeof data.rentmanDateTo === "string" ? data.rentmanDateTo : "");
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -3316,6 +3428,15 @@ const exportJson = () => {
       );
     };
 
+    // Two column layouts: the plain 5-numeric-column one used whenever
+    // Rentman availability isn't in play (byte-identical to before this
+    // feature existed), and a 6-column one (Item's wrap narrowed to make
+    // room) only when hasLiveAvailableColumn is actually true - so a
+    // project that isn't using Rentman renders this table exactly as it
+    // always has.
+    const stockCols = hasLiveAvailableColumn
+      ? { itemWrap: 104, required: 160, spare: 182, rounded: 208, stock: 232, net: 256, available: 284 }
+      : { itemWrap: 128, required: 174, spare: 198, rounded: 226, stock: 252, net: 282, available: null };
     const drawStockTable = (startIndex: number, startY: number, maxY: number) => {
       let y = startY;
       const drawHeader = () => {
@@ -3325,11 +3446,12 @@ const exportJson = () => {
         pdf.setFontSize(8);
         pdf.text("Code", 12, y);
         pdf.text("Item", 34, y);
-        pdf.text("Required", 174, y, { align: "right" });
-        pdf.text("Spare", 198, y, { align: "right" });
-        pdf.text("Rounded + Spare", 226, y, { align: "right" });
-        pdf.text("Stock", 252, y, { align: "right" });
-        pdf.text("Net", 282, y, { align: "right" });
+        pdf.text("Required", stockCols.required, y, { align: "right" });
+        pdf.text("Spare", stockCols.spare, y, { align: "right" });
+        pdf.text("Rounded + Spare", stockCols.rounded, y, { align: "right" });
+        pdf.text("Stock", stockCols.stock, y, { align: "right" });
+        pdf.text("Net", stockCols.net, y, { align: "right" });
+        if (stockCols.available) pdf.text("Available", stockCols.available, y, { align: "right" });
         y += 6;
         pdf.setFont("helvetica", "normal");
       };
@@ -3342,12 +3464,13 @@ const exportJson = () => {
           pdf.rect(10, y - 4.5, 274, 6.2, "F");
         }
         pdf.text(String(row.code), 12, y);
-        pdf.text(pdf.splitTextToSize(row.name, 128)[0], 34, y);
-        pdf.text(formatNumber(row.required), 174, y, { align: "right" });
-        pdf.text(formatNumber(row.spare ?? 0), 198, y, { align: "right" });
-        pdf.text(formatNumber(row.rounded ?? row.required), 226, y, { align: "right" });
-        pdf.text(formatNumber(row.stock), 252, y, { align: "right" });
-        pdf.text(formatNumber(row.net), 282, y, { align: "right" });
+        pdf.text(pdf.splitTextToSize(row.name, stockCols.itemWrap)[0], 34, y);
+        pdf.text(formatNumber(row.required), stockCols.required, y, { align: "right" });
+        pdf.text(formatNumber(row.spare ?? 0), stockCols.spare, y, { align: "right" });
+        pdf.text(formatNumber(row.rounded ?? row.required), stockCols.rounded, y, { align: "right" });
+        pdf.text(formatNumber(row.stock), stockCols.stock, y, { align: "right" });
+        pdf.text(formatNumber(row.net), stockCols.net, y, { align: "right" });
+        if (stockCols.available) pdf.text(typeof row.available === "number" ? formatNumber(row.available) : "-", stockCols.available, y, { align: "right" });
         y += 6;
       }
       return visibleStockRows.length;
@@ -5951,6 +6074,20 @@ const exportJson = () => {
           onWholeCanvasInputChange={setWholeCanvasInputId}
         />
 
+        <RentmanPanel
+          dateFrom={rentmanDateFrom}
+          dateTo={rentmanDateTo}
+          onDateFromChange={setRentmanDateFrom}
+          onDateToChange={setRentmanDateTo}
+          mappableItems={mappableRentmanItems}
+          mapping={equipmentMapping}
+          onMap={setRentmanEquipmentMapping}
+          onRefresh={refreshRentmanStock}
+          refreshing={rentmanRefreshing}
+          refreshError={rentmanRefreshError}
+          lastRefreshedAt={rentmanLastRefreshedAt}
+        />
+
         <Card className="border-slate-700 bg-slate-800 print-card" collapsible defaultOpen={false}>
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -6037,6 +6174,7 @@ const exportJson = () => {
                     <th className="w-32 px-3 py-2 text-right">Rounded + Spare</th>
                     <th className="w-20 px-3 py-2 text-right">Stock</th>
                     <th className="w-24 px-3 py-2 text-right">Net</th>
+                    {hasLiveAvailableColumn ? <th className="w-28 px-3 py-2 text-right">Available (range)</th> : null}
                   </tr>
                 </thead>
                 <tbody>
@@ -6049,6 +6187,9 @@ const exportJson = () => {
                       <td className="px-3 py-2 text-right">{formatNumber(row.rounded ?? row.required)}</td>
                       <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
                       <td className={`px-3 py-2 text-right font-semibold ${row.net < 0 ? "text-red-300" : "text-emerald-300"}`}>{formatNumber(row.net)}</td>
+                      {hasLiveAvailableColumn ? (
+                        <td className="px-3 py-2 text-right">{typeof row.available === "number" ? formatNumber(row.available) : "-"}</td>
+                      ) : null}
                     </tr>
                   ))}
                 </tbody>
