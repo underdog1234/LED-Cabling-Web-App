@@ -29,6 +29,10 @@ export type TestPatternStatusInfo = {
 type Props = {
   info: TestPatternStatusInfo;
   visible: boolean;
+  /** Click anywhere on the panel itself hides it (clicking elsewhere in the view brings it back - see TestPatternView). */
+  onHide: () => void;
+  fitToOutput: boolean;
+  onToggleFitToOutput: () => void;
 };
 
 const Row = ({ label, value, warn }: { label: string; value: string; warn?: boolean }) => (
@@ -38,7 +42,7 @@ const Row = ({ label, value, warn }: { label: string; value: string; warn?: bool
   </div>
 );
 
-export default function TestPatternStatusOverlay({ info, visible }: Props) {
+export default function TestPatternStatusOverlay({ info, visible, onHide, fitToOutput, onToggleFitToOutput }: Props) {
   if (!visible) return null;
   const {
     physicalW, physicalH, contentW, contentH, isMtContent,
@@ -46,13 +50,28 @@ export default function TestPatternStatusOverlay({ info, visible }: Props) {
     canvasW, canvasH, devicePixelRatio, isFullscreen, browserToContentCanvas,
   } = info;
   const isScaled = browserToContentCanvas === "scaled";
+  // Only offer Fit to Output when the test pattern genuinely doesn't fit the
+  // known display resolution - no point offering it otherwise.
+  const canFitToOutput = displayW != null && displayH != null && (contentW > displayW || contentH > displayH);
 
   return (
-    <div className="pointer-events-none fixed left-3 top-3 z-40 max-w-xs space-y-2 font-mono text-xs">
+    <div
+      className="fixed left-3 top-3 z-40 max-w-xs cursor-pointer space-y-2 font-mono text-xs"
+      onClick={(event) => {
+        event.stopPropagation();
+        onHide();
+      }}
+    >
       {isScaled ? (
-        <div className="rounded-lg border-2 border-red-500 bg-red-950/90 px-3 py-2 font-sans text-sm font-bold text-red-200 shadow-lg">
-          ⚠ TEST PATTERN IS NOT BEING DISPLAYED 1:1
-        </div>
+        fitToOutput ? (
+          <div className="rounded-lg border-2 border-sky-500 bg-sky-950/90 px-3 py-2 font-sans text-sm font-bold text-sky-200 shadow-lg">
+            Scaled to fit output
+          </div>
+        ) : (
+          <div className="rounded-lg border-2 border-red-500 bg-red-950/90 px-3 py-2 font-sans text-sm font-bold text-red-200 shadow-lg">
+            ⚠ TEST PATTERN IS NOT BEING DISPLAYED 1:1
+          </div>
+        )
       ) : null}
       <div className="space-y-1 rounded-lg border border-slate-600 bg-slate-950/85 px-3 py-2 text-slate-200 shadow-lg">
         <Row label="Physical LED Resolution:" value={`${physicalW} x ${physicalH}`} />
@@ -65,8 +84,21 @@ export default function TestPatternStatusOverlay({ info, visible }: Props) {
         <Row label="Canvas Resolution:" value={`${canvasW} x ${canvasH}`} />
         <Row label="Device Pixel Ratio:" value={devicePixelRatio.toFixed(2)} />
         <Row label="Fullscreen:" value={isFullscreen ? "Yes" : "No"} />
-        <Row label="Browser -> Content Canvas:" value={isScaled ? "Scaled" : "1:1"} warn={isScaled} />
+        <Row label="Browser -> Content Canvas:" value={fitToOutput ? "Scaled (fit to output)" : isScaled ? "Scaled" : "1:1"} warn={isScaled && !fitToOutput} />
         {isMtContent ? <Row label="MT Vertical Content Mapping:" value={`${(contentH / physicalH).toFixed(0)}:1`} /> : null}
+        {canFitToOutput ? (
+          <button
+            type="button"
+            className="pointer-events-auto mt-1 w-full rounded border border-slate-500 bg-slate-800 px-2 py-1 font-sans text-xs font-semibold text-white hover:bg-slate-700"
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleFitToOutput();
+            }}
+          >
+            {fitToOutput ? "Show Native Resolution (1:1)" : "Fit to Output"}
+          </button>
+        ) : null}
+        <div className="pt-1 text-[10px] text-slate-500">Click panel to hide - press H to toggle</div>
       </div>
     </div>
   );

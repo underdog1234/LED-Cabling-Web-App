@@ -59,6 +59,11 @@ export default function TestPatternView() {
   // null = not yet determined; true/false once requestScreenDetails resolves.
   const [screenDetailsAvailable, setScreenDetailsAvailable] = useState<boolean | null>(null);
   const [statusVisible, setStatusVisible] = useState(true);
+  // Opt-in escape hatch for when the test pattern resolution is bigger than
+  // the display can show 1:1 - deliberately OFF by default (native
+  // resolution, never silently scaled), only ever engaged by the user
+  // clicking "Fit to Output" in the status panel.
+  const [fitToOutput, setFitToOutput] = useState(false);
 
   useEffect(() => {
     document.title = project?.projectName ? `Moving Test Pattern - ${project.projectName}` : "Moving Test Pattern";
@@ -107,13 +112,22 @@ export default function TestPatternView() {
   // pixel, by construction, whatever dpr actually is. Deliberately NOT tied
   // to the window/viewport size - if this doesn't fit, the element overflows
   // (the wrapper below scrolls rather than clipping it invisibly) instead of
-  // ever being shrunk to fit.
+  // ever being shrunk to fit - UNLESS the user has explicitly opted into
+  // Fit to Output (see the status panel), in which case it's deliberately
+  // stretched to fill the viewport's width, aspect ratio preserved via the
+  // canvas's own intrinsic width/height and an explicit "Scaled to fit
+  // output" message - never silently.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !layout) return;
-    canvas.style.width = `${layout.contentPixelW / dpr}px`;
-    canvas.style.height = `${layout.contentPixelH / dpr}px`;
-  }, [layout, dpr]);
+    if (fitToOutput) {
+      canvas.style.width = "100%";
+      canvas.style.height = "auto";
+    } else {
+      canvas.style.width = `${layout.contentPixelW / dpr}px`;
+      canvas.style.height = `${layout.contentPixelH / dpr}px`;
+    }
+  }, [layout, dpr, fitToOutput]);
 
   // devicePixelRatio has no native change event - watchDevicePixelRatio uses
   // the standard matchMedia re-registration idiom (see pixelMapping.ts).
@@ -140,11 +154,14 @@ export default function TestPatternView() {
     document.documentElement.requestFullscreen?.().catch(() => {});
   }, []);
 
-  // Toggle the status overlay with 'i' (default visible) - useful to hide it
+  // Toggle the status overlay with 'h' (default visible) - useful to hide it
   // during an actual deployed test if it would sit over wall content.
+  // Clicking the panel itself also hides it, and clicking anywhere else in
+  // the view brings it back (see the wrapper's onClick below) - the keyboard
+  // toggle and the click behaviour are independent of each other.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() === "i") setStatusVisible((prev) => !prev);
+      if (event.key.toLowerCase() === "h") setStatusVisible((prev) => !prev);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -252,10 +269,21 @@ export default function TestPatternView() {
   return (
     <div
       style={{ position: "fixed", inset: 0, margin: 0, padding: 0, background: "#000", overflow: "auto" }}
-      onClick={isFullscreen ? () => document.exitFullscreen?.().catch(() => {}) : undefined}
+      onClick={() => {
+        // Clicking anywhere in the view (other than the status panel itself,
+        // which stops propagation) brings the panel back if it was hidden.
+        setStatusVisible(true);
+        if (isFullscreen) document.exitFullscreen?.().catch(() => {});
+      }}
     >
       <canvas ref={canvasRef} style={{ position: "absolute", top: 0, left: 0, display: "block", cursor: isFullscreen ? "pointer" : "default" }} />
-      <TestPatternStatusOverlay info={statusInfo} visible={statusVisible} />
+      <TestPatternStatusOverlay
+        info={statusInfo}
+        visible={statusVisible}
+        onHide={() => setStatusVisible(false)}
+        fitToOutput={fitToOutput}
+        onToggleFitToOutput={() => setFitToOutput((prev) => !prev)}
+      />
       {!isFullscreen ? (
         <button
           type="button"

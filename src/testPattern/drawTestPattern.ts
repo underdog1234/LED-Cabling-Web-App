@@ -560,7 +560,18 @@ export const drawBouncingLogo = (ctx: CanvasRenderingContext2D, layout: TestPatt
   if (W <= 0 || H <= 0 || !image.naturalWidth || !image.naturalHeight) return;
   // ~1/2 of a standard panel's native pixel width (2x the original 1/4), aspect ratio preserved.
   const logoW = Math.max(4, layout.tileWidthPx / 2);
-  const logoH = logoW * (image.naturalHeight / image.naturalWidth);
+  // Drawn in native W x H coordinate space, like everything else here - the
+  // live view's caller applies a vertical scale(1, contentPixelH/H) on top
+  // (a no-op for non-MT walls) to reach the Recommended Content Resolution.
+  // Unlike the rest of the pattern, this logo is browser-preview decoration
+  // only (never exported/recorded, so never later squeezed back down by real
+  // MT receiving hardware) - so for an MT wall that ambient stretch would
+  // otherwise leave it rendered twice as tall as its real shape, with
+  // nothing downstream to cancel it out. Dividing by the same factor here
+  // keeps it showing at its correct, undistorted aspect ratio regardless of
+  // panel type.
+  const contentScaleY = H > 0 ? layout.contentPixelH / H : 1;
+  const logoH = (logoW * (image.naturalHeight / image.naturalWidth)) / contentScaleY;
   const rangeX = Math.max(0, W - logoW);
   const rangeY = Math.max(0, H - logoH);
   // Full one-way traverse takes several seconds on each axis (slow/subtle),

@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { makeGridPanels, type Cell } from "../App";
-import { computeTestPatternLayout, getContentPixelHeight } from "./drawTestPattern";
+import { computeTestPatternLayout, getContentPixelHeight, drawBouncingLogo, type TestPatternLayout } from "./drawTestPattern";
 
 // Regression coverage for a real bug: panels were positioned by tightly
 // packing each row band left-to-right in array order (summing pixel widths),
@@ -123,5 +123,37 @@ describe("computeTestPatternLayout content resolution (MT vs. MG9)", () => {
 
   it("getContentPixelHeight is a pure no-op on an empty panel list", () => {
     expect(getContentPixelHeight([], 100)).toBe(100);
+  });
+});
+
+// Regression coverage for a real bug: the bouncing logo (live-preview-only
+// decoration, never exported/recorded, so never later "squeezed" back down
+// by real MT receiving hardware the way the rest of the pattern is) is drawn
+// in native W x H space and inherits whatever vertical scale the live view's
+// caller has applied for MT's content-resolution doubling. Without
+// compensating for that here, it would render twice as tall as its real
+// shape on an MT wall, with nothing downstream to cancel it out.
+describe("drawBouncingLogo aspect ratio", () => {
+  const makeCtx = () => ({ save: vi.fn(), restore: vi.fn(), drawImage: vi.fn(), imageSmoothingEnabled: false });
+  const makeImage = (naturalWidth: number, naturalHeight: number) => ({ naturalWidth, naturalHeight, complete: true }) as unknown as HTMLImageElement;
+
+  it("preserves the image's natural aspect ratio for a non-MT wall (no ambient stretch)", () => {
+    const ctx = makeCtx();
+    const layout = { W: 672, H: 336, contentPixelH: 336, tileWidthPx: 168 } as unknown as TestPatternLayout;
+    drawBouncingLogo(ctx as unknown as CanvasRenderingContext2D, layout, 0, makeImage(200, 100));
+    const [, , , logoW, logoH] = ctx.drawImage.mock.calls[0];
+    expect(logoH / logoW).toBeCloseTo(100 / 200, 10);
+  });
+
+  it("pre-compensates the native-space height for an MT wall, so the ambient vertical stretch restores the correct on-screen aspect ratio", () => {
+    const ctx = makeCtx();
+    const layout = { W: 512, H: 64, contentPixelH: 128, tileWidthPx: 256 } as unknown as TestPatternLayout;
+    drawBouncingLogo(ctx as unknown as CanvasRenderingContext2D, layout, 0, makeImage(200, 100));
+    const [, , , logoW, logoH] = ctx.drawImage.mock.calls[0];
+    const contentScaleY = layout.contentPixelH / layout.H; // 2 for this MT wall
+    // The live view applies ctx.scale(1, contentScaleY) before drawing - the
+    // EFFECTIVE on-screen size is (logoW, logoH * contentScaleY), which must
+    // match the image's real aspect ratio.
+    expect((logoH * contentScaleY) / logoW).toBeCloseTo(100 / 200, 10);
   });
 });
