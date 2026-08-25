@@ -23,7 +23,9 @@ import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
 import { finalCanvasPositionOf, subScreenResolutionOf } from "./canvasView/canvasModel";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
-import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame } from "./testPattern/drawTestPattern";
+import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
+import { isMultiScreenLikely, requestScreenDetails, getSecondaryScreens, rememberScreen, loadRememberedScreen, openWindowOnScreen } from "./testPattern/screenPlacement";
+import ScreenPickerModal from "./testPattern/ScreenPickerModal";
 import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./novastar/processorModels";
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
@@ -45,7 +47,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.34.0";
+const APP_VERSION = "0.35.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1488,6 +1490,12 @@ export default function App() {
   const [mp4EncodeProgress, setMp4EncodeProgress] = useState(0);
   const [showDownloadFormatModal, setShowDownloadFormatModal] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState<"webm" | "mp4">("webm");
+  // Moving Test Pattern multi-display launch (see screenPlacement.ts) - only
+  // populated while the picker is actually showing (2+ secondary screens,
+  // no remembered match); the URL is held here so the picker's choice can
+  // still open the right tab after the user picks.
+  const [screenPickerOptions, setScreenPickerOptions] = useState<ScreenDetailed[] | null>(null);
+  const [pendingTestPatternUrl, setPendingTestPatternUrl] = useState<string | null>(null);
   const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
@@ -2129,9 +2137,8 @@ export default function App() {
   // above), so it keeps today's plain resolution/aspect display instead of
   // inventing a blended "content resolution" for it.
   const isMtOnlyWall = totalPanels > 0 && panelTypeCounts.MT === totalPanels;
-  const mtContentScaleY = (PANEL_TYPES.MT.h * 1000 / PANEL_TYPES.MT.pixH) / (PANEL_TYPES.MT.w * 1000 / PANEL_TYPES.MT.pixW);
   const contentPixelW = wallPixelW;
-  const contentPixelH = isMtOnlyWall ? Math.round(wallPixelH * mtContentScaleY) : wallPixelH;
+  const contentPixelH = getContentPixelHeight(activePanels, wallPixelH);
   // Physical Aspect Ratio - derived from the wall's true physical size (mm,
   // exact gcd reduction), not the raw LED pixel grid.
   const physicalRatioLabel = useMemo(() => {
@@ -3004,11 +3011,19 @@ const exportJson = () => {
       const W = Math.max(1, layout.W);
       const H = Math.max(1, layout.H);
       const canvas = document.createElement("canvas");
-      canvas.width = W;
-      canvas.height = H;
+      // Canvas is sized to the Recommended Content Resolution, not the raw
+      // native W x H - drawing below stays in native coordinate space and a
+      // single vertical scale (a no-op for non-MT walls, since
+      // contentPixelH === H there) stretches it to the real MT content
+      // resolution, matching drawTestPatternFrame's own technique (see its
+      // comment in drawTestPattern.ts) even though this PNG export doesn't
+      // call that function directly.
+      canvas.width = Math.max(1, layout.contentPixelW);
+      canvas.height = Math.max(1, layout.contentPixelH);
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas context unavailable");
       ctx.imageSmoothingEnabled = false;
+      ctx.scale(1, layout.contentPixelH / H);
 
       ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, W, H);
@@ -3059,15 +3074,82 @@ const exportJson = () => {
     }
   };
 
-  // Open the full-screen, canvas-only live test pattern in its own tab.
+  // Shown once (not on every launch) the first time automatic display
+  // placement turns out to be unavailable, whatever the reason (unsupported
+  // browser, insecure context, denied permission) - explains what to do
+  // instead rather than silently opening a plain tab with no indication why
+  // it didn't go to the second monitor.
+  const maybeShowAutoPlacementHint = () => {
+    const KEY = "ledCablingTestPatternAutoPlacementHintShown:v1";
+    try {
+      if (localStorage.getItem(KEY)) return;
+      localStorage.setItem(KEY, "1");
+    } catch {
+      // If localStorage itself is unavailable, showing this once per session instead is harmless.
+    }
+    alert("Automatic display placement isn't available here (needs Chrome/Edge over HTTPS, with screen permission) - move this window to your output display manually.");
+  };
+
+  // Forgets the remembered output display, so the next launch shows the
+  // picker again instead of silently reusing the old choice - the only way
+  // "remember" doesn't foreclose changing your mind later.
+  const changeOutputDisplay = () => {
+    try {
+      localStorage.removeItem("ledCablingTestPatternDisplay:v1");
+      alert("Output display choice cleared - the picker will show again next time you open the Moving Test Pattern (if more than one secondary display is connected).");
+    } catch (err) {
+      console.error("Failed to clear the remembered output display", err);
+    }
+  };
+
+  // Open the full-screen, canvas-only live test pattern in its own window.
   // There's no router, so the project is handed off through localStorage and
-  // the new tab (booted with ?testpattern=1, see main.jsx) reads it back and
-  // renders TestPatternView - just the LED canvas, no page chrome.
-  const openMovingTestPatternTab = () => {
+  // the new window (booted with ?testpattern=1, see main.jsx) reads it back
+  // and renders TestPatternView - just the LED canvas, no page chrome. When
+  // the Window Management API is available, this automatically positions
+  // (and lets TestPatternView itself fullscreen) that window on a secondary
+  // display, keeping this main tab on the original one - see
+  // screenPlacement.ts for the full fallback story (secure context/browser
+  // support/permission all fail closed to today's plain window.open).
+  const openMovingTestPatternTab = async () => {
     try {
       const payload = { formatVersion: 1, projectName: safeProjectName, surfaceName, panelType, panels: activePanels };
       localStorage.setItem("ledCablingTestPattern:v1", JSON.stringify(payload));
-      window.open(`${location.pathname}?testpattern=1`, "_blank");
+      const url = `${location.pathname}?testpattern=1`;
+
+      if (!isMultiScreenLikely()) {
+        maybeShowAutoPlacementHint();
+        window.open(url, "_blank");
+        return;
+      }
+
+      const result = await requestScreenDetails();
+      if (!result.ok) {
+        maybeShowAutoPlacementHint();
+        window.open(url, "_blank");
+        return;
+      }
+
+      const secondaryScreens = getSecondaryScreens(result.details);
+      if (secondaryScreens.length === 0) {
+        window.open(url, "_blank");
+        return;
+      }
+      if (secondaryScreens.length === 1) {
+        rememberScreen(secondaryScreens[0]);
+        openWindowOnScreen(url, secondaryScreens[0]);
+        return;
+      }
+
+      const remembered = loadRememberedScreen(secondaryScreens);
+      if (remembered) {
+        openWindowOnScreen(url, remembered);
+        return;
+      }
+
+      // 2+ secondary screens with no remembered match - ask which one.
+      setPendingTestPatternUrl(url);
+      setScreenPickerOptions(secondaryScreens);
     } catch (err) {
       console.error("Moving test pattern failed", err);
       alert("Could not open the moving test pattern - check console");
@@ -3121,13 +3203,16 @@ const exportJson = () => {
       return null;
     }
     const canvas = document.createElement("canvas");
-    canvas.width = layout.W;
-    canvas.height = layout.H;
+    // Content Resolution, not raw native W x H - see exportTestPatternPng's
+    // comment; a no-op vertical scale for non-MT walls.
+    canvas.width = layout.contentPixelW;
+    canvas.height = layout.contentPixelH;
     const ctx = canvas.getContext("2d");
     if (!ctx) {
       alert("Could not create a recording canvas - check console");
       return null;
     }
+    ctx.scale(1, layout.contentPixelH / layout.H);
 
     const loopStart = performance.now();
     const drawId = window.setInterval(() => {
@@ -3137,8 +3222,9 @@ const exportJson = () => {
     // ~6 bits/pixel of total resolution, floor 8Mbps / cap 80Mbps: MediaRecorder's
     // default bitrate is far too low for this pattern's sharp edges and text,
     // producing visible VP9 blocking - this scales generously with wall size
-    // instead of leaving every export at one low fixed rate.
-    const videoBitsPerSecond = Math.min(80_000_000, Math.max(8_000_000, Math.round(layout.W * layout.H * 6)));
+    // instead of leaving every export at one low fixed rate. Uses the actual
+    // encoded resolution (content resolution), not the native one.
+    const videoBitsPerSecond = Math.min(80_000_000, Math.max(8_000_000, Math.round(layout.contentPixelW * layout.contentPixelH * 6)));
     const stream = canvas.captureStream(DRAW_FPS);
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond });
     const chunks: BlobPart[] = [];
@@ -4826,6 +4912,24 @@ const exportJson = () => {
           }}
         />
       ) : null}
+      {screenPickerOptions ? (
+        <ScreenPickerModal
+          screens={screenPickerOptions}
+          onSelect={(screen) => {
+            rememberScreen(screen);
+            if (pendingTestPatternUrl) openWindowOnScreen(pendingTestPatternUrl, screen);
+            setPendingTestPatternUrl(null);
+            setScreenPickerOptions(null);
+          }}
+          onCancel={() => {
+            // Still open the pattern - just without a specific secondary
+            // display chosen (falls back to the browser's default placement).
+            if (pendingTestPatternUrl) window.open(pendingTestPatternUrl, "_blank");
+            setPendingTestPatternUrl(null);
+            setScreenPickerOptions(null);
+          }}
+        />
+      ) : null}
       {importPreview ? (
         <ImportPreviewModal
           result={importPreview}
@@ -4880,6 +4984,14 @@ const exportJson = () => {
               <Button intent="primary" onClick={openMovingTestPatternTab}>
                 <Video className="h-4 w-4" />Moving Test Pattern
               </Button>
+              <button
+                type="button"
+                onClick={changeOutputDisplay}
+                className="text-xs text-slate-400 underline decoration-dotted underline-offset-2 hover:text-slate-200"
+                title="Forget the remembered secondary display, so the picker shows again next time (only relevant if you have 2+ secondary displays and automatic placement is supported)"
+              >
+                Change output display
+              </button>
               <Button
                 intent="primary"
                 onClick={() => setShowDownloadFormatModal(true)}

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { makeGridPanels, type Cell } from "../App";
-import { computeTestPatternLayout } from "./drawTestPattern";
+import { computeTestPatternLayout, getContentPixelHeight } from "./drawTestPattern";
 
 // Regression coverage for a real bug: panels were positioned by tightly
 // packing each row band left-to-right in array order (summing pixel widths),
@@ -90,5 +90,38 @@ describe("computeTestPatternLayout column/row numbering reads from the front", (
     // Bottom row (largest y) must still read the highest row number.
     const bottomLeft = grid.reduce((best, c) => (c.y > best.y ? c : c.y === best.y && c.x > best.x ? c : best), grid[0]);
     expect(layout.rowLabel(bottomLeft)).toBe(3);
+  });
+});
+
+// Regression coverage for the MT "Recommended Content Resolution" rework:
+// this used to be a display-only label (contentPixelH computed but never
+// used to size anything) - these cases pin down the actual computed value,
+// including the "no blended content resolution for a mixed wall" rule.
+describe("computeTestPatternLayout content resolution (MT vs. MG9)", () => {
+  it("keeps contentPixelH/contentPixelW equal to H/W for an MG9-only wall", () => {
+    const grid = makeGridPanels(4, 2, "MG9");
+    const layout = computeTestPatternLayout({ projectName: "Test", panelType: "MG9", panels: grid });
+    expect(layout.contentPixelW).toBe(layout.W);
+    expect(layout.contentPixelH).toBe(layout.H);
+  });
+
+  it("doubles contentPixelH (not contentPixelW) for an MT-only wall", () => {
+    const grid = makeGridPanels(2, 1, "MT");
+    const layout = computeTestPatternLayout({ projectName: "Test", panelType: "MT", panels: grid });
+    expect(layout.W).toBe(512); // 2 panels x 256px
+    expect(layout.H).toBe(64);
+    expect(layout.contentPixelW).toBe(layout.W);
+    expect(layout.contentPixelH).toBe(layout.H * 2);
+  });
+
+  it("does not apply the MT doubling to a mixed MG9+MT wall", () => {
+    const mg9 = makeGridPanels(1, 1, "MG9");
+    const mt = makeGridPanels(1, 1, "MT").map((cell) => ({ ...cell, x: 500 }));
+    const layout = computeTestPatternLayout({ projectName: "Test", panelType: "MG9", panels: [...mg9, ...mt] });
+    expect(layout.contentPixelH).toBe(layout.H);
+  });
+
+  it("getContentPixelHeight is a pure no-op on an empty panel list", () => {
+    expect(getContentPixelHeight([], 100)).toBe(100);
   });
 });

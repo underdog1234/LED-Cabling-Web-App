@@ -40,10 +40,18 @@ export type TestPatternLayout = {
   wallBBox: RectMm;
   W: number;
   H: number;
+  /** Recommended Content Resolution width - always equals W (MT's non-square
+   * pixel pitch only affects the vertical axis) - kept explicit alongside
+   * contentPixelH so the pair reads as one resolution, not an implicit W. */
+  contentPixelW: number;
   /** Recommended Content Resolution height - equals H unless every active
    * panel is MT (a transparent panel missing every second LED row, so its
    * vertical pixel pitch is twice its horizontal pitch and H alone doesn't
-   * represent the wall's true physical aspect ratio) - see drawInfoText. */
+   * represent the wall's true physical aspect ratio) - see drawInfoText and
+   * getContentPixelHeight. This is the resolution every generated pattern
+   * (RGB/checkerboard, greyscale, panel grid/outlines, alignment overlay,
+   * info text - everything drawTestPatternFrame draws) is actually rendered
+   * at; W/H above stay the true physical/native LED resolution, unchanged. */
   contentPixelH: number;
   /** Each panel's TRUE native-resolution pixel rect (back view, unmirrored),
    * keyed by cell id - see computeTestPatternLayout. */
@@ -165,6 +173,30 @@ const getPatternLayer = (w: number, h: number): HTMLCanvasElement => {
   return canvas;
 };
 
+/**
+ * Recommended Content Resolution height for a wall built entirely from one
+ * panel type: `H` unless every panel in `panels` is MT, in which case `H` is
+ * scaled by MT's vertical-pitch ratio (its own physical size vs pixel count,
+ * not hardcoded to 2 - though it evaluates to exactly 2 for MT's real pitch:
+ * a transparent panel missing every second LED row) - so content authored
+ * assuming square pixels displays correctly proportioned once MT's own
+ * non-square-pixel grid receives it. A mixed MG9+MT wall keeps the plain `H`
+ * (no blended "content resolution" - same conservative scope used elsewhere
+ * for mixed walls). Shared by computeTestPatternLayout below and App.tsx's
+ * Wall Summary/PDF stat, so there's exactly one source of truth.
+ *
+ * Computed lazily inside the function (not as a module-level constant) -
+ * App.tsx and this file import from each other, and a top-level
+ * `PANEL_TYPES.MT...` reference here would race App.tsx's own module
+ * initialization depending on which side of the cycle loads first.
+ */
+export function getContentPixelHeight(panels: Cell[], H: number): number {
+  const allMt = panels.length > 0 && panels.every((cell) => cellPanelType(cell) === "MT");
+  if (!allMt) return H;
+  const scaleY = (PANEL_TYPES.MT.h * 1000 / PANEL_TYPES.MT.pixH) / (PANEL_TYPES.MT.w * 1000 / PANEL_TYPES.MT.pixW);
+  return Math.round(H * scaleY);
+}
+
 // Compute the wall geometry once (on project load), not per animation frame.
 export const computeTestPatternLayout = (project: TestPatternProject): TestPatternLayout => {
   const activePanels = project.panels.filter((cell) => isPanelHead(cell));
@@ -238,18 +270,15 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
   const tileWidthPx = tileSpec.pixW;
   const tileHeightPx = tileSpec.pixH;
 
-  // MT's pixel pitch is 2x taller than it is wide (see contentPixelH above) -
-  // only apply the correction when EVERY active panel is MT, matching the
-  // same conservative scope used elsewhere (a mixed MG9+MT wall doesn't get
-  // a blended "content resolution").
-  const allMt = activePanels.length > 0 && activePanels.every((cell) => cellPanelType(cell) === "MT");
-  const contentPixelH = allMt ? H * 2 : H;
+  const contentPixelW = W;
+  const contentPixelH = getContentPixelHeight(activePanels, H);
 
   return {
     activePanels,
     wallBBox,
     W,
     H,
+    contentPixelW,
     contentPixelH,
     panelPixelRects,
     totalPanels: activePanels.length,
@@ -297,8 +326,8 @@ const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) 
   if (layout.projectName) lines.push(layout.projectName);
   if (layout.surfaceName) lines.push(layout.surfaceName);
   const isContentResScaled = layout.contentPixelH !== layout.H;
-  lines.push(`${isContentResScaled ? "LED Wall Resolution" : "Resolution"}: ${layout.W} x ${layout.H} px`);
-  if (isContentResScaled) lines.push(`Recommended Content Resolution: ${layout.W} x ${layout.contentPixelH} px`);
+  lines.push(`${isContentResScaled ? "Physical LED Resolution" : "Resolution"}: ${layout.W} x ${layout.H} px`);
+  if (isContentResScaled) lines.push(`Recommended Content Resolution: ${layout.contentPixelW} x ${layout.contentPixelH} px`);
   lines.push(
     `Physical Size: ${layout.wallWidthM.toFixed(1)} x ${layout.wallHeightM.toFixed(1)} m`,
     `Panels: ${layout.totalPanels}`,
@@ -555,16 +584,24 @@ export const drawBouncingLogo = (ctx: CanvasRenderingContext2D, layout: TestPatt
 export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout, timeSeconds: number) => {
   const { W, H } = layout;
   if (W <= 0 || H <= 0) return;
-  // The caller's transform when this function was entered - identity for the
-  // WebM/MP4 recorder and PNG/PDF exports (canvas backing store == layout.W x
-  // layout.H 1:1), but the live browser tab (TestPatternView.tsx) pre-applies
-  // a devicePixelRatio/fit-to-window scale so the canvas stays crisp on
-  // high-DPI displays. The per-panel loop below has to reset to THIS base
-  // transform (not a hardcoded identity) before drawing the pre-rendered
-  // world-space pattern layer, or that layer gets drawn at 1 source px = 1
-  // physical px instead of 1 source px = 1 logical unit - which is exactly
-  // what made the RGB tiles stop lining up with panel boundaries once the
-  // live view started rendering at more than 1 physical pixel per unit.
+  // The caller's transform when this function was entered - identity for a
+  // non-MT wall (canvas backing store == layout.W x layout.H 1:1 in every
+  // caller: live view, WebM/MP4 recorder, PNG export), or
+  // `scale(1, contentPixelH / H)` for an all-MT wall, applied by every caller
+  // before invoking this function so the canvas backing store == layout's
+  // Recommended Content Resolution (contentPixelW x contentPixelH) instead.
+  // This function never applies that scale itself - it stays entirely in
+  // native W x H coordinate space and simply inherits whatever the caller's
+  // transform already is, so the RGB/checkerboard/greyscale pattern, panel
+  // outlines, numbering, outer outline and alignment overlay all scale
+  // uniformly with zero special-casing - MT's content-resolution doubling is
+  // implemented ENTIRELY by what transform each caller sets up beforehand.
+  // The per-panel loop below has to reset to THIS base transform (not a
+  // hardcoded identity) before drawing the pre-rendered world-space pattern
+  // layer, or that layer gets drawn at 1 source px = 1 physical px instead of
+  // 1 source px = 1 logical unit - which is exactly what made the RGB tiles
+  // stop lining up with panel boundaries once the live view started
+  // rendering at more than 1 physical pixel per unit.
   const baseTransform = ctx.getTransform();
   ctx.imageSmoothingEnabled = false;
 

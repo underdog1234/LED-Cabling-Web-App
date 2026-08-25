@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { type Cell, type PanelTypeKey, normalizePanels } from "../App";
 import { type TestPatternLayout, type TestPatternProject, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame, drawBouncingLogo } from "./drawTestPattern";
+import { computePixelMappingStatus, watchDevicePixelRatio } from "./pixelMapping";
+import { requestScreenDetails } from "./screenPlacement";
+import TestPatternStatusOverlay, { type TestPatternStatusInfo } from "./TestPatternStatusOverlay";
 import mmsLogoUrl from "./assets/mms-logo.png";
 
 export const TEST_PATTERN_STORAGE_KEY = "ledCablingTestPattern:v1";
@@ -31,10 +34,10 @@ const loadProject = (): TestPatternProject | null => {
   }
 };
 
-// Pure full-screen live view: the canvas and nothing else. No header, no
-// buttons, no text outside the LED canvas itself (the wall info/labels are
-// drawn ON the canvas by drawTestPatternFrame). A click anywhere requests the
-// browser's native fullscreen mode.
+// Pure full-screen live view: the canvas and nothing else besides the status
+// overlay and (when not fullscreen) the ENTER FULLSCREEN control - no header,
+// no other buttons, no text baked into the page outside those (the wall
+// info/labels are drawn ON the canvas by drawTestPatternFrame).
 export default function TestPatternView() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const loopStartRef = useRef(performance.now());
@@ -42,13 +45,20 @@ export default function TestPatternView() {
   // logo, browser-live-view only (never the recorded video or PNG/PDF
   // exports, which all go through drawTestPatternFrame alone).
   const logoImgRef = useRef<HTMLImageElement | null>(null);
-  // Anchored top-left, scaled to fit the available browser window while
-  // preserving the LED canvas's own aspect ratio - never stretched, cropped,
-  // centred, or auto-rotated between portrait/landscape. Recomputed on resize.
-  const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
 
   const project = useMemo(loadProject, []);
   const layout: TestPatternLayout | null = useMemo(() => (project ? computeTestPatternLayout(project) : null), [project]);
+
+  const [dpr, setDpr] = useState(() => window.devicePixelRatio || 1);
+  const [isFullscreen, setIsFullscreen] = useState(() => document.fullscreenElement != null);
+  // The canvas's ACTUAL rendered CSS box, measured (never assumed) - see the
+  // ResizeObserver effect below and pixelMapping.ts's comment on why this is
+  // read from the DOM rather than computed from the numbers we set.
+  const [renderedCssBox, setRenderedCssBox] = useState({ w: 0, h: 0 });
+  const [displayInfo, setDisplayInfo] = useState<{ w: number; h: number; exact: boolean } | null>(null);
+  // null = not yet determined; true/false once requestScreenDetails resolves.
+  const [screenDetailsAvailable, setScreenDetailsAvailable] = useState<boolean | null>(null);
+  const [statusVisible, setStatusVisible] = useState(true);
 
   useEffect(() => {
     document.title = project?.projectName ? `Moving Test Pattern - ${project.projectName}` : "Moving Test Pattern";
@@ -60,53 +70,150 @@ export default function TestPatternView() {
     logoImgRef.current = img;
   }, []);
 
-  // Animation loop, capped at DRAW_FPS. Uses setInterval rather than
-  // requestAnimationFrame so it keeps running even if the tab is momentarily
-  // backgrounded - browsers suspend rAF in hidden tabs, but timers keep firing.
-  //
-  // The canvas's backing store (canvas.width/height, in real device pixels)
-  // is sized to match exactly how many physical pixels it will actually be
-  // displayed at - the CSS-fit-to-window size times devicePixelRatio - not
-  // just the LED wall's own native pixel count. Content is still drawn in
-  // the wall's native layout.W x layout.H coordinate space (unchanged), via
-  // a scale transform, so this only affects rendering fidelity: without it,
-  // a canvas.width == layout.W backing store gets stretched or shrunk by the
-  // browser's CSS box sizing, which is exactly what makes thin lines/text/
-  // arrows blur or look sub-pixel on high-DPI displays or when the window
-  // doesn't match the wall's own resolution 1:1.
+  // Canvas backing store (canvas.width/height, in real device pixels) is
+  // sized to EXACTLY the layout's Recommended Content Resolution
+  // (contentPixelW x contentPixelH) - always, regardless of window size or
+  // devicePixelRatio. Never scaled/fit to whatever's available - if the
+  // display can't show this 1:1, the mismatch is reported (see
+  // TestPatternStatusOverlay), never silently resolved by shrinking the
+  // canvas. Drawing itself stays entirely in the wall's native W x H
+  // coordinate space (unchanged) via a single vertical scale transform - a
+  // no-op for non-MT walls (contentPixelH === H there) - matching exactly the
+  // technique used by the PNG/WebM exports in App.tsx (see
+  // drawTestPatternFrame's own comment on why this is the ONLY place MT's
+  // content-resolution doubling needs to be implemented).
   useEffect(() => {
     if (!layout) return;
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    const cssScale = Math.min(viewport.w / layout.W, viewport.h / layout.H);
-    const pixelScale = cssScale * dpr;
-    canvas.width = Math.max(1, Math.round(layout.W * pixelScale));
-    canvas.height = Math.max(1, Math.round(layout.H * pixelScale));
+    canvas.width = Math.max(1, layout.contentPixelW);
+    canvas.height = Math.max(1, layout.contentPixelH);
+    const scaleY = layout.contentPixelH / layout.H;
     const id = window.setInterval(() => {
       const t = (performance.now() - loopStartRef.current) / 1000;
       // Defensive: re-applied every frame rather than relying on it surviving
       // drawTestPatternFrame's own internal save/restore pairs untouched.
-      ctx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+      ctx.setTransform(1, 0, 0, scaleY, 0, 0);
       drawTestPatternFrame(ctx, layout, t);
       const logo = logoImgRef.current;
       if (logo && logo.complete && logo.naturalWidth) drawBouncingLogo(ctx, layout, t, logo);
     }, 1000 / DRAW_FPS);
     return () => window.clearInterval(id);
-  }, [layout, viewport]);
+  }, [layout]);
 
+  // CSS display size = backing-store size / devicePixelRatio, in CSS pixels -
+  // this is what makes 1 canvas backing pixel land on 1 physical display
+  // pixel, by construction, whatever dpr actually is. Deliberately NOT tied
+  // to the window/viewport size - if this doesn't fit, the element overflows
+  // (the wrapper below scrolls rather than clipping it invisibly) instead of
+  // ever being shrunk to fit.
   useEffect(() => {
-    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    const canvas = canvasRef.current;
+    if (!canvas || !layout) return;
+    canvas.style.width = `${layout.contentPixelW / dpr}px`;
+    canvas.style.height = `${layout.contentPixelH / dpr}px`;
+  }, [layout, dpr]);
+
+  // devicePixelRatio has no native change event - watchDevicePixelRatio uses
+  // the standard matchMedia re-registration idiom (see pixelMapping.ts).
+  useEffect(() => watchDevicePixelRatio(setDpr), []);
+
+  // fullscreenchange is the one source of truth for fullscreen state - every
+  // control below only ever requests/exits fullscreen, never sets this
+  // directly, so a browser-initiated exit (e.g. Esc) is reflected correctly.
+  useEffect(() => {
+    const onChange = () => setIsFullscreen(document.fullscreenElement != null);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
   }, []);
 
-  const requestFullscreen = () => {
-    const el = document.documentElement;
-    if (document.fullscreenElement) document.exitFullscreen?.();
-    else el.requestFullscreen?.().catch(() => {});
-  };
+  // Best-effort automatic fullscreen on mount - covers this window having
+  // just been opened+positioned on a secondary display by
+  // openMovingTestPatternTab in the main app. Browsers may reject this (no
+  // transient user activation in a window opened programmatically) - that's
+  // an expected, handled outcome, not an error: the ENTER FULLSCREEN control
+  // below stays visible whenever isFullscreen is false, so the user always
+  // has an explicit, unmissable way to finish it themselves. Never silently
+  // fails with no indication.
+  useEffect(() => {
+    document.documentElement.requestFullscreen?.().catch(() => {});
+  }, []);
+
+  // Toggle the status overlay with 'i' (default visible) - useful to hide it
+  // during an actual deployed test if it would sit over wall content.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key.toLowerCase() === "i") setStatusVisible((prev) => !prev);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // ResizeObserver on the canvas is the single most reliable "did its
+  // actually-rendered box change" signal - covers window resize, fullscreen
+  // enter/exit, and anything else layout-related in one listener. Measured
+  // via getBoundingClientRect (never assumed from the CSS we set), feeding
+  // the Browser -> Content Canvas verification below.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const measure = () => {
+      const rect = canvas.getBoundingClientRect();
+      setRenderedCssBox({ w: rect.width, h: rect.height });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(canvas);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [layout]);
+
+  // Display Resolution: prefer the Window Management API's ScreenDetailed
+  // (its own devicePixelRatio, unaffected by page zoom - see
+  // screenDetails.d.ts) over a window.devicePixelRatio-based fallback, per
+  // explicit instruction. Also the mechanism for "detect if this window is
+  // subsequently moved to another display" - currentscreenchange fires when
+  // it is. Entirely best-effort: silently falls back if unsupported, denied,
+  // or the context isn't secure (see screenPlacement.ts).
+  useEffect(() => {
+    let cancelled = false;
+    let details: ScreenDetails | null = null;
+    let onScreenChange: (() => void) | null = null;
+    const applyFromScreen = (screen: ScreenDetailed) => {
+      if (cancelled) return;
+      setDisplayInfo({ w: Math.round(screen.width * screen.devicePixelRatio), h: Math.round(screen.height * screen.devicePixelRatio), exact: true });
+    };
+    requestScreenDetails().then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setScreenDetailsAvailable(false);
+        return;
+      }
+      setScreenDetailsAvailable(true);
+      details = result.details;
+      applyFromScreen(details.currentScreen);
+      onScreenChange = () => applyFromScreen(details!.currentScreen);
+      details.addEventListener("currentscreenchange", onScreenChange);
+    });
+    return () => {
+      cancelled = true;
+      if (details && onScreenChange) details.removeEventListener("currentscreenchange", onScreenChange);
+    };
+  }, []);
+
+  // Fallback Display Resolution path - only takes effect once we know the
+  // real Window Management API isn't available, so it never overwrites the
+  // exact ScreenDetailed-derived value above. Recomputed on every dpr change
+  // as the best available proxy for "this window may have moved to a
+  // different display" without real screen enumeration.
+  useEffect(() => {
+    if (screenDetailsAvailable !== false) return;
+    setDisplayInfo(window.screen ? { w: Math.round(window.screen.width * dpr), h: Math.round(window.screen.height * dpr), exact: false } : null);
+  }, [screenDetailsAvailable, dpr]);
 
   if (!layout) {
     return (
@@ -126,37 +233,56 @@ export default function TestPatternView() {
     );
   }
 
-  // Scale to fit the available window on both axes (never past either one, so
-  // nothing is cropped), using a single uniform factor so the aspect ratio is
-  // always preserved and the canvas is never stretched. Rounded to whole
-  // device pixels so the LED pixel grid stays crisp rather than blurring
-  // across a fractional-pixel boundary.
-  const scale = Math.min(viewport.w / layout.W, viewport.h / layout.H);
-  const displayW = Math.max(1, Math.round(layout.W * scale));
-  const displayH = Math.max(1, Math.round(layout.H * scale));
+  const statusInfo: TestPatternStatusInfo = {
+    physicalW: layout.W,
+    physicalH: layout.H,
+    contentW: layout.contentPixelW,
+    contentH: layout.contentPixelH,
+    isMtContent: layout.contentPixelH !== layout.H,
+    displayW: displayInfo?.w ?? null,
+    displayH: displayInfo?.h ?? null,
+    displayResolutionIsExact: displayInfo?.exact ?? false,
+    canvasW: layout.contentPixelW,
+    canvasH: layout.contentPixelH,
+    devicePixelRatio: dpr,
+    isFullscreen,
+    browserToContentCanvas: computePixelMappingStatus(layout.contentPixelW, layout.contentPixelH, renderedCssBox.w, renderedCssBox.h, dpr),
+  };
 
-  // Backing-store pixel count (canvas.width/height) is owned imperatively by
-  // the draw-loop effect above, not by React/JSX - it's sized in real device
-  // pixels (CSS size x devicePixelRatio), not the wall's native resolution,
-  // so no width/height props here (they'd fight the effect every render).
-  // imageRendering stays at the browser default (smooth) since the backing
-  // store is deliberately kept matched to its displayed CSS size - relying on
-  // nearest-neighbour "pixelated" scaling here is exactly what used to make
-  // thin lines/text/arrows blur or look jagged.
   return (
-    <div style={{ position: "fixed", inset: 0, margin: 0, padding: 0, background: "#000", overflow: "hidden" }} onClick={requestFullscreen}>
-      <canvas
-        ref={canvasRef}
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          width: displayW,
-          height: displayH,
-          display: "block",
-          cursor: "pointer",
-        }}
-      />
+    <div
+      style={{ position: "fixed", inset: 0, margin: 0, padding: 0, background: "#000", overflow: "auto" }}
+      onClick={isFullscreen ? () => document.exitFullscreen?.().catch(() => {}) : undefined}
+    >
+      <canvas ref={canvasRef} style={{ position: "absolute", top: 0, left: 0, display: "block", cursor: isFullscreen ? "pointer" : "default" }} />
+      <TestPatternStatusOverlay info={statusInfo} visible={statusVisible} />
+      {!isFullscreen ? (
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            document.documentElement.requestFullscreen?.().catch(() => {});
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 50,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0, 0, 0, 0.5)",
+            color: "#fff",
+            fontSize: 32,
+            fontWeight: 800,
+            letterSpacing: 2,
+            border: "none",
+            cursor: "pointer",
+            fontFamily: "system-ui, -apple-system, sans-serif",
+          }}
+        >
+          ENTER FULLSCREEN
+        </button>
+      ) : null}
     </div>
   );
 }

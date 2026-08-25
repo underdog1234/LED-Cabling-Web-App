@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.34.0`
+Version `0.35.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -15,12 +15,18 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected. The first panel of each signal chain shows its port number in a blue circle (top-left) and the first panel of each power chain shows its port number in an orange circle (top-right), in both the Panel Layout and the PDF Report. With **Do backup signal loop** enabled, the chain's last panel also shows the backup port number (the second half of the available signal ports, e.g. port 11 backs up port 1 on a 20-port setup) - the number of signal ports itself follows the selected NovaStar processor (10 for VX1000 Pro, 20 for VX2000 Pro, 20 if none is selected), and the backup half is hatched and unselectable in the Signal Patching panel
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape
-- Export a native-resolution Test Pattern image, a full-screen canvas-only live Moving Test Pattern (top-left anchored, scaled to fit the browser window without stretching/cropping, with a small bouncing logo browser-side only), or a downloadable looping WebM or MP4 video of it
+- Export a native-resolution Test Pattern image, a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds), optionally included in the PDF export
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated) and a per-project availability breakdown for a chosen date range
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.35.0
+
+- The live Moving Test Pattern is now rendered pixel-for-pixel at its true output resolution instead of being scaled to fit the browser window - a generated 1-pixel line is genuinely one pixel wide in the canvas. A new on-screen status panel reports LED Wall Resolution, Test Pattern Resolution, Display Resolution, Canvas Resolution, Device Pixel Ratio, Fullscreen state, and a measured (not assumed) **Browser -> Content Canvas: 1:1 / Scaled** verdict, re-checked live on resize, fullscreen changes, and device-pixel-ratio changes - with a clear `⚠ TEST PATTERN IS NOT BEING DISPLAYED 1:1` warning whenever it isn't. Press `I` to hide/show the panel. See [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below
+- Opening the Moving Test Pattern now automatically opens and positions it on a second monitor (fullscreening it there) when one is connected and your browser supports it (Chrome/Edge over HTTPS or localhost, with permission) - the main app stays on your original screen. With 2+ secondary displays it asks which one to use and remembers your choice ("Change output display" clears that memory). Falls back cleanly to a plain window on unsupported browsers/contexts, with a one-time explanation of why
+- MT's "Recommended Content Resolution" (double the vertical pixel count, to account for MT's non-square LED pitch) is now the resolution every generated test pattern actually uses - RGB/checkerboard, greyscale sweep, panel grid/outlines, alignment overlay and info text - not just a label as before. A dedicated `MT Vertical Content Mapping: 2:1` stat makes clear this is separate from the Browser -> Content Canvas pixel-accuracy check, so the two can't be confused for one another. Non-MT walls are completely unaffected (byte-identical output)
 
 ## Recent Changes In v0.34.0
 
@@ -394,6 +400,19 @@ To publish:
 5. Wait for the `Deploy GitHub Pages` workflow to finish.
 
 The site uses a relative Vite base path so it works on repository Pages URLs.
+
+## Pixel-Accurate Test Pattern
+
+The live Moving Test Pattern's canvas is always sized to exactly its Test Pattern Resolution (the LED wall's native resolution, or MT's doubled Recommended Content Resolution) - never scaled or shrunk to fit whatever window/display it's shown in. If that resolution doesn't fit the current display, the pattern overflows/clips rather than being resized - a mismatch is always reported, never silently resolved by scaling.
+
+The status panel in the corner (press `I` to hide/show it) reports what's actually happening, measured from the real DOM rather than assumed from the numbers set up:
+
+- **Physical LED Resolution** / **Recommended Content Resolution** (MT only) / **Test Pattern Resolution** - what's being generated
+- **Display Resolution** / **Canvas Resolution** / **Device Pixel Ratio** / **Fullscreen** - what the browser/display are actually doing
+- **Browser -> Content Canvas: 1:1 / Scaled** - is the canvas genuinely landing 1 pixel per physical display pixel right now? Re-checked on every resize, fullscreen change, and device-pixel-ratio change. A red `⚠ TEST PATTERN IS NOT BEING DISPLAYED 1:1` banner appears whenever it isn't
+- **MT Vertical Content Mapping: 2:1** (MT only) - a separate, static fact about MT's content-to-physical-LED relationship, kept deliberately distinct from the browser mapping check above so the two can never be confused for one another
+
+When you open the Moving Test Pattern, this app also tries to automatically open and fullscreen it on a second monitor if one's connected, using your browser's Window Management API (Chrome/Edge, over HTTPS or `localhost`, with permission) - the main app window stays where it is. With more than one secondary display connected, it asks which one to use and remembers the choice; "Change output display" (next to the button) forgets that choice so it asks again next time. If your browser doesn't support this (Firefox/Safari, an insecure context, or permission not granted), it falls back to opening a plain window - move and fullscreen that one manually - with a one-time note explaining why. If the automatic fullscreen attempt is blocked by the browser (common for a window opened programmatically, without your own direct click inside it), a large **ENTER FULLSCREEN** button appears in that window - click it to finish the job yourself.
 
 ## Rentman Integration
 
