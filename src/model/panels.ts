@@ -419,3 +419,39 @@ export const bandPanels = (
   });
   return bands.map((b) => b.items.sort((a, c) => a.r.x - c.r.x).map((i) => i.p));
 };
+
+/**
+ * Column-banding for non-uniform layouts: group active panels into visual
+ * columns by their horizontal centre (tolerance = half module), mirroring
+ * bandPanels' row logic exactly. Bands are ordered left→right and panels
+ * within a band top→bottom.
+ *
+ * This exists because panel WIDTH varies by panel type - MG9 is a 500mm
+ * square module, but MT is 1000x500mm (twice as wide) - so a column index
+ * computed by dividing raw x-position by the fixed 500mm module (as this
+ * codebase's column-numbering used to do, in both App.tsx and
+ * drawTestPattern.ts) silently counts every MT panel as 2 columns instead of
+ * 1. Banding by actual panel adjacency, like rows already do, works
+ * correctly for any panel width without that assumption.
+ */
+export const bandPanelsByColumn = (
+  panels: PanelRecord[],
+  rectOf: (p: PanelRecord) => RectMm,
+): PanelRecord[][] => {
+  const active = panels.filter((p) => !p.isRemoved);
+  const entries = active
+    .map((p) => ({ p, r: rectOf(p) }))
+    .sort((a, b) => a.r.x + a.r.w / 2 - (b.r.x + b.r.w / 2));
+  const bands: { centerX: number; items: { p: PanelRecord; r: RectMm }[] }[] = [];
+  entries.forEach((e) => {
+    const cx = e.r.x + e.r.w / 2;
+    const band = bands.find((b) => Math.abs(b.centerX - cx) < HALF_MODULE_MM);
+    if (band) {
+      band.items.push(e);
+      band.centerX = band.items.reduce((s, i) => s + i.r.x + i.r.w / 2, 0) / band.items.length;
+    } else {
+      bands.push({ centerX: cx, items: [e] });
+    }
+  });
+  return bands.map((b) => b.items.sort((a, c) => a.r.y - c.r.y).map((i) => i.p));
+};

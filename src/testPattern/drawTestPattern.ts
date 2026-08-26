@@ -25,7 +25,7 @@ import {
   applyPanelFrame,
   tracePanelShapePath,
 } from "../App";
-import { activeBBox, bandPanels, MODULE_MM, type RectMm } from "../model/panels";
+import { activeBBox, bandPanels, bandPanelsByColumn, type RectMm } from "../model/panels";
 
 export type TestPatternProject = {
   projectName: string;
@@ -204,13 +204,13 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
   const panelBands = bandPanels(activePanels, cellRect) as Cell[][];
   const bandIndexById = new Map<string, number>();
   panelBands.forEach((band, index) => band.forEach((cell) => bandIndexById.set(cell.id, index)));
-  const occupiedCols = new Set<number>();
-  activePanels.forEach((cell) => {
-    const r = cellRect(cell);
-    const first = Math.floor((r.x - wallBBox.x) / MODULE_MM);
-    const last = Math.ceil((r.x + r.w - wallBBox.x) / MODULE_MM) - 1;
-    for (let i = first; i <= last; i += 1) occupiedCols.add(i);
-  });
+  // Column bands, back-view left->right (see bandPanelsByColumn's own
+  // comment for why this replaced dividing raw x-position by the fixed
+  // 500mm MODULE_MM - that silently counted each 1000mm-wide MT panel as 2
+  // columns instead of 1).
+  const columnBands = bandPanelsByColumn(activePanels, cellRect) as Cell[][];
+  const columnIndexById = new Map<string, number>();
+  columnBands.forEach((band, index) => band.forEach((cell) => columnIndexById.set(cell.id, index)));
 
   // Each panel's TRUE native-resolution pixel rect (back view, unmirrored):
   // its own pixW x pixH from PANEL_TYPES (e.g. MT is 256x64, NOT a
@@ -282,7 +282,7 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     contentPixelH,
     panelPixelRects,
     totalPanels: activePanels.length,
-    activeColsCount: occupiedCols.size,
+    activeColsCount: columnBands.length,
     activeRowsCount: panelBands.length,
     wallWidthM: wallBBox.w / 1000,
     wallHeightM: wallBBox.h / 1000,
@@ -293,15 +293,13 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     rowLabel: (cell) => (bandIndexById.get(cell.id) ?? 0) + 1,
     // Column numbers must read from the FRONT (the pattern is always
     // rendered mirrored - see dispRectPx below), not the panel's raw
-    // back-view x - otherwise the printed number doesn't match the
-    // column the audience actually sees it in. Mirror the same way
-    // dispRectPx does: a panel's front-view left edge is the wall's
-    // width minus its back-view right edge.
+    // back-view column - otherwise the printed number doesn't match the
+    // column the audience actually sees it in. columnIndexById is ordered
+    // back-view left->right (0-based), so the back-view RIGHTMOST band
+    // (highest index) is the FRONT-view leftmost, i.e. column 1.
     colLabel: (cell) => {
-      const rect = cellRect(cell);
-      const mirroredLeft = wallBBox.w - (rect.x - wallBBox.x) - rect.w;
-      const col = mirroredLeft / MODULE_MM + 1;
-      return Number.isInteger(col) ? String(col) : col.toFixed(1);
+      const backIndex = columnIndexById.get(cell.id) ?? 0;
+      return String(columnBands.length - backIndex);
     },
   };
 };
@@ -520,7 +518,7 @@ const drawDirectionArrow = (ctx: CanvasRenderingContext2D, x: number, y: number,
 // Corner-to-corner alignment cross + a centre circle as tall as the wall -
 // classic geometry/alignment references for spotting warped, offset or
 // stretched panels across the whole assembled surface.
-const drawAlignmentOverlay = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+export const drawAlignmentOverlay = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
   const { W, H } = layout;
   ctx.save();
   ctx.strokeStyle = "rgba(255, 255, 255, 0.3)";
@@ -532,7 +530,18 @@ const drawAlignmentOverlay = (ctx: CanvasRenderingContext2D, layout: TestPattern
   ctx.lineTo(0, H);
   ctx.stroke();
   ctx.beginPath();
-  ctx.arc(W / 2, H / 2, H / 2, 0, Math.PI * 2);
+  // A true circle in NATIVE space would render as an ellipse once the
+  // caller's vertical scale(1, contentPixelH/H) stretches it into the
+  // Recommended Content Resolution canvas (a no-op for non-MT walls, where
+  // contentPixelH === H) - unlike most of this pattern, an alignment
+  // reference shape's whole purpose is to look geometrically correct in
+  // that actual generated image (so a human or camera can trust it as a
+  // "true circle" reference), not to represent physical panel geometry that
+  // should stretch along with everything else. Pre-shrinking the vertical
+  // radius by the same factor here cancels the stretch out, same technique
+  // as drawBouncingLogo's aspect-ratio compensation.
+  const contentScaleY = H > 0 ? layout.contentPixelH / H : 1;
+  ctx.ellipse(W / 2, H / 2, H / 2, H / 2 / contentScaleY, 0, 0, Math.PI * 2);
   ctx.stroke();
   ctx.restore();
 };

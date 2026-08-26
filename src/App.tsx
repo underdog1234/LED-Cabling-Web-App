@@ -9,6 +9,7 @@ import {
   type PanelShape,
   activeBBox,
   bandPanels,
+  bandPanelsByColumn,
   computeAnchorSnapDelta,
   connectedGroupsByGeom,
   findOverlaps,
@@ -47,7 +48,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.36.0";
+const APP_VERSION = "0.36.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -720,33 +721,12 @@ const getPowerPortLoadWatts = (
 const getPortPanelCount = (panels: Cell[], portField: "assignedPort" | "assignedPowerPort", portId: number) =>
   panels.filter((cell) => isActiveCell(cell) && cell[portField] === portId).length;
 
-// Column banding (for TB/BT snake): group active panels into visual columns by
-// their horizontal centre, columns left->right and panels top->bottom within.
-const bandPanelsByColumn = (panels: Cell[]): Cell[][] => {
-  const active = panels.filter((p) => isActiveCell(p));
-  const entries = active
-    .map((p) => ({ p, r: cellRect(p) }))
-    .sort((a, b) => a.r.x + a.r.w / 2 - (b.r.x + b.r.w / 2));
-  const bands: { centerX: number; items: { p: Cell; r: RectMm }[] }[] = [];
-  entries.forEach((e) => {
-    const cx = e.r.x + e.r.w / 2;
-    const band = bands.find((b) => Math.abs(b.centerX - cx) < MODULE_MM / 2);
-    if (band) {
-      band.items.push(e);
-      band.centerX = band.items.reduce((s, i) => s + i.r.x + i.r.w / 2, 0) / band.items.length;
-    } else {
-      bands.push({ centerX: cx, items: [e] });
-    }
-  });
-  return bands.map((b) => b.items.sort((a, c) => a.r.y - c.r.y).map((i) => i.p));
-};
-
 // Reading order for auto-snake over a free layout: row bands (or column bands
 // for TB/BT) with optional alternation - the non-uniform generalisation of the
 // old rows x cols walk. LOOP_TOGETHER pairs row bands into left/right loops.
 const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAlternates = true): Cell[][] => {
   if (snakeDirection === "TB" || snakeDirection === "BT") {
-    const columns = bandPanelsByColumn(panels);
+    const columns = bandPanelsByColumn(panels, cellRect) as Cell[][];
     return [
       columns.flatMap((column, index) => {
         let col = [...column];
@@ -1982,6 +1962,16 @@ export default function App() {
     panelBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
     return map;
   }, [panelBands]);
+  // Visual column bands (left->right, top->bottom) for panelColLabel - see
+  // bandPanelsByColumn's own comment for why this replaced dividing raw
+  // x-position by the fixed 500mm MODULE_MM (silently counted each
+  // 1000mm-wide MT panel as 2 columns instead of 1).
+  const columnBands = useMemo(() => bandPanelsByColumn(activePanels, cellRect) as Cell[][], [activePanels]);
+  const columnIndexById = useMemo(() => {
+    const map = new Map<string, number>();
+    columnBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
+    return map;
+  }, [columnBands]);
   const panelTypeCounts = useMemo(() => {
     const counts = { MG9: 0, MT: 0 } as Record<PanelTypeKey, number>;
     activePanels.forEach((cell) => {
@@ -4815,12 +4805,12 @@ const exportJson = () => {
   // Workspace pixel size (bbox + padding at the current zoom).
   const svgW = Math.max(1, Math.round(mmToPx(workspaceSizeMm.w)));
   const svgH = Math.max(1, Math.round(mmToPx(workspaceSizeMm.h)));
-  // Human-friendly row/column labels for a panel (grid-ish when aligned).
+  // Human-friendly row/column labels for a panel - back-view, unmirrored
+  // (this workspace's own Front/Back toggle doesn't flip these reference
+  // numbers - see columnBands/bandPanelsByColumn for why this is banded by
+  // actual panel adjacency rather than raw position / a fixed module size).
   const panelRowLabel = (cell: Cell) => (bandIndexById.get(cell.id) ?? 0) + 1;
-  const panelColLabel = (cell: Cell) => {
-    const col = (cellRect(cell).x - wallBBox.x) / MODULE_MM + 1;
-    return Number.isInteger(col) ? String(col) : col.toFixed(1);
-  };
+  const panelColLabel = (cell: Cell) => String((columnIndexById.get(cell.id) ?? 0) + 1);
 
   // Cable hops (one per adjacent panel pair) in display pixels, shared by the
   // behind-panels line layer and the in-front arrowhead layer so both stay in

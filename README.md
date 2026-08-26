@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.36.0`
+Version `0.36.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,11 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated) and a per-project availability breakdown for a chosen date range
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.36.1
+
+- Fixed the Moving Test Pattern's alignment circle rendering as a squashed ellipse on MT walls - it's now a true circle in the actual generated content-resolution image (a proper alignment reference should look genuinely round, not "round after an imagined future correction")
+- Fixed panel column numbering (on-screen labels, the PDF, and the test pattern) double-counting MT panels - MT panels are 1000mm wide (not the 500mm module width MG9 uses), so 3 real MT panel-columns were previously labeled 5, 3, 1 instead of 3, 2, 1. Row numbering was already correct (MT's height does match the 500mm module) and is unaffected; the MG9-specific frame/floor deployment hardware quantities (which are genuinely module-based, not panel-based) are also unaffected
 
 ## Recent Changes In v0.36.0
 

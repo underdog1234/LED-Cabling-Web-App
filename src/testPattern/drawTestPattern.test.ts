@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { makeGridPanels, type Cell } from "../App";
-import { computeTestPatternLayout, getContentPixelHeight, drawBouncingLogo, type TestPatternLayout } from "./drawTestPattern";
+import { computeTestPatternLayout, getContentPixelHeight, drawBouncingLogo, drawAlignmentOverlay, type TestPatternLayout } from "./drawTestPattern";
 
 // Regression coverage for a real bug: panels were positioned by tightly
 // packing each row band left-to-right in array order (summing pixel widths),
@@ -91,6 +91,22 @@ describe("computeTestPatternLayout column/row numbering reads from the front", (
     const bottomLeft = grid.reduce((best, c) => (c.y > best.y ? c : c.y === best.y && c.x > best.x ? c : best), grid[0]);
     expect(layout.rowLabel(bottomLeft)).toBe(3);
   });
+
+  // Regression coverage for a real bug: column numbers were computed by
+  // dividing raw x-position by the fixed 500mm MODULE_MM, which silently
+  // counts each 1000mm-wide MT panel as 2 columns instead of 1 (three real
+  // MT panel-columns came out labeled 5, 3, 1 instead of 3, 2, 1).
+  it("numbers MT columns 1-per-panel, not 2-per-panel (MT panels are 1000mm wide, not 500mm)", () => {
+    const grid = makeGridPanels(3, 1, "MT");
+    const layout = computeTestPatternLayout({ projectName: "Test", panelType: "MT", panels: grid });
+    const byX = (x: number) => grid.find((c) => c.x === x)!;
+    // Front-view mirrored, same convention as the MG9 case above: back-view
+    // leftmost (x=0) reads the highest column number.
+    expect(layout.colLabel(byX(0))).toBe("3");
+    expect(layout.colLabel(byX(1000))).toBe("2");
+    expect(layout.colLabel(byX(2000))).toBe("1");
+    expect(layout.activeColsCount).toBe(3);
+  });
 });
 
 // Regression coverage for the MT "Recommended Content Resolution" rework:
@@ -155,5 +171,44 @@ describe("drawBouncingLogo aspect ratio", () => {
     // EFFECTIVE on-screen size is (logoW, logoH * contentScaleY), which must
     // match the image's real aspect ratio.
     expect((logoH * contentScaleY) / logoW).toBeCloseTo(100 / 200, 10);
+  });
+});
+
+// Regression coverage for a real bug: the alignment overlay's centre circle
+// is meant as a TRUE circle reference (for spotting warp/stretch by eye) -
+// drawn as ctx.arc with equal radii in native W x H space, it rendered as a
+// squashed ellipse once the ambient content-resolution stretch reached an
+// MT wall, since nothing downstream corrects it back (unlike the RGB/panel
+// geometry, this shape's whole purpose is to look right in the actual
+// generated image, not to represent physical panel positions).
+describe("drawAlignmentOverlay circle", () => {
+  const makeCtx = () => ({
+    save: vi.fn(),
+    restore: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    stroke: vi.fn(),
+    ellipse: vi.fn(),
+    strokeStyle: "",
+    lineWidth: 0,
+  });
+
+  it("draws a true circle (equal radii) for a non-MT wall", () => {
+    const ctx = makeCtx();
+    const layout = { W: 672, H: 336, contentPixelH: 336 } as unknown as TestPatternLayout;
+    drawAlignmentOverlay(ctx as unknown as CanvasRenderingContext2D, layout);
+    const [, , radiusX, radiusY] = ctx.ellipse.mock.calls[0];
+    expect(radiusY).toBe(radiusX);
+  });
+
+  it("pre-compensates the vertical radius for an MT wall, so it renders as a true circle at the content resolution", () => {
+    const ctx = makeCtx();
+    const layout = { W: 512, H: 64, contentPixelH: 128 } as unknown as TestPatternLayout;
+    drawAlignmentOverlay(ctx as unknown as CanvasRenderingContext2D, layout);
+    const [, , radiusX, radiusY] = ctx.ellipse.mock.calls[0];
+    const contentScaleY = layout.contentPixelH / layout.H; // 2
+    // After the caller's ctx.scale(1, contentScaleY), the effective on-screen radii must be equal.
+    expect(radiusY * contentScaleY).toBeCloseTo(radiusX, 10);
   });
 });
