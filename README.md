@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.38.0`
+Version `0.39.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,23 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.39.0
+
+**Centre lines**
+
+- The **Centre** label moved from above the wall to below it, in both the Panel Layout and the PDF. It was sitting directly on top of the metre ruler along the top edge and covering the measurements
+- New **Show Sub-Screen Centre Lines** toggle in **Panel Layout -> Overlays & displays** (only offered when the project has sub-screens): a separate centre line for each sub-screen, each measured from that sub-screen's **own** panels rather than the whole wall, drawn and labelled in that sub-screen's colour. Independent of the whole-wall Centre Line toggle, and included in the PDF the same way
+
+**Deployment**
+
+- Choosing **Flown** as the Deployment Type now ticks every Additional Weight for you - Fly Bar, Sling & Shackle, Power cables and Signal cables. A flown wall carries all of them, and missing one silently under-states the rigging load. **Custom Weight is deliberately left unticked** (only you can supply that number), and every box stays freely un-tickable afterwards. Wired to the dropdown itself, so opening a saved project never overwrites weights you had switched off
+- **Ground** deployment now adds **Temporary Fencing Weight** (code `12357`) to Stock Calculations at 3 per metre of wall width - a 3m wall asks for 9. Applies to MT ground-support walls too, not just MG9
+
+**Moving Test Pattern**
+
+- The output display is now asked for **every time**, listing every connected display rather than guessing. Previously a single secondary display was used silently, and a remembered choice could send the pattern to yesterday's monitor. Cancelling now cancels rather than opening it somewhere unasked-for
+- Removed the **Change output display** button - with nothing remembered any more, there is nothing to change
 
 ## Recent Changes In v0.38.0
 

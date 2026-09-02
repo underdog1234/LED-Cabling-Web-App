@@ -1,7 +1,8 @@
-// Shown when launching the Moving Test Pattern and more than one secondary
-// display is available (see screenPlacement.ts) - lets the user pick which
-// one to open the output window on. Modal chrome matches the convention
-// already used throughout App.tsx (fixed inset-0 backdrop, centered card).
+// Shown every time the Moving Test Pattern is launched with more than one
+// display connected (see screenPlacement.ts) - the output display is always
+// an explicit choice, never remembered or guessed. Modal chrome matches the
+// convention already used throughout App.tsx (fixed inset-0 backdrop,
+// centered card).
 import { Button } from "../components/ui";
 
 type Props = {
@@ -19,7 +20,7 @@ export default function ScreenPickerModal({ screens, onSelect, onCancel }: Props
       >
         <div className="mb-2 text-lg font-bold">Choose an output display</div>
         <p className="mb-4 text-sm text-slate-300">
-          More than one secondary display is connected. Pick which one the Moving Test Pattern should open on - this choice is remembered for next time.
+          Pick the display the Moving Test Pattern should open on. You&apos;ll be asked each time, so it always goes where you want it today.
         </p>
         <div className="flex flex-col gap-2">
           {screens.map((screen, index) => (
@@ -33,6 +34,7 @@ export default function ScreenPickerModal({ screens, onSelect, onCancel }: Props
               <div className="text-xs text-slate-400">
                 {screen.width} x {screen.height}
                 {screen.isPrimary ? " - primary" : ""}
+                {screen.isInternal ? " - built-in" : ""}
               </div>
             </button>
           ))}

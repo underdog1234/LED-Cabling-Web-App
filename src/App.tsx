@@ -25,7 +25,7 @@ import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
 import { finalCanvasPositionOf, subScreenResolutionOf } from "./canvasView/canvasModel";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
 import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
-import { isMultiScreenLikely, requestScreenDetails, getSecondaryScreens, rememberScreen, loadRememberedScreen, openWindowOnScreen } from "./testPattern/screenPlacement";
+import { isMultiScreenLikely, requestScreenDetails, openWindowOnScreen } from "./testPattern/screenPlacement";
 import ScreenPickerModal from "./testPattern/ScreenPickerModal";
 import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./novastar/processorModels";
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
@@ -54,7 +54,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.38.0";
+const APP_VERSION = "0.39.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -164,7 +164,15 @@ const STOCK_CATALOG = {
   mg9Corner: { code: "12225", name: "YES TECH MG9 P2.9 500mm x 500mm LED Corner Panel", stock: 80 },
   cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 240 },
   cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 160 },
+  // Ballast for the temporary fencing around a ground-supported wall.
+  // `code` is Rentman's equipment CODE (12357), not its internal record id
+  // (28512) - every lookup in this app goes through the code, so the id would
+  // silently resolve to nothing.
+  tempFencingWeight: { code: "12357", name: "Temporary Fencing Weight", stock: 51 },
 } as const;
+
+// Ballast per metre of wall width for a ground-supported wall's fencing.
+const TEMP_FENCING_WEIGHTS_PER_METRE = 3;
 
 export const PANEL_VARIANTS = {
   STANDARD: { id: "STANDARD", label: "Standard MG9", symbol: "", stockItem: null, shape: "rect" },
@@ -974,6 +982,41 @@ const makeStockRow = (
 
 const roundUpToBox = (value: number, boxSize = 10) => Math.ceil(Math.max(value, 0) / boxSize) * boxSize;
 
+// True outer bounds of a set of panels, INCLUDING any panel rotated to a
+// non-cardinal angle (cellRect only ever swaps w/h at 90/270, so a panel spun
+// to e.g. 30deg would otherwise poke outside it unnoticed). Rotates each
+// panel's own footprint rect around its centre by its full stored rotation -
+// the same box+angle the renderer itself draws - and takes the union of every
+// corner. Drives every vertical centre indicator: the whole-wall one and, when
+// enabled, one per sub-screen computed from that sub-screen's own panels.
+export const trueOuterBBoxOf = (cells: Cell[]): RectMm => {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  cells.forEach((cell) => {
+    const rect = cellRect(cell);
+    const rotation = cell.rotation ?? 0;
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
+    const rad = (rotation * Math.PI) / 180;
+    const cos = Math.cos(rad);
+    const sin = Math.sin(rad);
+    const hw = rect.w / 2;
+    const hh = rect.h / 2;
+    [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].forEach(([lx, ly]) => {
+      const x = cx + lx * cos - ly * sin;
+      const y = cy + lx * sin + ly * cos;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    });
+  });
+  if (!Number.isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+};
+
 const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null) => {
   if (selectedCells.size > 0) return selectedCells;
   return selectedId ? new Set([selectedId]) : new Set<string>();
@@ -1552,6 +1595,11 @@ export default function App() {
   // turning the line off on screen still left a control claiming it would
   // print - one line, one control.
   const [showCentreLine, setShowCentreLine] = useState(true);
+  // Opt-in second set of centre lines, one per sub-screen, each measured from
+  // that sub-screen's own panels rather than the whole wall. Off by default:
+  // on a wall with several screens they add a lot of ink, and the whole-wall
+  // centre is what most rigs are set out from.
+  const [showSubScreenCentreLines, setShowSubScreenCentreLines] = useState(false);
   const [clipboard, setClipboard] = useState<ClipboardSelection | null>(null);
   const [isPasting, setIsPasting] = useState(false);
   const [pasteAnchor, setPasteAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -1573,6 +1621,21 @@ export default function App() {
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
   const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
   const [deploymentType, setDeploymentType] = useState<DeploymentType | "">("");
+  // Picking Flown from the dropdown ticks every Additional Weight for you -
+  // a flown wall carries all of them, and forgetting one silently under-states
+  // the rigging load. Custom Weight is deliberately NOT ticked (it's an
+  // arbitrary number only the user can supply), and every box stays freely
+  // un-tickable afterwards. Deliberately wired to the dropdown's onChange
+  // rather than an effect on deploymentType, so opening a saved project can
+  // never overwrite weights the user had chosen to switch off.
+  const applyDeploymentType = (next: DeploymentType | "") => {
+    setDeploymentType(next);
+    if (next !== DEPLOYMENT_TYPES.FLOWN) return;
+    setIncludeFlyBar(true);
+    setIncludeSling(true);
+    setIncludePowerCable(true);
+    setIncludeSignalCable(true);
+  };
 
   // --- Sub-screens + output-canvas positioning -----------------------------
   const [subScreens, setSubScreens] = useState<SubScreen[]>([]);
@@ -2044,33 +2107,22 @@ export default function App() {
   // Rotates each panel's own footprint rect around its centre by its full
   // stored rotation - the same box+angle the renderer itself draws - and
   // takes the union of every corner. Drives the vertical centre indicator.
-  const trueOuterBBox = useMemo(() => {
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    activePanels.forEach((cell) => {
-      const rect = cellRect(cell);
-      const rotation = cell.rotation ?? 0;
-      const cx = rect.x + rect.w / 2;
-      const cy = rect.y + rect.h / 2;
-      const rad = (rotation * Math.PI) / 180;
-      const cos = Math.cos(rad);
-      const sin = Math.sin(rad);
-      const hw = rect.w / 2;
-      const hh = rect.h / 2;
-      [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].forEach(([lx, ly]) => {
-        const x = cx + lx * cos - ly * sin;
-        const y = cy + lx * sin + ly * cos;
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-      });
+  const trueOuterBBox = useMemo(() => trueOuterBBoxOf(activePanels), [activePanels]);
+  // One centre line per sub-screen, measured from that sub-screen's OWN outer
+  // bounds - not the wall's, which is the whole point of the option. Derived
+  // from activePanels (not the full grid) so it always matches what is
+  // actually on screen/in the export: with a sub-screen open for editing, the
+  // hidden screens' lines would otherwise float over nothing.
+  const subScreenCentreLines = useMemo(() => {
+    if (!subScreens.length) return [] as Array<{ id: string; name: string; color: string; bbox: RectMm }>;
+    return subScreens.flatMap((screen, index) => {
+      const cells = activePanels.filter((cell) => cell.subScreenId === screen.id);
+      if (!cells.length) return [];
+      const bbox = trueOuterBBoxOf(cells);
+      if (bbox.w <= 0) return [];
+      return [{ id: screen.id, name: screen.name, color: normalizeSubScreenColor(screen.color, index), bbox }];
     });
-    if (!Number.isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
-    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-  }, [activePanels]);
+  }, [subScreens, activePanels]);
   // Visual row bands (top->bottom, left->right) drive snake order, pixel maths,
   // the PNG test pattern, and row labels for non-uniform layouts.
   const panelBands = useMemo(() => bandPanels(activePanels, cellRect) as Cell[][], [activePanels]);
@@ -2673,6 +2725,19 @@ export default function App() {
       pushBaseRow("12265", "MG9 Reinforcement Screw", Math.ceil(mg9Count * 3.42), stock.reinforcementScrew ?? 0, "sheet-style factor (MG9 panels)");
     }
 
+    // Ballast for the temporary fencing that rings a ground-supported wall.
+    // Not gated on MG9 - an MT ground-support wall needs fencing just the same.
+    if (deploymentType === DEPLOYMENT_TYPES.GROUND && activeWallWidthM > 0) {
+      const fencingWeights = Math.ceil(activeWallWidthM * TEMP_FENCING_WEIGHTS_PER_METRE);
+      rowsOut.push(
+        makeStockRow(
+          STOCK_CATALOG.tempFencingWeight,
+          fencingWeights,
+          `${TEMP_FENCING_WEIGHTS_PER_METRE} per 1m of wall width (${formatMeters(activeWallWidthM)}m)`,
+        ),
+      );
+    }
+
     if (mg9Count > 0 && deploymentType === DEPLOYMENT_TYPES.GROUND) {
       const widthUnits = Math.floor(activeWallWidthM);
       const verticalSupports = Math.ceil(activeColsCount / 2);
@@ -3039,18 +3104,22 @@ export default function App() {
     // Arrowheads last so the signal/power direction stays visible in front.
     drawCanvasCableArrows(ctx, dispRectPx);
 
-    // Vertical centre indicator - follows the single Centre Line toggle in
-    // Panel Layout -> Overlays & displays, so hiding it on screen hides it
-    // here too. Mirrors the same trueOuterBBox-based calculation as the live
-    // workspace.
-    if (showCentreLine && trueOuterBBox.w > 0) {
-      const centreTrueX = trueOuterBBox.x + trueOuterBBox.w / 2;
+    // Vertical centre indicators - follow the toggles in Panel Layout ->
+    // Overlays & displays, so hiding them on screen hides them here too.
+    // Mirrors the same trueOuterBBoxOf-based calculation as the live workspace.
+    //
+    // Labels sit BELOW the wall, not above it: the metre ruler runs along the
+    // top edge (drawn at y = -16 above), and a label above the line landed
+    // right on top of those measurements.
+    const drawCentreLine = (bbox: RectMm, color: string, label: string) => {
+      if (bbox.w <= 0) return;
+      const centreTrueX = bbox.x + bbox.w / 2;
       const centreDisplayTrueX = flipped ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
       const lineX = (centreDisplayTrueX - wallBBox.x) * px;
-      const yTop = (trueOuterBBox.y - wallBBox.y) * px;
-      const yBottom = (trueOuterBBox.y + trueOuterBBox.h - wallBBox.y) * px;
+      const yTop = (bbox.y - wallBBox.y) * px;
+      const yBottom = (bbox.y + bbox.h - wallBBox.y) * px;
       ctx.save();
-      ctx.strokeStyle = "#eab308";
+      ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
       ctx.setLineDash([6, 4]);
       ctx.globalAlpha = 0.85;
@@ -3060,13 +3129,19 @@ export default function App() {
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = 1;
-      ctx.fillStyle = "#eab308";
-      ctx.fillRect(lineX - 20, Math.max(0, yTop - 16), 40, 14);
-      ctx.fillStyle = "#1e293b";
       ctx.font = "bold 10px Arial";
       ctx.textAlign = "center";
-      ctx.fillText("Centre", lineX, Math.max(10, yTop - 6));
+      const boxW = Math.max(40, ctx.measureText(label).width + 10);
+      ctx.fillStyle = color;
+      ctx.fillRect(lineX - boxW / 2, yBottom + 3, boxW, 14);
+      ctx.fillStyle = "#1e293b";
+      ctx.fillText(label, lineX, yBottom + 13);
       ctx.restore();
+    };
+
+    if (showCentreLine) drawCentreLine(trueOuterBBox, "#eab308", "Centre");
+    if (showSubScreenCentreLines) {
+      subScreenCentreLines.forEach((entry) => drawCentreLine(entry.bbox, entry.color, entry.name));
     }
 
     ctx.restore();
@@ -3428,27 +3503,18 @@ const exportJson = () => {
     alert("Automatic display placement isn't available here (needs Chrome/Edge over HTTPS, with screen permission) - move this window to your output display manually.");
   };
 
-  // Forgets the remembered output display, so the next launch shows the
-  // picker again instead of silently reusing the old choice - the only way
-  // "remember" doesn't foreclose changing your mind later.
-  const changeOutputDisplay = () => {
-    try {
-      localStorage.removeItem("ledCablingTestPatternDisplay:v1");
-      alert("Output display choice cleared - the picker will show again next time you open the Moving Test Pattern (if more than one secondary display is connected).");
-    } catch (err) {
-      console.error("Failed to clear the remembered output display", err);
-    }
-  };
-
   // Open the full-screen, canvas-only live test pattern in its own window.
   // There's no router, so the project is handed off through localStorage and
   // the new window (booted with ?testpattern=1, see main.jsx) reads it back
-  // and renders TestPatternView - just the LED canvas, no page chrome. When
-  // the Window Management API is available, this automatically positions
-  // (and lets TestPatternView itself fullscreen) that window on a secondary
-  // display, keeping this main tab on the original one - see
-  // screenPlacement.ts for the full fallback story (secure context/browser
-  // support/permission all fail closed to today's plain window.open).
+  // and renders TestPatternView - just the LED canvas, no page chrome.
+  //
+  // When the Window Management API is available this ALWAYS asks which display
+  // to use - no remembered choice, and no silent "there's only one other
+  // screen so I'll use that". Which screen the pattern lands on is the whole
+  // point of opening it, and on a show floor the right answer changes between
+  // one launch and the next. See screenPlacement.ts for the fallback story
+  // (secure context / browser support / permission all fail closed to a plain
+  // window.open).
   const openMovingTestPatternTab = async (project: TestPatternProject) => {
     try {
       // formatVersion 2 adds subScreens; TestPatternView treats it as
@@ -3470,26 +3536,17 @@ const exportJson = () => {
         return;
       }
 
-      const secondaryScreens = getSecondaryScreens(result.details);
-      if (secondaryScreens.length === 0) {
+      // Every connected display, including the one this window is already on -
+      // "which display" genuinely means any of them. With only one display
+      // there is nothing to choose, so don't ask.
+      const allScreens = result.details.screens;
+      if (allScreens.length <= 1) {
         window.open(url, "_blank");
         return;
       }
-      if (secondaryScreens.length === 1) {
-        rememberScreen(secondaryScreens[0]);
-        openWindowOnScreen(url, secondaryScreens[0]);
-        return;
-      }
 
-      const remembered = loadRememberedScreen(secondaryScreens);
-      if (remembered) {
-        openWindowOnScreen(url, remembered);
-        return;
-      }
-
-      // 2+ secondary screens with no remembered match - ask which one.
       setPendingTestPatternUrl(url);
-      setScreenPickerOptions(secondaryScreens);
+      setScreenPickerOptions(allScreens);
     } catch (err) {
       console.error("Moving test pattern failed", err);
       alert("Could not open the moving test pattern - check console");
@@ -5407,15 +5464,14 @@ const exportJson = () => {
         <ScreenPickerModal
           screens={screenPickerOptions}
           onSelect={(screen) => {
-            rememberScreen(screen);
             if (pendingTestPatternUrl) openWindowOnScreen(pendingTestPatternUrl, screen);
             setPendingTestPatternUrl(null);
             setScreenPickerOptions(null);
           }}
           onCancel={() => {
-            // Still open the pattern - just without a specific secondary
-            // display chosen (falls back to the browser's default placement).
-            if (pendingTestPatternUrl) window.open(pendingTestPatternUrl, "_blank");
+            // Cancel means cancel: the display is now an explicit choice every
+            // time, so quietly opening the pattern somewhere unasked-for would
+            // be exactly the behaviour this replaced.
             setPendingTestPatternUrl(null);
             setScreenPickerOptions(null);
           }}
@@ -5475,14 +5531,6 @@ const exportJson = () => {
               <Button intent="primary" onClick={() => startMovingPattern("open")}>
                 <Video className="h-4 w-4" />Moving Test Pattern
               </Button>
-              <button
-                type="button"
-                onClick={changeOutputDisplay}
-                className="text-xs text-slate-400 underline decoration-dotted underline-offset-2 hover:text-slate-200"
-                title="Forget the remembered secondary display, so the picker shows again next time (only relevant if you have 2+ secondary displays and automatic placement is supported)"
-              >
-                Change output display
-              </button>
               <Button
                 intent="primary"
                 onClick={() => startMovingPattern("download")}
@@ -5816,7 +5864,7 @@ const exportJson = () => {
                   </label>
                   <div className="space-y-1">
                     <div className="text-xs text-slate-300">Type of deployment</div>
-                    <select className="w-full rounded bg-white p-2 text-black" value={deploymentType} onChange={(e) => setDeploymentType(e.target.value as DeploymentType | "")}>
+                    <select className="w-full rounded bg-white p-2 text-black" value={deploymentType} onChange={(e) => applyDeploymentType(e.target.value as DeploymentType | "")}>
                       <option value="">Select deployment type</option>
                       <option value={DEPLOYMENT_TYPES.FLOWN}>{DEPLOYMENT_TYPES.FLOWN}</option>
                       <option value={DEPLOYMENT_TYPES.GROUND}>{DEPLOYMENT_TYPES.GROUND}</option>
@@ -6090,6 +6138,16 @@ const exportJson = () => {
                 >
                   {showCentreLine ? "Hide Centre Line" : "Show Centre Line"}
                 </Button>
+                {subScreens.length > 0 ? (
+                  <Button
+                    intent={showSubScreenCentreLines ? "primary" : "secondary"}
+                    size="sm"
+                    onClick={() => setShowSubScreenCentreLines((prev) => !prev)}
+                    title="A separate centre line for each sub-screen, measured from that sub-screen's own centre rather than the whole wall's"
+                  >
+                    {showSubScreenCentreLines ? "Hide Sub-Screen Centre Lines" : "Show Sub-Screen Centre Lines"}
+                  </Button>
+                ) : null}
                 <span className="text-xs text-slate-400">Applies to the layout here and in the PDF</span>
               </ControlGroup>
             </div>
@@ -6427,28 +6485,46 @@ const exportJson = () => {
                     rotated to a non-cardinal angle, not just the axis-aligned wallBBox).
                     Sits above the panels (thin/dashed/translucent) so it's always
                     visible without covering panel text. */}
-                {showCentreLine && trueOuterBBox.w > 0 ? (() => {
-                  const centreTrueX = trueOuterBBox.x + trueOuterBBox.w / 2;
-                  const centreDisplayTrueX = isFlippedView ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
-                  const lineX = mmToPx(centreDisplayTrueX - workspaceOrigin.x);
-                  const yTop = mmToPx(trueOuterBBox.y - workspaceOrigin.y);
-                  const yBottom = mmToPx(trueOuterBBox.y + trueOuterBBox.h - workspaceOrigin.y);
+                {(showCentreLine && trueOuterBBox.w > 0) || (showSubScreenCentreLines && subScreenCentreLines.length) ? (() => {
+                  // Labels sit BELOW the wall, not above it: the metre ruler
+                  // runs along the top edge, and a label above the line landed
+                  // right on top of those measurements.
+                  const centreMark = (key: string, bbox: RectMm, color: string, label: string) => {
+                    if (bbox.w <= 0) return null;
+                    const centreTrueX = bbox.x + bbox.w / 2;
+                    const centreDisplayTrueX = isFlippedView ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
+                    const lineX = mmToPx(centreDisplayTrueX - workspaceOrigin.x);
+                    const yTop = mmToPx(bbox.y - workspaceOrigin.y);
+                    const yBottom = mmToPx(bbox.y + bbox.h - workspaceOrigin.y);
+                    // No text metrics in SVG, so approximate the chip width
+                    // from the label length - generous enough that a long
+                    // sub-screen name still sits inside its background.
+                    const boxW = Math.max(40, label.length * 6 + 12);
+                    return (
+                      <g key={key}>
+                        <line
+                          x1={lineX}
+                          y1={yTop}
+                          x2={lineX}
+                          y2={yBottom}
+                          stroke={color}
+                          strokeWidth={1.5}
+                          strokeDasharray="6 4"
+                          strokeOpacity={0.75}
+                        />
+                        <rect x={lineX - boxW / 2} y={yBottom + 3} width={boxW} height={14} rx={3} fill={color} opacity={0.9} />
+                        <text x={lineX} y={yBottom + 13} textAnchor="middle" fontSize={10} fontWeight="bold" fill="#1e293b">
+                          {label}
+                        </text>
+                      </g>
+                    );
+                  };
                   return (
                     <svg className="pointer-events-none absolute inset-0 z-[36]" width={svgW} height={svgH}>
-                      <line
-                        x1={lineX}
-                        y1={yTop}
-                        x2={lineX}
-                        y2={yBottom}
-                        stroke="#facc15"
-                        strokeWidth={1.5}
-                        strokeDasharray="6 4"
-                        strokeOpacity={0.75}
-                      />
-                      <rect x={lineX - 20} y={Math.max(0, yTop - 16)} width={40} height={14} rx={3} fill="#facc15" opacity={0.9} />
-                      <text x={lineX} y={Math.max(11, yTop - 5)} textAnchor="middle" fontSize={10} fontWeight="bold" fill="#1e293b">
-                        Centre
-                      </text>
+                      {showCentreLine ? centreMark("wall-centre", trueOuterBBox, "#facc15", "Centre") : null}
+                      {showSubScreenCentreLines
+                        ? subScreenCentreLines.map((entry) => centreMark(`ss-centre-${entry.id}`, entry.bbox, entry.color, entry.name))
+                        : null}
                     </svg>
                   );
                 })() : null}

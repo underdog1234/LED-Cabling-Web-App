@@ -44,46 +44,12 @@ export async function requestScreenDetails(): Promise<ScreenDetailsResult> {
   }
 }
 
-/** Every screen other than the one the calling window is currently on. */
-export function getSecondaryScreens(details: ScreenDetails): ScreenDetailed[] {
-  return details.screens.filter((screen) => screen !== details.currentScreen);
-}
-
-type ScreenFingerprint = { label: string; width: number; height: number; left: number; top: number };
-
-const STORAGE_KEY = "ledCablingTestPatternDisplay:v1";
-
-const fingerprintOf = (screen: ScreenDetailed): ScreenFingerprint => ({
-  label: screen.label,
-  width: screen.width,
-  height: screen.height,
-  left: screen.left,
-  top: screen.top,
-});
-
-const fingerprintsMatch = (a: ScreenFingerprint, b: ScreenFingerprint): boolean =>
-  a.label === b.label && a.width === b.width && a.height === b.height && a.left === b.left && a.top === b.top;
-
-/** Best-effort "remember this display" - labels/geometry aren't guaranteed stable across OS/driver changes, so a miss just means the picker is shown again, never an error. */
-export function rememberScreen(screen: ScreenDetailed): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(fingerprintOf(screen)));
-  } catch (err) {
-    console.error("Failed to remember the chosen output display", err);
-  }
-}
-
-export function loadRememberedScreen(screens: ScreenDetailed[]): ScreenDetailed | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const fingerprint = JSON.parse(raw) as ScreenFingerprint;
-    return screens.find((screen) => fingerprintsMatch(fingerprintOf(screen), fingerprint)) ?? null;
-  } catch (err) {
-    console.error("Remembered output display was invalid, ignoring", err);
-    return null;
-  }
-}
+// There is deliberately no "remember this display" here any more. The Moving
+// Test Pattern asks which display to use on every launch: on a show floor the
+// right screen changes between one launch and the next, and a remembered
+// choice silently sending the pattern to yesterday's monitor is worse than
+// one extra click. (The old choice was stored under
+// "ledCablingTestPatternDisplay:v1"; nothing reads or writes it now.)
 
 /**
  * Opens a new window positioned over the given screen (or the browser's
