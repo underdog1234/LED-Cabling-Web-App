@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.36.1`
+Version `0.38.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -8,19 +8,62 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 
 - Build LED walls by rows and columns, or place panels freely (non-uniform layouts) with drag, edge-snap and joining
 - Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
-- Group panels into named **Sub-Screens** and edit/patch each one in isolation - every other panel (including unassigned ones) is fully hidden and un-interactive while a sub-screen is active, with its name clearly shown; **All Screens** returns to the complete layout instantly, with no panel data ever altered
+- Group panels into named **Sub-Screens**, each with its own chosen **colour**, and edit/patch each one in isolation - every other panel (including unassigned ones) is fully hidden and un-interactive while a sub-screen is active, with its name clearly shown; **All Screens** returns to the complete layout instantly, with no panel data ever altered
 - Position the whole layout or individual sub-screens within a configurable-resolution **Output Canvas** (drag, numeric entry, align/snap tools, boundary/overlap warnings) for multi-processor / media-server mapping
 - Select a **NovaStar processor model** (`VX1000 Pro` / `VX2000 Pro`), see its live pixel/port capacity vs. current usage, assign a video input per sub-screen or one input for the whole canvas, and generate a real, importable `.uprj` processor configuration file - validated against the selected processor's port count, per-port and total pixel limits, and canvas size, with a summary of what will be exported and any blocking errors or warnings before download
 - Import projects from the Creative Layout Tool
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected. The first panel of each signal chain shows its port number in a blue circle (top-left) and the first panel of each power chain shows its port number in an orange circle (top-right), in both the Panel Layout and the PDF Report. With **Do backup signal loop** enabled, the chain's last panel also shows the backup port number (the second half of the available signal ports, e.g. port 11 backs up port 1 on a 20-port setup) - the number of signal ports itself follows the selected NovaStar processor (10 for VX1000 Pro, 20 for VX2000 Pro, 20 if none is selected), and the backup half is hatched and unselectable in the Signal Patching panel
 - Flip the panel layout between `Back View` and `Front View`
-- Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape
-- Export a native-resolution Test Pattern image, a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it
+- Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
+- Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
-- Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds), optionally included in the PDF export
+- Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
-- Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated) and a per-project availability breakdown for a chosen date range
+- Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.38.0
+
+**Panel counts**
+
+- One set of panel-count figures and one set of words for them, used identically in Quick Panel Layout, the Wall Summary, Stock Calculations and the PDF: **Required Panels**, **Spare Panels**, **Spare Panels - Rounded to Full Boxes**, **TOTAL Required Panels**
+- **Spare Panels - Rounded to Full Boxes** takes required + spare up to a whole number of equipment boxes, because whole boxes are what leave the warehouse. The required panels already part-fill a box, so the spare only tops up whatever is left of it. On MG9 (boxes of 10): 45 required needs 4 spare, 45 + 4 = 49 rounds up to 50, so **5** spares go out for a total of 50 - a clean 5 boxes. Shaped Triangle/Curved panels are bought individually rather than boxed, so they aren't rounded at all
+- **Spare Panels by Surface** is hidden completely when no LED surfaces are defined yet, instead of showing an empty table
+
+**Project dates**
+
+- The project **Start Date** and **End Date** now live in **LED Wall Setup**, directly under Project Name (they were in the Rentman card). Saved with the project as before, printed on the PDF's front page next to the project name, and used as the default window for Rentman availability checks
+
+**PDF report**
+
+- **Generate PDF** now opens a section picker first. Every section is ticked by default; untick anything you don't want. Sections that don't apply to the project (no sub-screens, no Rentman data pulled) aren't offered at all
+- Fixed the **Signal & Power Ports In Use** page printing internal panel UUIDs in its Chain column (`1ebf57da-... -> 753e6d78-...`). It now prints the same panel reference used everywhere else in the tool - `R1 C6 -> R3 C1` - and the Power Outputs table gained the same Chain column. No UUID is exposed in the PDF anywhere
+
+**Test patterns**
+
+- Each sub-screen now generates and renders its **own independent moving test pattern**, confined to its own panels and running on its own phase - a wall with three sub-screens runs three separate patterns rather than showing one wall-wide animation sliced three ways. Each gets a boundary and name banner in its own colour. A wall with no sub-screens is unchanged
+- **Moving Test Pattern** and **Download Moving Test Pattern** now ask which surface to show first. The choice is single-pick (radio buttons, **Full canvas** preselected), because the live view fills one display and a recording is one file. Picking a sub-screen renders that screen alone at its own resolution: a 2x3 sub-screen of a 6x3 wall comes out 336 x 504px, not 1008 x 504px with the rest black. A recorded sub-screen carries its name in the filename (`Untitled-Project-Left-Screen-front-test-pattern.webm`)
+- **Test Pattern** now exports a package: the full-wall PNG plus a separate PNG per sub-screen (`Left-Screen-Test-Pattern.png`), each containing only that sub-screen's panels at that sub-screen's own true pixel resolution, with its colour on the border and name banner. A picker (everything ticked by default) chooses which ones to save
+
+**Layout**
+
+- Sub-screens now have a **colour** you pick (colour wheel or one of eight preset swatches), used for that sub-screen's outline in the Panel Layout and in its test patterns. Saved with the project
+- The Centre Line setting moved from the top toolbar into **Panel Layout -> Overlays & displays**, and is now a single toggle that hides the centre line everywhere it is drawn - the layout on screen and the PDF's Panel Layout pages. There is no longer a separate "include it in the PDF" tickbox to contradict it
+
+**Rentman**
+
+- The separate **Rentman Integration** card is gone; **Get Current Stock from Rentman**, **Check Stock Availability by Date Range** and **Check Broken / Repair Equipment** now sit together at the top of **Stock Calculations**, next to the numbers they affect
+- Availability defaults to the project's date range, and can be pointed at a different window from inside Stock Calculations without changing the project's own dates ("Back to project dates" restores it)
+- New **Other Projects** column: how much of each item other Rentman projects need in the checked window. Click the number to expand the list - project number, name, status, dates and quantity - so how firm each booking is, is visible
+- New **Broken / Repair** column: how many units are unavailable because they're broken or in for repair, read from Rentman's own repair records. Click to expand the serial number, repair status, date raised and Rentman's repair note. Counted by distinct serial, so two open faults logged against one panel is still one panel off the shelf
+- Once Rentman has been checked, the Stock Calculations table reads: Equipment, Required, Spares, Spares Rounded to Full Box, Total Required, Rentman Stock, Other Projects, Broken / Repair, Available Stock, Result - where **Available Stock = Rentman Stock - Other Projects - Broken / Repair**, and the result is **OK**, **LOW** (covered by under 10%) or **SHORT n**. The same columns and a supporting **Other Projects & Repairs** detail page are in the PDF
+- Confirmed stock quantities were already saved outside the project (browser-level, so they survive a reload and apply to every project) - unchanged
+- `BOX-MG9` is not in the stock availability calculations - it was removed in v0.34.0 and stays out: once the spare quantity is rounded to complete boxes, a separate boxes line would double-count the same panels
+- **This release needs the Rentman Worker redeployed** (`cd rentman-proxy && npm run deploy`) - Check Broken / Repair Equipment calls a new endpoint that older deployments don't have
+
+**Housekeeping**
+
+- `npm run lint` is clean. The app's entry point now picks the root *element* rather than assigning a capitalised component const, which is what react-refresh was flagging - the rule stays on everywhere, nothing is suppressed
 
 ## Recent Changes In v0.36.1
 
@@ -428,12 +471,20 @@ When you open the Moving Test Pattern, this app also tries to automatically open
 
 ## Rentman Integration
 
-Optional. Lets Stock Calculations pull live on-hand stock counts and date-range availability from [Rentman](https://www.rentman.io/). This app is a static site with no backend, and the Rentman API token must never end up in anything shipped to the browser - so this works through a small separate Cloudflare Worker that holds the token server-side and proxies read-only requests to Rentman.
+Optional. Lets Stock Calculations pull live on-hand stock counts, date-range availability and broken/under-repair quantities from [Rentman](https://www.rentman.io/). This app is a static site with no backend, and the Rentman API token must never end up in anything shipped to the browser - so this works through a small separate Cloudflare Worker that holds the token server-side and proxies read-only requests to Rentman.
 
 Setup (one-time):
 
 1. Deploy the Worker - see [`rentman-proxy/README.md`](./rentman-proxy/README.md) for the full steps (`wrangler secret put`, `wrangler deploy`).
 2. Copy [`.env.example`](./.env.example) to `.env` for local dev, and/or add a `RENTMAN_PROXY_URL` repository **variable** (not secret) under `Settings -> Secrets and variables -> Actions -> Variables`) so the GitHub Pages build picks it up via [`deploy-pages.yml`](./.github/workflows/deploy-pages.yml).
-3. Rebuild/redeploy. The "Rentman Integration" card (in Stock Calculations) will show as configured; click **Get Current Stock** or **Check Availability** - no mapping step needed, since this catalog's codes already match Rentman's own equipment codes.
+3. Rebuild/redeploy. The Rentman controls at the top of **Stock Calculations** will show as configured; click **Get Current Stock from Rentman**, **Check Stock Availability by Date Range** or **Check Broken / Repair Equipment** - no mapping step needed, since this catalog's codes already match Rentman's own equipment codes.
 
-Left unset, the card just shows "Not configured" and Stock Calculations keeps using its built-in numbers - nothing else changes.
+Left unset, that block just shows "Not configured" and Stock Calculations keeps using its built-in numbers - nothing else changes.
+
+Availability arithmetic, in one line:
+
+```
+Available Stock = Rentman Stock - Other Projects (in the date range) - Broken / Repair
+```
+
+checked against this project's own **Total Required** (required panels plus the box-rounded spare). Broken/repair is deliberately *not* date-ranged - equipment in the workshop is off the shelf today, whenever the job is.

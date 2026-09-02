@@ -2,7 +2,7 @@
 // from App.tsx so the sub-screen list UI can import just the data logic it
 // needs without pulling in the rest of the monolith.
 import { type RectMm, activeBBox } from "../model/panels";
-import type { Cell, SubScreen } from "../App";
+import { SUB_SCREEN_COLORS, type Cell, type SubScreen } from "../App";
 
 let subScreenIdCounter = 0;
 export const newSubScreenId = (): string => {
@@ -14,12 +14,14 @@ export const newSubScreenId = (): string => {
   }
 };
 
-export const makeSubScreen = (name: string, createdAt = Date.now()): SubScreen => ({
+/** `existingCount` picks the next default identity colour, so consecutively created sub-screens never start out the same colour. */
+export const makeSubScreen = (name: string, createdAt = Date.now(), existingCount = 0): SubScreen => ({
   id: newSubScreenId(),
   name,
   canvasX: 0,
   canvasY: 0,
   createdAt,
+  color: SUB_SCREEN_COLORS[existingCount % SUB_SCREEN_COLORS.length],
 });
 
 // A rect-producing helper matching the shape App.tsx's own `cellRect` uses,

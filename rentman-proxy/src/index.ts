@@ -31,6 +31,16 @@
 //     request. `fields` dot-paths cap at 3 segments too, so
 //     `equipment_group.subproject.status` (the whole small status object)
 //     is requested rather than the 4-segment `...status.name`.
+//   - GET /repairs rows carry `equipment` (link), `serialnumber` (link, or
+//     null when the repair is logged against the equipment type rather than
+//     one specific piece), `repair_status` ("in-progress", "completed", ...),
+//     `remark` (HTML) and `created`. Both the comma-separated `equipment=`
+//     link OR-filter and `repair_status[neq]=completed` work, and combine -
+//     verified live against the real account, as is expanding `serialnumber`
+//     to read the human serial string. Several open repairs can name the SAME
+//     serial, so the unavailable QUANTITY has to dedupe by serial (see
+//     handleEquipmentRepairs) - two faults logged against one panel still
+//     only takes one panel off the shelf.
 //   - There is NO write endpoint anywhere in the spec for adding equipment
 //     to an existing project (/projectequipment has no POST/PUT/PATCH) - so
 //     this Worker deliberately has zero write routes. See the plan doc for
@@ -185,6 +195,89 @@ async function handleEquipmentAvailability(env: Env, url: URL): Promise<Response
   return json(result, env);
 }
 
+type RepairItem = {
+  repairId: number;
+  serial: string | null;
+  status: string;
+  reported: string;
+  note: string;
+};
+
+// Rentman stores repair remarks as a small HTML fragment ("<p>Dead pixel</p>").
+// The app renders these as plain text in a table and a PDF, so flatten them
+// here rather than shipping markup the client would have to sanitize.
+function htmlToText(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, " ")
+    .replace(/<\/(p|div|h[1-6]|li)>/gi, " ")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function handleEquipmentRepairs(env: Env, url: URL): Promise<Response> {
+  const codes = parseListParam(url, "codes");
+  if (!codes.length) return json({ error: "codes query param is required (comma-separated)" }, env, 400);
+
+  const byCode = await resolveEquipmentByCode(env, codes);
+  const ids = Object.values(byCode).map((eq) => eq.id);
+
+  const byEquipmentId: Record<number, RepairItem[]> = {};
+  if (ids.length) {
+    const linkValues = ids.map((id) => `/equipment/${id}`).join(",");
+    const repairData = await rentmanGet(
+      env,
+      `/repairs?equipment=${encodeURIComponent(linkValues)}` +
+        `&repair_status[neq]=completed` +
+        `&expand=serialnumber` +
+        `&fields=${encodeURIComponent("id,equipment,repair_status,created,remark,displayname,serialnumber.serial")}` +
+        `&limit=${MAX_LIMIT}`,
+    );
+
+    for (const row of repairData.data || []) {
+      const match = /\/equipment\/(\d+)/.exec(row.equipment || "");
+      if (!match) continue;
+      const id = Number(match[1]);
+      const serialRaw = row.serialnumber?.serial;
+      (byEquipmentId[id] ||= []).push({
+        repairId: row.id,
+        serial: typeof serialRaw === "string" && serialRaw.trim() ? serialRaw.trim() : null,
+        status: row.repair_status || "unknown",
+        reported: row.created || "",
+        note: htmlToText(String(row.remark || "")) || String(row.displayname || ""),
+      });
+    }
+  }
+
+  const result: Record<string, { quantity: number; items: RepairItem[] } | null> = {};
+  codes.forEach((code) => {
+    const eq = byCode[code];
+    if (!eq) {
+      result[code] = null;
+      return;
+    }
+    const items = byEquipmentId[eq.id] || [];
+    // Unavailable QUANTITY, not repair count: several open repairs can name
+    // the same serial (verified live), and that is still one physical panel
+    // off the shelf. Repairs with no serial can't be deduped against
+    // anything, so each counts as one item.
+    const serials = new Set<string>();
+    let unserialised = 0;
+    items.forEach((item) => {
+      if (item.serial) serials.add(item.serial);
+      else unserialised += 1;
+    });
+    result[code] = { quantity: serials.size + unserialised, items };
+  });
+  return json(result, env);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") {
@@ -201,6 +294,8 @@ export default {
           return await handleEquipmentStock(env, url);
         case "/equipment-availability":
           return await handleEquipmentAvailability(env, url);
+        case "/equipment-repairs":
+          return await handleEquipmentRepairs(env, url);
         default:
           return json({ error: "Not found" }, env, 404);
       }

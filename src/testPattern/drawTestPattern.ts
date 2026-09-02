@@ -33,7 +33,30 @@ export type TestPatternProject = {
   surfaceName?: string;
   panelType: PanelTypeKey;
   panels: Cell[];
+  /** The project's sub-screens, so each one can be given its own independently-animating pattern (see TestPatternSurface). Omit for a single-surface wall. */
+  subScreens?: Array<{ id: string; name: string; color: string }>;
 };
+
+/**
+ * One independently-animating LED surface. A wall with sub-screens produces
+ * one of these per sub-screen (plus an "Unassigned" one if any panels aren't
+ * in a sub-screen); a wall without them produces exactly one covering
+ * everything, which is byte-for-byte the old single-surface behaviour.
+ *
+ * `bbox` is in DISPLAY pixel space (post front-view mirror, integer-snapped),
+ * because that is the space the pattern layer is built and blitted in.
+ */
+export type TestPatternSurface = {
+  id: string;
+  name: string;
+  /** The sub-screen's own identity colour, or null for a whole-wall surface. */
+  color: string | null;
+  cells: Cell[];
+  bbox: RectMm;
+};
+
+export const WHOLE_WALL_SURFACE_ID = "__whole__";
+export const UNASSIGNED_SURFACE_ID = "__unassigned__";
 
 export type TestPatternLayout = {
   activePanels: Cell[];
@@ -67,6 +90,8 @@ export type TestPatternLayout = {
    * the project's panel type (see buildRgbTile). */
   tileWidthPx: number;
   tileHeightPx: number;
+  /** Independently-animating surfaces (one per sub-screen, or a single whole-wall entry). Every active panel appears in exactly one. */
+  surfaces: TestPatternSurface[];
   rowLabel: (cell: Cell) => number;
   colLabel: (cell: Cell) => string;
 };
@@ -100,8 +125,13 @@ export const DRAW_FPS = 24;
 const RGB_COLORS = ["#ff0000", "#00ff00", "#0000ff"];
 
 let cachedRgbTile: { tileW: number; tileH: number; canvas: HTMLCanvasElement } | null = null;
-let cachedGreyTile: { period: number; canvas: HTMLCanvasElement } | null = null;
-let cachedPatternLayer: { w: number; h: number; canvas: HTMLCanvasElement } | null = null;
+// Keyed caches rather than single slots: a multi-sub-screen wall needs one
+// grey tile per distinct surface diagonal and one pattern layer per surface,
+// all live within the SAME frame - single-slot caches would thrash, rebuilding
+// every canvas for every surface on every frame.
+const greyTileCache = new Map<number, HTMLCanvasElement>();
+const patternLayerCache = new Map<string, HTMLCanvasElement>();
+const MAX_CACHED_LAYERS = 24;
 
 // Staggered diagonal R/G/B supercell: row R, col C -> colour (R+C) mod 3. This
 // makes adjacent panels differ AND makes each row offset from the one above,
@@ -158,20 +188,26 @@ const buildGreyTile = (period: number): HTMLCanvasElement => {
 };
 
 const getGreyTile = (period: number): HTMLCanvasElement => {
-  if (cachedGreyTile && cachedGreyTile.period === period) return cachedGreyTile.canvas;
+  const cached = greyTileCache.get(period);
+  if (cached) return cached;
   const canvas = buildGreyTile(period);
-  cachedGreyTile = { period, canvas };
+  if (greyTileCache.size >= MAX_CACHED_LAYERS) greyTileCache.delete(greyTileCache.keys().next().value as number);
+  greyTileCache.set(period, canvas);
   return canvas;
 };
 
-const getPatternLayer = (w: number, h: number): HTMLCanvasElement => {
-  if (cachedPatternLayer && cachedPatternLayer.w === w && cachedPatternLayer.h === h) return cachedPatternLayer.canvas;
+const getPatternLayer = (surfaceId: string, w: number, h: number): HTMLCanvasElement => {
+  const key = `${surfaceId}:${w}x${h}`;
+  const cached = patternLayerCache.get(key);
+  if (cached) return cached;
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, w);
   canvas.height = Math.max(1, h);
-  cachedPatternLayer = { w, h, canvas };
+  if (patternLayerCache.size >= MAX_CACHED_LAYERS) patternLayerCache.delete(patternLayerCache.keys().next().value as string);
+  patternLayerCache.set(key, canvas);
   return canvas;
 };
+
 
 /**
  * Recommended Content Resolution height for a wall built entirely from one
@@ -273,6 +309,53 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
   const contentPixelW = W;
   const contentPixelH = getContentPixelHeight(activePanels, H);
 
+  // Independently-animating surfaces. Built here (not per frame) because they
+  // are pure geometry, and in DISPLAY space - the same mirrored, integer-
+  // snapped space each panel is actually drawn in - so a surface's pattern
+  // layer lines up with its panels with no further conversion.
+  const displayRect = (cell: Cell): RectMm => {
+    const r = panelPixelRects.get(cell.id) ?? { x: 0, y: 0, w: 0, h: 0 };
+    return snapRectPx({ x: W - r.x - r.w, y: r.y, w: r.w, h: r.h });
+  };
+  const bboxOf = (cells: Cell[]): RectMm => {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    cells.forEach((cell) => {
+      const r = displayRect(cell);
+      minX = Math.min(minX, r.x);
+      minY = Math.min(minY, r.y);
+      maxX = Math.max(maxX, r.x + r.w);
+      maxY = Math.max(maxY, r.y + r.h);
+    });
+    if (!Number.isFinite(minX)) return { x: 0, y: 0, w: 0, h: 0 };
+    return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+  };
+
+  const surfaces: TestPatternSurface[] = [];
+  const declaredSubScreens = project.subScreens ?? [];
+  declaredSubScreens.forEach((screen) => {
+    const cells = activePanels.filter((cell) => cell.subScreenId === screen.id);
+    if (!cells.length) return;
+    surfaces.push({ id: screen.id, name: screen.name, color: screen.color, cells, bbox: bboxOf(cells) });
+  });
+  const claimed = new Set(surfaces.flatMap((surface) => surface.cells.map((cell) => cell.id)));
+  const leftover = activePanels.filter((cell) => !claimed.has(cell.id));
+  if (leftover.length) {
+    // No sub-screens at all (the common case, and every project saved before
+    // the feature existed) collapses to exactly one whole-wall surface, which
+    // renders identically to the original single-pattern behaviour.
+    const wholeWall = surfaces.length === 0;
+    surfaces.push({
+      id: wholeWall ? WHOLE_WALL_SURFACE_ID : UNASSIGNED_SURFACE_ID,
+      name: wholeWall ? (project.surfaceName || "").trim() : "Unassigned",
+      color: null,
+      cells: leftover,
+      bbox: bboxOf(leftover),
+    });
+  }
+
   return {
     activePanels,
     wallBBox,
@@ -290,6 +373,7 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     surfaceName: (project.surfaceName || "").trim(),
     tileWidthPx,
     tileHeightPx,
+    surfaces,
     rowLabel: (cell) => (bandIndexById.get(cell.id) ?? 0) + 1,
     // Column numbers must read from the FRONT (the pattern is always
     // rendered mirrored - see dispRectPx below), not the panel's raw
@@ -627,21 +711,45 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
 
   const rgbTile = getRgbTile(layout.tileWidthPx, layout.tileHeightPx);
   const rgbPeriodPx = layout.tileWidthPx * 3;
-  // Grey period = the wall's own diagonal, so exactly one bright band sweeps
-  // corner-to-corner across the whole wall at a time (not several small
-  // repeats), scaled to each project's actual size.
-  const greyPeriod = Math.max(1, Math.round(Math.hypot(W, H)));
+
+  // Background.
+  ctx.imageSmoothingEnabled = false;
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, W, H);
+
+  // One pattern layer per surface, each in its OWN local space and on its own
+  // phase, so every sub-screen runs an independent test pattern rather than
+  // all of them showing one slice of a single wall-wide animation. A wall
+  // with no sub-screens has exactly one surface covering everything, which
+  // reduces this back to the original single-layer behaviour.
+  const surfaces = layout.surfaces;
+  surfaces.forEach((surface, surfaceIndex) => {
+  const bb = surface.bbox;
+  const lw = Math.max(1, Math.round(bb.w));
+  const lh = Math.max(1, Math.round(bb.h));
+  // Grey period = this surface's own diagonal, so exactly one bright band
+  // sweeps corner-to-corner across it at a time (not several small repeats),
+  // scaled to the surface's actual size.
+  const greyPeriod = Math.max(1, Math.round(Math.hypot(lw, lh)));
   const greyTile = getGreyTile(greyPeriod);
 
-  const phase = ((timeSeconds % LOOP_SECONDS) + LOOP_SECONDS) % LOOP_SECONDS;
-  const rgbSlidePx = (phase / LOOP_SECONDS) * rgbPeriodPx;
-  const greySlidePx = (phase / LOOP_SECONDS) * greyPeriod;
+  // Stagger each surface a fixed fraction of a loop apart: they animate
+  // independently of one another, yet the whole set still returns to its
+  // exact starting state at LOOP_SECONDS, so a recorded video still loops
+  // seamlessly.
+  const phaseOffset = surfaces.length > 1 ? (surfaceIndex / surfaces.length) * LOOP_SECONDS : 0;
+  const phase = (((timeSeconds + phaseOffset) % LOOP_SECONDS) + LOOP_SECONDS) % LOOP_SECONDS;
+  const progress = phase / LOOP_SECONDS;
+  const rgbSlidePx = progress * rgbPeriodPx;
+  const greySlidePx = progress * greyPeriod;
 
-  // Build the world-space pattern layer once per frame (two full-wall draws,
-  // O(1) regardless of panel count), then reveal it through each panel's clip.
-  const layerCanvas = getPatternLayer(W, H);
+  // Build this surface's pattern layer once per frame (a few full-surface
+  // draws, O(1) regardless of panel count), then reveal it through each
+  // panel's clip.
+  const layerCanvas = getPatternLayer(surface.id, lw, lh);
   const layerCtx = layerCanvas.getContext("2d")!;
-  layerCtx.clearRect(0, 0, W, H);
+  layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+  layerCtx.clearRect(0, 0, lw, lh);
   // Nearest-neighbour sampling: at a fractional slide offset, a smoothed
   // pattern would blend adjacent red/green/blue tile pixels into a soft
   // rainbow seam. Each panel must show a SOLID colour with a hard boundary
@@ -651,7 +759,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   const rgbPattern = layerCtx.createPattern(rgbTile, "repeat")!;
   rgbPattern.setTransform(new DOMMatrix().translate(rgbSlidePx, 0));
   layerCtx.fillStyle = rgbPattern;
-  layerCtx.fillRect(0, 0, W, H);
+  layerCtx.fillRect(0, 0, lw, lh);
 
   layerCtx.save();
   // 'multiply' (not 'overlay'): overlay is a no-op on pure 0/255 channel
@@ -663,15 +771,10 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   const greyPattern = layerCtx.createPattern(greyTile, "repeat")!;
   greyPattern.setTransform(new DOMMatrix().translate(greySlidePx, greySlidePx));
   layerCtx.fillStyle = greyPattern;
-  layerCtx.fillRect(0, 0, W, H);
+  layerCtx.fillRect(0, 0, lw, lh);
   layerCtx.restore();
 
-  // Background + per-panel reveal.
-  ctx.imageSmoothingEnabled = false;
-  ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, W, H);
-
-  layout.activePanels.forEach((cell) => {
+  surface.cells.forEach((cell) => {
     // Snap to the integer pixel grid so a 1px stroke lands crisply on one
     // pixel row/column (not straddling two, which anti-aliases into a soft
     // >1px-looking line), and so neighbouring panels' rounded edges agree
@@ -689,7 +792,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     tracePanelShapePath(ctx, r.w, r.h, shape);
     ctx.clip();
     ctx.setTransform(baseTransform);
-    ctx.drawImage(layerCanvas, 0, 0);
+    ctx.drawImage(layerCanvas, bb.x, bb.y);
     ctx.restore();
 
     // 1px white outline, following the true shape. Rect/corner panels are
@@ -729,8 +832,44 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     drawDirectionArrow(ctx, r.x + pad, r.y + pad + lineH, iconSize, "right");
     ctx.fillText(`${layout.colLabel(cell)}`, textX, r.y + pad + lineH);
   });
+  });
 
   ctx.drawImage(buildOuterExtremityOutline(layout), 0, 0);
+  drawSurfaceBoundaries(ctx, layout);
   drawAlignmentOverlay(ctx, layout);
   drawInfoText(ctx, layout);
+};
+
+// Each sub-screen's own boundary and name, in its own colour - drawn only
+// when the wall genuinely has more than one surface, so a plain wall looks
+// exactly as it always did. Inset by the stroke width so the line lands ON
+// the outermost panels (the wall canvas is the wall's tight bounding box, so
+// anything drawn outside a surface at the wall edge would be clipped away).
+const drawSurfaceBoundaries = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  if (layout.surfaces.length < 2) return;
+  const { W, H } = layout;
+  const stroke = Math.max(2, Math.round(Math.min(W, H) * 0.004));
+  const fontPx = Math.max(12, Math.round(Math.min(W, H) * 0.022));
+  ctx.save();
+  ctx.lineWidth = stroke;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.lineJoin = "round";
+  layout.surfaces.forEach((surface) => {
+    if (surface.bbox.w <= 0 || surface.bbox.h <= 0) return;
+    const color = surface.color ?? "#ffffff";
+    const inset = stroke / 2;
+    ctx.strokeStyle = color;
+    ctx.strokeRect(surface.bbox.x + inset, surface.bbox.y + inset, surface.bbox.w - stroke, surface.bbox.h - stroke);
+    if (!surface.name) return;
+    const label = surface.name.toUpperCase();
+    ctx.font = `bold ${fontPx}px Arial`;
+    const padPx = Math.round(fontPx * 0.35);
+    const boxW = ctx.measureText(label).width + padPx * 2;
+    ctx.fillStyle = color;
+    ctx.fillRect(surface.bbox.x + stroke, surface.bbox.y + stroke, boxW, fontPx + padPx * 2);
+    ctx.fillStyle = "#020617";
+    ctx.fillText(label, surface.bbox.x + stroke + padPx, surface.bbox.y + stroke + padPx);
+  });
+  ctx.restore();
 };

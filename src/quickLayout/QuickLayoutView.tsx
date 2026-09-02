@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { ChevronUp, ChevronDown, FileText } from "lucide-react";
-import { PANEL_TYPES, POWER_DISTROS, type PanelTypeKey, type PowerDistroKey } from "../App";
+import { PANEL_COUNT_LABELS, PANEL_TYPES, POWER_DISTROS, spareForBucket, type PanelTypeKey, type PowerDistroKey } from "../App";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, Select } from "../components/ui";
 
 // Must match QUICK_LAYOUT_TRANSFER_KEY in App.tsx.
@@ -11,8 +11,6 @@ const MAX_CELLS = 100;
 const clampCells = (n: number) => Math.min(MAX_CELLS, Math.max(MIN_CELLS, Math.round(n) || MIN_CELLS));
 
 const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
-
-const roundUpToBox = (value: number, boxSize: number) => (boxSize > 0 ? Math.ceil(Math.max(value, 0) / boxSize) * boxSize : Math.max(value, 0));
 
 const formatM = (n: number) => `${n.toFixed(2)} m`;
 
@@ -60,11 +58,12 @@ export default function QuickLayoutView() {
   const totalPanels = cols * rows;
   const totalPixels = pixelW * pixelH;
 
-  // Spare panels + box rounding, matching the main Layout Tool's own stock
-  // maths (same spareRatio/panelsPerBox defaults per panel type) - shown as
-  // an early heads-up here, before any real patching/stock-list exists.
-  const sparePanels = Math.ceil(totalPanels * panel.defaults.spareRatio);
-  const panelsRoundedToBoxes = totalPanels > 0 ? roundUpToBox(totalPanels + sparePanels, panel.defaults.panelsPerBox) : 0;
+  // Panel counts come straight from the main Layout Tool's own shared
+  // spareForBucket (same spare ratio, same "round the spare up to a whole
+  // box" rule, same wording via PANEL_COUNT_LABELS) - shown as an early
+  // heads-up here, before any real patching/stock list exists. This grid is
+  // uniform, so it is exactly one spare bucket.
+  const panelCounts = spareForBucket(totalPanels, panelType === "MT" ? "MT" : "MG9_STANDARD");
 
   // MT is a transparent panel missing every second LED row, so its vertical
   // pixel pitch (7.8mm) is twice its horizontal pitch (3.9mm) - the raw
@@ -239,8 +238,10 @@ export default function QuickLayoutView() {
       const panelStats: Array<[string, string]> = [
         ["Panel Type", panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)"],
         ["Grid", `${cols} x ${rows} (${totalPanels} panels)`],
-        ["Spare Panels Needed", `${sparePanels}`],
-        ["Rounded To Full Boxes", `${panelsRoundedToBoxes} (boxes of ${panel.defaults.panelsPerBox})`],
+        [PANEL_COUNT_LABELS.required, `${totalPanels}`],
+        [PANEL_COUNT_LABELS.spare, `${panelCounts.spare}`],
+        [PANEL_COUNT_LABELS.spareRounded, `${panelCounts.spareRounded}`],
+        [PANEL_COUNT_LABELS.total, `${panelCounts.total} (boxes of ${panel.defaults.panelsPerBox})`],
         [hasSquarePixels ? "Wall Size" : "Physical Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`],
       ];
       if (hasSquarePixels) {
@@ -471,12 +472,16 @@ export default function QuickLayoutView() {
 
               <div className="rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 text-sm">
                 <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-                  <dt className="text-slate-400">Panel count</dt>
+                  <dt className="text-slate-400">{PANEL_COUNT_LABELS.required}</dt>
                   <dd>{totalPanels}</dd>
-                  <dt className="text-slate-400">Spare panels needed</dt>
-                  <dd>{sparePanels}</dd>
-                  <dt className="text-slate-400">Rounded to full boxes</dt>
-                  <dd>{panelsRoundedToBoxes} <span className="text-slate-500">(boxes of {panel.defaults.panelsPerBox})</span></dd>
+                  <dt className="text-slate-400">{PANEL_COUNT_LABELS.spare}</dt>
+                  <dd>{panelCounts.spare}</dd>
+                  <dt className="text-slate-400">{PANEL_COUNT_LABELS.spareRounded}</dt>
+                  <dd>{panelCounts.spareRounded}</dd>
+                  <dt className="text-slate-400 font-semibold">{PANEL_COUNT_LABELS.total}</dt>
+                  <dd className="font-semibold">
+                    {panelCounts.total} <span className="font-normal text-slate-500">(boxes of {panel.defaults.panelsPerBox})</span>
+                  </dd>
                   <dt className="text-slate-400">{hasSquarePixels ? "Wall size" : "Physical size"}</dt>
                   <dd>{formatM(wallWidthM)} × {formatM(wallHeightM)}</dd>
                   {hasSquarePixels ? (

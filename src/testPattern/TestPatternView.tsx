@@ -14,6 +14,21 @@ type StoredPayload = {
   surfaceName?: string;
   panelType?: PanelTypeKey;
   panels?: unknown;
+  /** v2+. Absent on payloads written before per-sub-screen patterns existed, which then render as one whole-wall surface exactly as they used to. */
+  subScreens?: unknown;
+};
+
+const normalizeStoredSubScreens = (raw: unknown): Array<{ id: string; name: string; color: string }> => {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((item) => {
+    const entry = item as { id?: unknown; name?: unknown; color?: unknown };
+    if (typeof entry?.id !== "string" || !entry.id) return [];
+    return [{
+      id: entry.id,
+      name: typeof entry.name === "string" ? entry.name : "",
+      color: typeof entry.color === "string" && /^#[0-9a-fA-F]{6}$/.test(entry.color) ? entry.color : "#ffffff",
+    }];
+  });
 };
 
 const loadProject = (): TestPatternProject | null => {
@@ -28,6 +43,7 @@ const loadProject = (): TestPatternProject | null => {
       surfaceName: (data.surfaceName || "").trim(),
       panelType: data.panelType && (data.panelType === "MG9" || data.panelType === "MT") ? data.panelType : "MG9",
       panels,
+      subScreens: normalizeStoredSubScreens(data.subScreens),
     };
   } catch {
     return null;

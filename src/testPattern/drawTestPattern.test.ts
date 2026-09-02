@@ -1,6 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { makeGridPanels, type Cell } from "../App";
-import { computeTestPatternLayout, getContentPixelHeight, drawBouncingLogo, drawAlignmentOverlay, type TestPatternLayout } from "./drawTestPattern";
+import {
+  computeTestPatternLayout,
+  getContentPixelHeight,
+  drawBouncingLogo,
+  drawAlignmentOverlay,
+  WHOLE_WALL_SURFACE_ID,
+  UNASSIGNED_SURFACE_ID,
+  type TestPatternLayout,
+} from "./drawTestPattern";
 
 // Regression coverage for a real bug: panels were positioned by tightly
 // packing each row band left-to-right in array order (summing pixel widths),
@@ -210,5 +218,94 @@ describe("drawAlignmentOverlay circle", () => {
     const contentScaleY = layout.contentPixelH / layout.H; // 2
     // After the caller's ctx.scale(1, contentScaleY), the effective on-screen radii must be equal.
     expect(radiusY * contentScaleY).toBeCloseTo(radiusX, 10);
+  });
+});
+
+// Per-sub-screen surfaces: each sub-screen gets its own independently
+// animating pattern (see TestPatternSurface / drawTestPatternFrame), so the
+// pattern lives inside that screen's panels only rather than every screen
+// showing one slice of a single wall-wide animation.
+describe("computeTestPatternLayout surfaces", () => {
+  const twoScreenWall = () => {
+    // 4x1 MG9 row; left two panels are "Left", right two are "Right".
+    const grid = makeGridPanels(4, 1, "MG9");
+    return grid.map((cell) => ({ ...cell, subScreenId: cell.x < 1000 ? "left" : "right" }));
+  };
+
+  it("collapses to one whole-wall surface when the project has no sub-screens", () => {
+    const panels = makeGridPanels(3, 2, "MG9");
+    const layout = computeTestPatternLayout({ projectName: "Test", panelType: "MG9", panels });
+
+    expect(layout.surfaces).toHaveLength(1);
+    expect(layout.surfaces[0].id).toBe(WHOLE_WALL_SURFACE_ID);
+    expect(layout.surfaces[0].color).toBeNull();
+    expect(layout.surfaces[0].cells).toHaveLength(6);
+    expect(layout.surfaces[0].bbox).toMatchObject({ x: 0, y: 0, w: layout.W, h: layout.H });
+  });
+
+  it("gives each sub-screen its own surface, colour and bounding box", () => {
+    const layout = computeTestPatternLayout({
+      projectName: "Test",
+      panelType: "MG9",
+      panels: twoScreenWall(),
+      subScreens: [
+        { id: "left", name: "Left Screen", color: "#38bdf8" },
+        { id: "right", name: "Right Screen", color: "#fb923c" },
+      ],
+    });
+
+    expect(layout.surfaces.map((s) => s.id)).toEqual(["left", "right"]);
+    expect(layout.surfaces.map((s) => s.color)).toEqual(["#38bdf8", "#fb923c"]);
+    layout.surfaces.forEach((surface) => expect(surface.cells).toHaveLength(2));
+    // Each bbox covers exactly two panels wide, and the two are side by side
+    // in the mirrored display space with no overlap.
+    const [left, right] = layout.surfaces;
+    expect(left.bbox.w).toBe(336);
+    expect(right.bbox.w).toBe(336);
+    expect(left.bbox.x + left.bbox.w === right.bbox.x || right.bbox.x + right.bbox.w === left.bbox.x).toBe(true);
+  });
+
+  it("puts panels outside any sub-screen in their own Unassigned surface", () => {
+    const panels = twoScreenWall().map((cell) => (cell.x === 1500 ? { ...cell, subScreenId: null } : cell));
+    const layout = computeTestPatternLayout({
+      projectName: "Test",
+      panelType: "MG9",
+      panels,
+      subScreens: [
+        { id: "left", name: "Left Screen", color: "#38bdf8" },
+        { id: "right", name: "Right Screen", color: "#fb923c" },
+      ],
+    });
+
+    expect(layout.surfaces.map((s) => s.id)).toEqual(["left", "right", UNASSIGNED_SURFACE_ID]);
+    expect(layout.surfaces[2].cells).toHaveLength(1);
+    expect(layout.surfaces[2].color).toBeNull();
+  });
+
+  it("assigns every active panel to exactly one surface", () => {
+    const layout = computeTestPatternLayout({
+      projectName: "Test",
+      panelType: "MG9",
+      panels: twoScreenWall(),
+      subScreens: [
+        { id: "left", name: "Left Screen", color: "#38bdf8" },
+        { id: "right", name: "Right Screen", color: "#fb923c" },
+      ],
+    });
+
+    const ids = layout.surfaces.flatMap((surface) => surface.cells.map((cell) => cell.id));
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.length).toBe(layout.activePanels.length);
+  });
+
+  it("ignores a declared sub-screen that has no panels", () => {
+    const layout = computeTestPatternLayout({
+      projectName: "Test",
+      panelType: "MG9",
+      panels: makeGridPanels(2, 1, "MG9"),
+      subScreens: [{ id: "empty", name: "Empty", color: "#38bdf8" }],
+    });
+
+    expect(layout.surfaces.map((s) => s.id)).toEqual([WHOLE_WALL_SURFACE_ID]);
   });
 });

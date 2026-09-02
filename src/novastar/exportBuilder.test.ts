@@ -104,8 +104,8 @@ describe("buildNovaStarExport - multiple sub-screens", () => {
     // not output-canvas/sub-screen placement (see
     // wallNativePositioningRegression.test.ts for the real-file proof).
     const subScreens: SubScreen[] = [
-      { id: "left", name: "Left Screen", canvasX: 0, canvasY: 0, createdAt: 1 },
-      { id: "right", name: "Right Screen", canvasX: 9999, canvasY: 9999, createdAt: 2 },
+      { id: "left", name: "Left Screen", canvasX: 0, canvasY: 0, createdAt: 1, color: "#fb923c" },
+      { id: "right", name: "Right Screen", canvasX: 9999, canvasY: 9999, createdAt: 2, color: "#a3e635" },
     ];
 
     const input = baseInput({
@@ -182,8 +182,8 @@ describe("buildNovaStarExport - whole-canvas input mode", () => {
     let grid = [...leftGrid, ...rightGrid];
     grid = grid.map((c, i) => ({ ...c, assignedPort: 1, sequence: i + 1 }));
     const subScreens: SubScreen[] = [
-      { id: "left", name: "Left Screen", canvasX: 0, canvasY: 0, createdAt: 1 },
-      { id: "right", name: "Right Screen", canvasX: 336, canvasY: 0, createdAt: 2 },
+      { id: "left", name: "Left Screen", canvasX: 0, canvasY: 0, createdAt: 1, color: "#fb923c" },
+      { id: "right", name: "Right Screen", canvasX: 336, canvasY: 0, createdAt: 2, color: "#a3e635" },
     ];
 
     const input = baseInput({

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Button, Card, CardContent, CardHeader, CardTitle, Input } from "../components/ui";
-import type { Cell, SubScreen } from "../App";
+import { SUB_SCREEN_COLORS, normalizeSubScreenColor, type Cell, type SubScreen } from "../App";
 import { subScreenPanelCount } from "./subScreenModel";
 
 type Props = {
@@ -11,6 +11,7 @@ type Props = {
   onSelectScreen: (id: string | null) => void;
   onCreate: (name: string) => void;
   onRename: (id: string, name: string) => void;
+  onRecolor: (id: string, color: string) => void;
   onDelete: (id: string) => void;
   onSelectAllInSubScreen: (id: string) => void;
 };
@@ -22,6 +23,7 @@ export default function SubScreenPanel({
   onSelectScreen,
   onCreate,
   onRename,
+  onRecolor,
   onDelete,
   onSelectAllInSubScreen,
 }: Props) {
@@ -74,9 +76,10 @@ export default function SubScreenPanel({
             <span className="text-xs text-slate-300">whole layout{unassignedCount ? ` · ${unassignedCount} unassigned` : ""}</span>
           </button>
 
-          {sorted.map((screen) => {
+          {sorted.map((screen, index) => {
             const count = subScreenPanelCount(grid, screen.id);
             const isActive = activeSubScreenId === screen.id;
+            const color = normalizeSubScreenColor(screen.color, index);
             return (
               <div
                 key={screen.id}
@@ -116,13 +119,39 @@ export default function SubScreenPanel({
                   </div>
                 ) : (
                   <button type="button" onClick={() => onSelectScreen(screen.id)} className="flex w-full items-center justify-between text-left">
-                    <span className="font-semibold">{screen.name}</span>
+                    <span className="flex min-w-0 items-center gap-2 font-semibold">
+                      <span className="h-3 w-3 shrink-0 rounded-full border border-slate-900/60" style={{ backgroundColor: color }} aria-hidden />
+                      <span className="truncate">{screen.name}</span>
+                    </span>
                     <span className="text-xs text-slate-300">{count} panel{count === 1 ? "" : "s"}</span>
                   </button>
                 )}
 
                 {isActive && renamingId !== screen.id ? (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
+                  <div className="mt-2 space-y-2">
+                  <label className="flex items-center gap-2 text-xs text-slate-300">
+                    <span className="w-14 shrink-0">Colour</span>
+                    <input
+                      type="color"
+                      value={color}
+                      onChange={(e) => onRecolor(screen.id, e.target.value)}
+                      className="h-7 w-12 cursor-pointer rounded border border-slate-600 bg-slate-800 p-0.5"
+                      title={`Outline colour for ${screen.name} in the Panel Layout`}
+                    />
+                    <div className="flex flex-wrap gap-1">
+                      {SUB_SCREEN_COLORS.map((swatch) => (
+                        <button
+                          key={swatch}
+                          type="button"
+                          onClick={() => onRecolor(screen.id, swatch)}
+                          aria-label={`Use ${swatch}`}
+                          className={`h-5 w-5 rounded-full border ${color === swatch ? "border-white ring-2 ring-white/70" : "border-slate-600"}`}
+                          style={{ backgroundColor: swatch }}
+                        />
+                      ))}
+                    </div>
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
                     <Button
                       intent="secondary"
                       size="sm"
@@ -150,6 +179,7 @@ export default function SubScreenPanel({
                         Delete
                       </Button>
                     )}
+                  </div>
                   </div>
                 ) : null}
               </div>

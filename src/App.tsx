@@ -1,5 +1,5 @@
 ﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ImageDown, Video, LayoutGrid } from "lucide-react";
 import { HelpCircle, Redo2, Undo2 } from "lucide-react";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
@@ -31,10 +31,16 @@ import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./n
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
 import { applyStockOverrides, baseCodeOf, buildStockComparison, loadStockOverrides, saveStockOverrides, type StockComparisonRow, type StockOverrides } from "./rentman/stockOverrides";
-import { fetchEquipmentStock, fetchEquipmentAvailability } from "./rentman/rentmanClient";
-import RentmanPanel from "./rentman/RentmanPanel";
+import {
+  fetchEquipmentStock,
+  fetchEquipmentAvailability,
+  fetchEquipmentRepairs,
+  isRentmanProxyConfigured,
+  type EquipmentAvailability,
+  type EquipmentRepairs,
+} from "./rentman/rentmanClient";
 import StockComparisonModal from "./rentman/StockComparisonModal";
-import AvailabilityModal, { type AvailabilityRow } from "./rentman/AvailabilityModal";
+import ExportSectionsModal, { type ExportSection } from "./exports/ExportSectionsModal";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -48,7 +54,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.36.1";
+const APP_VERSION = "0.38.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -230,6 +236,9 @@ export type StockRow = {
   net: number;
   method: string;
   spare?: number;
+  /** `spare` rounded up to a whole equipment box for this item (equals `spare` for anything not boxed) - see spareForBucket for the shared vocabulary. */
+  spareRounded?: number;
+  /** TOTAL required = required + spareRounded. The real order/pull quantity, and what `net` is measured against. */
   rounded?: number;
 };
 
@@ -276,7 +285,34 @@ export type SubScreen = {
   canvasY: number;
   /** Stable insertion-order sort key. */
   createdAt: number;
+  /**
+   * Identity colour (`#rrggbb`), chosen by the user - drawn as this
+   * sub-screen's outline in the Panel Layout and used to tint its own test
+   * pattern, so which panels belong to which screen is obvious at a glance.
+   * Saved with the project. Absent on projects created before this existed;
+   * normalizeSubScreens fills those in from SUB_SCREEN_COLORS by position.
+   */
+  color: string;
 };
+
+// Default sub-screen identity colours, handed out in order as screens are
+// created (and used to backfill projects saved before colours existed).
+// Deliberately a separate list from PORT_COLORS: a sub-screen's colour and a
+// signal port's colour appear in the same workspace and must not be
+// confusable with each other.
+export const SUB_SCREEN_COLORS = [
+  "#38bdf8",
+  "#fb923c",
+  "#a3e635",
+  "#f472b6",
+  "#c084fc",
+  "#facc15",
+  "#2dd4bf",
+  "#fb7185",
+];
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+export const normalizeSubScreenColor = (raw: unknown, index: number): string =>
+  typeof raw === "string" && HEX_COLOR.test(raw) ? raw.toLowerCase() : SUB_SCREEN_COLORS[index % SUB_SCREEN_COLORS.length];
 
 export type OutputCanvasPreset = { w: number; h: number };
 export const OUTPUT_CANVAS_PRESETS: OutputCanvasPreset[] = [
@@ -302,6 +338,9 @@ type LayoutSnapshot = {
 // src/quickLayout/QuickLayoutView.tsx), written to localStorage right before
 // it navigates this same tab back to the plain app URL.
 const QUICK_LAYOUT_TRANSFER_KEY = "ledCablingQuickLayoutTransfer:v1";
+// Section key for the whole-wall test pattern in the export picker - can't
+// collide with a sub-screen id, which is always a uuid.
+const FULL_WALL_PATTERN_KEY = "__full_wall__";
 type QuickLayoutTransfer = { panelType: PanelTypeKey; cols: number; rows: number; projectName?: string };
 
 type SignalPortStat = {
@@ -482,21 +521,58 @@ const SPARE_BUCKET_RATIO: Record<SpareBucketKey, number> = {
   MG9_CORNER: PANEL_TYPES.MG9.defaults.spareRatio,
   MT: PANEL_TYPES.MT.defaults.spareRatio,
 };
-// Box size to round each bucket's (used + spare) up to - null means shaped
-// panels (Triangle/Curved), which are one-way physical pieces bought
-// individually, not boxed, so the spare is just added as-is, unrounded.
-const SPARE_BUCKET_BOX_SIZE: Record<SpareBucketKey, number | null> = {
+// Box size each bucket ships in - null means shaped panels (Triangle/Curved),
+// which are one-way physical pieces bought individually, not boxed, so their
+// spare is used as-is, unrounded.
+export const SPARE_BUCKET_BOX_SIZE: Record<SpareBucketKey, number | null> = {
   MG9_STANDARD: PANEL_TYPES.MG9.defaults.panelsPerBox,
   MG9_TRIANGLE: null,
   MG9_CURVED: null,
   MG9_CORNER: PANEL_TYPES.MG9.defaults.panelsPerBox,
   MT: PANEL_TYPES.MT.defaults.panelsPerBox,
 };
-export const spareForBucket = (used: number, bucket: SpareBucketKey): { spare: number; rounded: number } => {
+// The one panel-count vocabulary used everywhere (Quick Panel Layout, Wall
+// Summary, Stock Calculations, PDF):
+//   required  - panels the wall actually needs
+//   spare     - the raw spare ratio applied to `required`
+//   total     - required + spare taken UP to a whole number of equipment
+//               boxes, because what physically leaves the warehouse is whole
+//               boxes; shaped panels have no box, so this is just
+//               required + spare
+//   spareRounded - the spares that fall out of that: total - required. Always
+//               >= spare, since `total` only ever rounds upward
+//
+// The rounding is applied to required + spare TOGETHER, not to the spare on
+// its own - the required panels already part-fill a box, so the spare only
+// has to top up whatever is left of it. Worked example, MG9 (boxes of 10):
+// 45 required needs 4 spare (7%, ceiled); 45 + 4 = 49 rounds up to 50, so
+// 5 spares go out and the total pulled is 50 - a clean 5 boxes.
+// One set of labels for the four figures above, imported by every place that
+// prints them (Wall Summary, Stock Calculations, the PDF, and the standalone
+// Quick Panel Layout tab) so the wording can never drift apart again.
+export const PANEL_COUNT_LABELS = {
+  required: "Required Panels",
+  spare: "Spare Panels",
+  spareRounded: "Spare Panels - Rounded to Full Boxes",
+  total: "TOTAL Required Panels",
+} as const;
+// Same four figures, but for the full stock table, whose rows are cables,
+// frames and cases as well as panels - "Required Panels: 1" would be wrong on
+// a flight case. Identical order and meaning, just without the noun.
+export const STOCK_COUNT_LABELS = {
+  required: "Required",
+  spare: "Spares",
+  spareRounded: "Spares Rounded to Full Box",
+  total: "Total Required",
+} as const;
+export const spareForBucket = (
+  used: number,
+  bucket: SpareBucketKey,
+): { spare: number; spareRounded: number; total: number } => {
   const spare = Math.ceil(used * SPARE_BUCKET_RATIO[bucket]);
   const boxSize = SPARE_BUCKET_BOX_SIZE[bucket];
-  const rounded = boxSize ? roundUpToBox(used + spare, boxSize) : used + spare;
-  return { spare, rounded };
+  const total = boxSize ? roundUpToBox(used + spare, boxSize) : used + spare;
+  return { spare, spareRounded: total - used, total };
 };
 
 // Footprint in workspace mm, honouring rotation (90/270 swaps width/height).
@@ -581,6 +657,7 @@ export const normalizeSubScreens = (raw: unknown): SubScreen[] => {
       canvasX: Number.isFinite(Number(entry.canvasX)) ? Number(entry.canvasX) : 0,
       canvasY: Number.isFinite(Number(entry.canvasY)) ? Number(entry.canvasY) : 0,
       createdAt: Number.isFinite(Number(entry.createdAt)) ? Number(entry.createdAt) : index,
+      color: normalizeSubScreenColor(entry.color, index),
     });
   });
   return subScreens;
@@ -665,6 +742,14 @@ const formatNumber = (value: number, digits = 0) =>
 
 // Rounds to at most 2 decimal places and trims trailing zeros (19.384... -> "19.38", 3.50 -> "3.5", 4.00 -> "4").
 const formatMeters = (value: number) => (Number(value) || 0).toFixed(2).replace(/\.?0+$/, "");
+
+// Rentman hands back full ISO timestamps; only the day matters in these
+// tables. Falls back to the raw string rather than printing "Invalid Date".
+const formatDateLabel = (iso: string) => {
+  if (!iso) return "-";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString();
+};
 
 const getStatusColor = (percent: number) => {
   if (percent > 100) return "#ef4444";
@@ -865,15 +950,16 @@ const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
 };
 
 // `required` is always the raw quantity needed to build the wall, with no
-// spare or packaging rounding folded in - `rounded` (required + spare,
-// packaging-rounded where relevant) is the real order/pull quantity, so
-// `net` (shortfall) is checked against THAT, not the bare required count.
+// spare or packaging rounding folded in - `rounded` (required +
+// spareRounded) is the real order/pull quantity, so `net` (shortfall) is
+// checked against THAT, not the bare required count.
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
   required: number,
   method: string,
   spare = 0,
-  rounded = required + spare,
+  spareRounded = spare,
+  rounded = required + spareRounded,
 ): StockRow => ({
   code: item.code,
   name: item.name,
@@ -882,6 +968,7 @@ const makeStockRow = (
   net: item.stock - rounded,
   method,
   spare,
+  spareRounded,
   rounded,
 });
 
@@ -1459,8 +1546,12 @@ export default function App() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showGridSizeConfirm, setShowGridSizeConfirm] = useState(false);
   const [customRotationDeg, setCustomRotationDeg] = useState("15");
+  // ONE switch for the vertical centre indicator, wherever it is drawn: the
+  // Panel Layout workspace on screen AND the PDF's Panel Layout pages. There
+  // used to be a second "include it in the PDF" flag next to this, which meant
+  // turning the line off on screen still left a control claiming it would
+  // print - one line, one control.
   const [showCentreLine, setShowCentreLine] = useState(true);
-  const [includeCentreLineInExport, setIncludeCentreLineInExport] = useState(true);
   const [clipboard, setClipboard] = useState<ClipboardSelection | null>(null);
   const [isPasting, setIsPasting] = useState(false);
   const [pasteAnchor, setPasteAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -1513,12 +1604,24 @@ export default function App() {
   // Used only when inputMode === "whole".
   const [wholeCanvasInputId, setWholeCanvasInputId] = useState<number | null>(null);
   const [isGeneratingNovaStarFile, setIsGeneratingNovaStarFile] = useState(false);
-  // Rentman Integration (see src/rentman/) - project-specific date range is
-  // regular state (saved/loaded with the project); confirmed stock overrides
-  // are account-wide, so they're loaded from/persisted to localStorage
-  // instead (see stockOverrides.ts), not this project's JSON.
-  const [rentmanDateFrom, setRentmanDateFrom] = useState("");
-  const [rentmanDateTo, setRentmanDateTo] = useState("");
+  // The project's own date range (LED Wall Setup, under Project Name) -
+  // saved/loaded with the project, printed on the PDF, and the default window
+  // for Rentman availability checks. Confirmed Rentman stock overrides are
+  // account-wide instead, so they live in localStorage (see stockOverrides.ts),
+  // not in this project's JSON.
+  const [projectDateFrom, setProjectDateFrom] = useState("");
+  const [projectDateTo, setProjectDateTo] = useState("");
+  // Section pickers shown before the PDF report / test-pattern package runs.
+  // null = closed (see ExportSectionsModal).
+  const [pdfSectionPicker, setPdfSectionPicker] = useState<ExportSection[] | null>(null);
+  const [testPatternPicker, setTestPatternPicker] = useState<ExportSection[] | null>(null);
+  // Surface picker for the Moving Test Pattern. Single-choice, because both
+  // destinations can only carry one surface: the live view fills one display,
+  // and the video is one file. `next` is what to do once a surface is picked -
+  // open the live window, or go on to the WebM/MP4 format choice.
+  const [movingPatternPicker, setMovingPatternPicker] = useState<{ sections: ExportSection[]; next: "open" | "download" } | null>(null);
+  // The surface chosen for a download, held while the format modal is up.
+  const [movingPatternSurfaceKey, setMovingPatternSurfaceKey] = useState<string | null>(null);
   const [stockOverrides, setStockOverrides] = useState<StockOverrides>(() => loadStockOverrides());
   const [stockChecking, setStockChecking] = useState(false);
   const [stockCheckError, setStockCheckError] = useState<string | null>(null);
@@ -1526,7 +1629,21 @@ export default function App() {
   const [stockComparisonRows, setStockComparisonRows] = useState<StockComparisonRow[] | null>(null);
   const [availabilityChecking, setAvailabilityChecking] = useState(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
-  const [availabilityRows, setAvailabilityRows] = useState<AvailabilityRow[] | null>(null);
+  // Rentman availability/repair results, keyed by orientation-stripped stock
+  // code. null = never checked, which is what keeps the extra Stock
+  // Calculations columns hidden until there is something real to put in them.
+  const [availabilityByCode, setAvailabilityByCode] = useState<Record<string, EquipmentAvailability | null> | null>(null);
+  const [availabilityCheckedRange, setAvailabilityCheckedRange] = useState<{ from: string; to: string } | null>(null);
+  const [repairsByCode, setRepairsByCode] = useState<Record<string, EquipmentRepairs | null> | null>(null);
+  const [repairsChecking, setRepairsChecking] = useState(false);
+  const [repairsError, setRepairsError] = useState<string | null>(null);
+  // Optional one-off availability window, when the user wants to check a
+  // range other than the project's own without editing the project. null on
+  // either side means "use the project date range" (see stockCheckFrom/To).
+  const [stockDateOverrideFrom, setStockDateOverrideFrom] = useState<string | null>(null);
+  const [stockDateOverrideTo, setStockDateOverrideTo] = useState<string | null>(null);
+  // Which stock row currently has its Other Projects / Broken breakdown open.
+  const [expandedStockDetail, setExpandedStockDetail] = useState<{ code: string; kind: "projects" | "repairs" } | null>(null);
   // Drag gesture for repositioning a sub-screen (or the whole layout, id=null)
   // on the output canvas - separate pixel-space analogue of moveDrag.
   const [canvasDrag, setCanvasDrag] = useState<{ id: string | null; startX: number; startY: number; dx: number; dy: number } | null>(null);
@@ -1972,6 +2089,16 @@ export default function App() {
     columnBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
     return map;
   }, [columnBands]);
+  // The panel reference shown on the panel itself in the workspace, the PNG
+  // test pattern and the PDF layout pages ("row 3, column 5"), as one short
+  // string. Exports that need to name a specific panel use THIS - never the
+  // internal cell id, which means nothing to anyone reading a report.
+  const panelRefLabel = (cell: Cell) =>
+    `R${(bandIndexById.get(cell.id) ?? 0) + 1} C${(columnIndexById.get(cell.id) ?? 0) + 1}`;
+  const panelRefLabelById = (id: string | null | undefined) => {
+    const cell = id ? findCellById(grid, id) : null;
+    return cell ? panelRefLabel(cell) : "-";
+  };
   const panelTypeCounts = useMemo(() => {
     const counts = { MG9: 0, MT: 0 } as Record<PanelTypeKey, number>;
     activePanels.forEach((cell) => {
@@ -2062,23 +2189,24 @@ export default function App() {
   // computed, plus each surface's own subtotal and a project-wide grand
   // total - shared by the on-screen breakdown and the PDF report.
   const sparePanelSummary = useMemo(() => {
+    type PanelCountRow = { label: string; used: number; spare: number; spareRounded: number; total: number };
+    const zeroTotals = () => ({ used: 0, spare: 0, spareRounded: 0, total: 0 });
+    const sum = (acc: ReturnType<typeof zeroTotals>, row: { used: number; spare: number; spareRounded: number; total: number }) => ({
+      used: acc.used + row.used,
+      spare: acc.spare + row.spare,
+      spareRounded: acc.spareRounded + row.spareRounded,
+      total: acc.total + row.total,
+    });
     const surfaceRows = sparePanelSurfaces.map((surface) => {
       const bucketRows = SPARE_BUCKETS.map((b) => {
         const used = surface.buckets[b.key];
         if (used === 0) return null;
-        const { spare, rounded } = spareForBucket(used, b.key);
-        return { label: b.label, used, spare, rounded };
-      }).filter((row): row is { label: string; used: number; spare: number; rounded: number } => row !== null);
-      const subtotal = bucketRows.reduce(
-        (acc, row) => ({ used: acc.used + row.used, spare: acc.spare + row.spare, rounded: acc.rounded + row.rounded }),
-        { used: 0, spare: 0, rounded: 0 },
-      );
-      return { name: surface.name, bucketRows, subtotal };
+        const { spare, spareRounded, total } = spareForBucket(used, b.key);
+        return { label: b.label, used, spare, spareRounded, total };
+      }).filter((row): row is PanelCountRow => row !== null);
+      return { name: surface.name, bucketRows, subtotal: bucketRows.reduce(sum, zeroTotals()) };
     });
-    const grandTotal = surfaceRows.reduce(
-      (acc, s) => ({ used: acc.used + s.subtotal.used, spare: acc.spare + s.subtotal.spare, rounded: acc.rounded + s.subtotal.rounded }),
-      { used: 0, spare: 0, rounded: 0 },
-    );
+    const grandTotal = surfaceRows.reduce((acc, s) => sum(acc, s.subtotal), zeroTotals());
     return { surfaceRows, grandTotal, multiSurface: surfaceRows.length > 1 };
   }, [sparePanelSurfaces]);
   // Occupied 0.5m module columns/rows across the wall bbox - used by the
@@ -2306,10 +2434,19 @@ export default function App() {
   const mtSpare = Math.ceil(mtCount * mtDefaults.spareRatio);
   const mg9Boxes = mg9Count > 0 ? Math.ceil((mg9Count + mg9Spare) / mg9Defaults.panelsPerBox) : 0;
   const mtBoxes = mtCount > 0 ? Math.ceil((mtCount + mtSpare) / mtDefaults.panelsPerBox) : 0;
-  const sparePanels = mg9Spare + mtSpare;
-  const totalPanelsWithSpare = totalPanels + sparePanels;
   const boxCount = mg9Boxes + mtBoxes;
-  const boxSparePanels = mg9Boxes * mg9Defaults.panelsPerBox + mtBoxes * mtDefaults.panelsPerBox - totalPanelsWithSpare;
+  // The four headline panel-count figures, shown with identical wording in
+  // the Wall Summary, Stock Calculations, Quick Panel Layout and the PDF.
+  // Sourced from sparePanelSummary (the per-bucket, per-surface breakdown) so
+  // every one of those places is reading exactly the same arithmetic - a
+  // whole-wall `ceil(total * ratio)` would disagree with it as soon as more
+  // than one panel bucket is in play.
+  const panelCounts = {
+    required: sparePanelSummary.grandTotal.used,
+    spare: sparePanelSummary.grandTotal.spare,
+    spareRounded: sparePanelSummary.grandTotal.spareRounded,
+    total: sparePanelSummary.grandTotal.total,
+  };
   const vx1000Percent = (wallPixelW * wallPixelH / 6500000) * 100;
   const vx2000Percent = (wallPixelW * wallPixelH / 13000000) * 100;
   const circuitsUsedMax = Math.ceil(totalPanels / Math.max(safePanelsPerPowerOutlet, 1));
@@ -2372,26 +2509,35 @@ export default function App() {
     const mtStockCat = PANEL_TYPES.MT.stock as Record<string, number>;
     const stock = mg9StockCat;
     const rowsOut: StockRow[] = [];
-    // `required` is always the raw quantity needed to build the wall - `spare`
-    // and `rounded` (defaulting to required + spare) carry the real order/pull
-    // quantity, and `net` (shortfall) is checked against THAT, not the bare
-    // required count.
-    const pushBaseRow = (code: string, name: string, required: number, stockQty: number, method: string, spare = 0, rounded = required + spare) => {
-      rowsOut.push({ code, name, required, spare, rounded, stock: stockQty, net: stockQty - rounded, method });
+    // `required` is always the raw quantity needed to build the wall -
+    // `spare`, `spareRounded` (spare rounded up to a whole box) and `rounded`
+    // (required + spareRounded) carry the real order/pull quantity, and `net`
+    // (shortfall) is checked against THAT, not the bare required count.
+    const pushBaseRow = (
+      code: string,
+      name: string,
+      required: number,
+      stockQty: number,
+      method: string,
+      spare = 0,
+      spareRounded = spare,
+      rounded = required + spareRounded,
+    ) => {
+      rowsOut.push({ code, name, required, spare, spareRounded, rounded, stock: stockQty, net: stockQty - rounded, method });
     };
 
     if (mg9Count > 0) {
       const standardCount = panelVariantCounts.STANDARD;
-      const standardSpare = Math.ceil(standardCount * mg9Defaults.spareRatio);
-      const standardRounded = roundUpToBox(standardCount + standardSpare, mg9Defaults.panelsPerBox);
+      const standard = spareForBucket(standardCount, "MG9_STANDARD");
       pushBaseRow(
         "12224",
         "MG9 LED Panel",
         standardCount,
         mg9StockCat.panels ?? 0,
-        `${standardCount} + ${standardSpare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`,
-        standardSpare,
-        standardRounded,
+        `${standardCount} + ${standard.spare} spare, rounded up to full boxes of ${mg9Defaults.panelsPerBox} = ${standard.total} (${standard.spareRounded} spare)`,
+        standard.spare,
+        standard.spareRounded,
+        standard.total,
       );
 
       // Shaped panels (triangle / quarter circle) are one-way physical pieces:
@@ -2405,15 +2551,19 @@ export default function App() {
           const count = shapedOrientationCounts[variantKey][orientationKey];
           if (count <= 0) return;
           const orientation = SHAPE_ORIENTATIONS[orientationKey];
-          const spare = Math.ceil(count * mg9Defaults.spareRatio);
+          // Shaped panels are bought individually, not boxed, so their spare
+          // never box-rounds (SPARE_BUCKET_BOX_SIZE is null for these).
+          const { spare, spareRounded, total } = spareForBucket(count, variantKey === "TRIANGLE" ? "MG9_TRIANGLE" : "MG9_CURVED");
           const stockQty = SHAPED_STOCK_PER_ORIENTATION[variantKey];
           pushBaseRow(
             `${item.code}-${orientationKey}`,
             `${variant.label} ${orientation.icon} ${orientation.label}`,
             count,
             stockQty,
-            `${count} placed at this orientation + ${spare} spare`,
+            `${count} placed at this orientation + ${spare} spare (bought individually, no box rounding)`,
             spare,
+            spareRounded,
+            total,
           );
         });
       });
@@ -2423,15 +2573,33 @@ export default function App() {
         const item = PANEL_VARIANTS.CORNER.stockItem;
         const count = panelVariantCounts.CORNER;
         if (item && count > 0) {
-          const spare = Math.ceil(count * mg9Defaults.spareRatio);
-          const rounded = roundUpToBox(count + spare, mg9Defaults.panelsPerBox);
-          rowsOut.push(makeStockRow(item, count, `${count} selected + ${spare} spare, rounded to box of ${mg9Defaults.panelsPerBox}`, spare, rounded));
+          const { spare, spareRounded, total } = spareForBucket(count, "MG9_CORNER");
+          rowsOut.push(
+            makeStockRow(
+              item,
+              count,
+              `${count} selected + ${spare} spare, rounded up to full boxes of ${mg9Defaults.panelsPerBox} = ${total} (${spareRounded} spare)`,
+              spare,
+              spareRounded,
+              total,
+            ),
+          );
         }
       }
     }
 
     if (mtCount > 0) {
-      pushBaseRow("12223", "MT Mesh Panel", mtCount, mtStockCat.panels ?? 0, `${mtCount} + ${mtSpare} spare`, mtSpare);
+      const mt = spareForBucket(mtCount, "MT");
+      pushBaseRow(
+        "12223",
+        "MT Mesh Panel",
+        mtCount,
+        mtStockCat.panels ?? 0,
+        `${mtCount} + ${mt.spare} spare, rounded up to full boxes of ${mtDefaults.panelsPerBox} = ${mt.total} (${mt.spareRounded} spare)`,
+        mt.spare,
+        mt.spareRounded,
+        mt.total,
+      );
     }
 
     rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
@@ -2552,6 +2720,44 @@ export default function App() {
     () => applyStockOverrides(stockRows.filter((row) => (row.rounded ?? row.required) > 0), stockOverrides),
     [stockRows, stockOverrides],
   );
+  // visibleStockRows joined to whatever Rentman data has been pulled, and the
+  // one place the availability sum lives:
+  //
+  //   Available Stock = Rentman Stock - Other Projects - Broken/Repair
+  //
+  // then compared against this project's own TOTAL Required. `otherProjects`
+  // and `broken` stay null until their check has actually been run, which is
+  // what hides those columns rather than showing a misleading 0.
+  const stockTableRows = useMemo(() => {
+    const LOW_MARGIN = 0.1;
+    return visibleStockRows.map((row) => {
+      const base = baseCodeOf(row.code);
+      const availability = availabilityByCode ? availabilityByCode[base] ?? null : null;
+      const repairs = repairsByCode ? repairsByCode[base] ?? null : null;
+      const otherProjects = availabilityByCode ? availability?.totalRequired ?? 0 : null;
+      const broken = repairsByCode ? repairs?.quantity ?? 0 : null;
+      const totalRequired = row.rounded ?? row.required;
+      const available = row.stock - (otherProjects ?? 0) - (broken ?? 0);
+      const headroom = available - totalRequired;
+      const result: "OK" | "LOW" | "SHORT" =
+        headroom < 0 ? "SHORT" : headroom < Math.max(1, Math.ceil(totalRequired * LOW_MARGIN)) ? "LOW" : "OK";
+      return {
+        row,
+        base,
+        totalRequired,
+        otherProjects,
+        broken,
+        available,
+        shortBy: headroom < 0 ? -headroom : 0,
+        result,
+        projects: availability?.projects ?? [],
+        repairItems: repairs?.items ?? [],
+      };
+    });
+  }, [visibleStockRows, availabilityByCode, repairsByCode]);
+  const rentmanChecked = availabilityByCode !== null || repairsByCode !== null;
+  const rentmanProxyConfigured = isRentmanProxyConfigured();
+  const stockOverridesApplied = Object.keys(stockOverrides).length > 0;
   const shortfallRows = visibleStockRows.filter((row) => row.net < 0);
   // Every stock code (orientation-normalized) currently on the wall - one
   // entry per distinct base code, first-seen
@@ -2592,25 +2798,53 @@ export default function App() {
     setStockComparisonRows(null);
   };
 
+  // The window availability is actually checked against: the project's own
+  // date range unless the user has temporarily overridden it inside Stock
+  // Calculations (which deliberately does NOT edit the project's dates).
+  const stockCheckFrom = stockDateOverrideFrom ?? projectDateFrom;
+  const stockCheckTo = stockDateOverrideTo ?? projectDateTo;
+  const stockDatesOverridden = stockCheckFrom !== projectDateFrom || stockCheckTo !== projectDateTo;
+
   const checkRentmanAvailability = async () => {
-    if (!rentmanEligibleItems.length || !rentmanDateFrom || !rentmanDateTo) return;
+    if (!rentmanEligibleItems.length || !stockCheckFrom || !stockCheckTo) return;
     const codes = rentmanEligibleItems.map((item) => item.code);
     setAvailabilityChecking(true);
     setAvailabilityError(null);
     try {
-      const fetched = await fetchEquipmentAvailability(codes, rentmanDateFrom, rentmanDateTo);
-      const rows: AvailabilityRow[] = rentmanEligibleItems.flatMap((item) => {
-        const entry = fetched[item.code];
-        return entry ? [{ code: item.code, name: item.name, ...entry }] : [];
-      });
-      setAvailabilityRows(rows);
+      const fetched = await fetchEquipmentAvailability(codes, stockCheckFrom, stockCheckTo);
+      setAvailabilityByCode(fetched);
+      setAvailabilityCheckedRange({ from: stockCheckFrom, to: stockCheckTo });
     } catch (err) {
       setAvailabilityError(err instanceof Error ? err.message : "Rentman availability check failed");
     } finally {
       setAvailabilityChecking(false);
     }
   };
+
+  // Broken / under-repair equipment. Deliberately NOT date-ranged - a panel
+  // sitting in the workshop is off the shelf today, whenever the job is.
+  const checkRentmanRepairs = async () => {
+    if (!rentmanEligibleItems.length) return;
+    const codes = rentmanEligibleItems.map((item) => item.code);
+    setRepairsChecking(true);
+    setRepairsError(null);
+    try {
+      setRepairsByCode(await fetchEquipmentRepairs(codes));
+    } catch (err) {
+      setRepairsError(err instanceof Error ? err.message : "Rentman repair check failed");
+    } finally {
+      setRepairsChecking(false);
+    }
+  };
   const safeProjectName = projectName.trim() || "Untitled Project";
+  const projectDateRangeLabel =
+    projectDateFrom && projectDateTo
+      ? `Project dates: ${formatDateLabel(projectDateFrom)} to ${formatDateLabel(projectDateTo)}`
+      : projectDateFrom
+        ? `Project dates: from ${formatDateLabel(projectDateFrom)}`
+        : projectDateTo
+          ? `Project dates: until ${formatDateLabel(projectDateTo)}`
+          : "Project dates: not set";
   const fileSafeProjectName = safeProjectName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-");
   // Describe the panel mix for exports and headings.
   const panelTypeSummary =
@@ -2805,9 +3039,11 @@ export default function App() {
     // Arrowheads last so the signal/power direction stays visible in front.
     drawCanvasCableArrows(ctx, dispRectPx);
 
-    // Vertical centre indicator - opt-in only (Include Centre Line checkbox),
-    // mirrors the same trueOuterBBox-based calculation as the live workspace.
-    if (includeCentreLineInExport && showCentreLine && trueOuterBBox.w > 0) {
+    // Vertical centre indicator - follows the single Centre Line toggle in
+    // Panel Layout -> Overlays & displays, so hiding it on screen hides it
+    // here too. Mirrors the same trueOuterBBox-based calculation as the live
+    // workspace.
+    if (showCentreLine && trueOuterBBox.w > 0) {
       const centreTrueX = trueOuterBBox.x + trueOuterBBox.w / 2;
       const centreDisplayTrueX = flipped ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
       const lineX = (centreDisplayTrueX - wallBBox.x) * px;
@@ -2950,8 +3186,8 @@ const exportJson = () => {
       canvasInputs,
       inputMode,
       wholeCanvasInputId,
-      rentmanDateFrom,
-      rentmanDateTo,
+      rentmanDateFrom: projectDateFrom,
+      rentmanDateTo: projectDateTo,
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
@@ -2990,14 +3226,90 @@ const exportJson = () => {
     }
   };
 
-  const exportTestPatternPng = () => {
-    try {
+  // Sub-screen identity handed to the test pattern, so each one animates its
+  // own independent pattern in its own colour (see TestPatternSurface).
+  const testPatternSubScreens = useMemo(
+    () => subScreens.map((screen, index) => ({ id: screen.id, name: screen.name, color: normalizeSubScreenColor(screen.color, index) })),
+    [subScreens],
+  );
+
+  // Every surface a test pattern can be generated for: the whole wall, plus
+  // one entry per sub-screen that actually has panels. Always derived from
+  // the FULL grid, never the scoped activePanels - the package shouldn't
+  // change depending on which sub-screen happens to be open for editing.
+  const testPatternSurfaces = (): Array<{ key: string; name: string; panels: Cell[]; color: string | null }> => {
+    const activeGrid = grid.filter((cell) => isActiveCell(cell));
+    const surfaces: Array<{ key: string; name: string; panels: Cell[]; color: string | null }> = [];
+    if (activeGrid.length) surfaces.push({ key: FULL_WALL_PATTERN_KEY, name: surfaceName.trim() || "Full Wall", panels: activeGrid, color: null });
+    subScreens.forEach((screen, index) => {
+      const panels = activeGrid.filter((cell) => cell.subScreenId === screen.id);
+      if (panels.length) surfaces.push({ key: screen.id, name: screen.name, panels, color: normalizeSubScreenColor(screen.color, index) });
+    });
+    return surfaces;
+  };
+
+  const testPatternSectionOptions = (): ExportSection[] =>
+    testPatternSurfaces().map((surface) => {
+      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName: surface.name, panelType, panels: surface.panels });
+      return {
+        key: surface.key,
+        label: surface.key === FULL_WALL_PATTERN_KEY ? "Full wall test pattern" : `${surface.name} test pattern`,
+        hint: `${surface.panels.length} panels - ${layout.contentPixelW} x ${layout.contentPixelH} px`,
+      };
+    });
+
+  // Opens the surface picker, unless there is nothing to show - an empty
+  // picker would just be a dead end.
+  const startMovingPattern = (next: "open" | "download") => {
+    const sections = movingPatternSectionOptions();
+    if (!sections.length) {
+      alert("No active panels to render a test pattern from.");
+      return;
+    }
+    setMovingPatternPicker({ sections, next });
+  };
+
+  // Same surfaces, worded for the live/recorded moving pattern (one at a time).
+  const movingPatternSectionOptions = (): ExportSection[] =>
+    testPatternSurfaces().map((surface) => {
+      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName: surface.name, panelType, panels: surface.panels });
+      return {
+        key: surface.key,
+        label: surface.key === FULL_WALL_PATTERN_KEY ? "Full canvas" : surface.name,
+        hint: `${surface.panels.length} panels - ${layout.contentPixelW} x ${layout.contentPixelH} px`,
+      };
+    });
+
+  // Resolve a picker key back to the project payload the test pattern renders
+  // from. Picking a single sub-screen narrows BOTH the panels and the
+  // sub-screen list, so the pattern covers exactly that screen and nothing
+  // else; "Full canvas" keeps every sub-screen, so each still animates its own
+  // independent pattern inside the whole wall.
+  const movingPatternProjectFor = (key: string | null): TestPatternProject | null => {
+    const surfaces = testPatternSurfaces();
+    const surface = surfaces.find((s) => s.key === key) ?? surfaces[0];
+    if (!surface) return null;
+    const isFullCanvas = surface.key === FULL_WALL_PATTERN_KEY;
+    return {
+      projectName: safeProjectName,
+      surfaceName: isFullCanvas ? surfaceName : surface.name,
+      panelType,
+      panels: surface.panels,
+      subScreens: isFullCanvas ? testPatternSubScreens : testPatternSubScreens.filter((s) => s.id === surface.key),
+    };
+  };
+
+  // Renders one surface's front-view test pattern to a canvas at that
+  // surface's own true output resolution. `accentColor` is the sub-screen's
+  // identity colour (null for the full wall) - drawn as a border and name
+  // banner so a stack of PNGs is instantly tellable apart.
+  const renderTestPatternCanvas = (panels: Cell[], name: string, accentColor: string | null): HTMLCanvasElement => {
       // Shares computeTestPatternLayout with the video/live test pattern
       // (drawTestPattern.ts) instead of keeping a separate duplicate
       // position/label computation - a previous duplicate here silently
       // reintroduced the same "gaps collapse, front-view labels wrong"
       // bugs the shared version had already been fixed for.
-      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName, panelType, panels: activePanels });
+      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName: name, panelType, panels });
       const W = Math.max(1, layout.W);
       const H = Math.max(1, layout.H);
       const canvas = document.createElement("canvas");
@@ -3052,12 +3364,48 @@ const exportJson = () => {
       // No signal/power cable-routing lines or arrowheads in the PNG: it is a
       // clean front-view pixel map of the wall for the observer / processor.
 
-      const link = document.createElement("a");
-      link.href = canvas.toDataURL("image/png");
-      link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-front-test-pattern.png`);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      // Sub-screen identity: a border in its own colour plus its name, so a
+      // folder of per-sub-screen PNGs can be matched back to the layout at a
+      // glance. Deliberately inside the content area (not extra canvas), so
+      // the file stays exactly the surface's real output resolution.
+      if (accentColor) {
+        const borderPx = Math.max(2, Math.round(Math.min(W, H) * 0.006));
+        ctx.strokeStyle = accentColor;
+        ctx.lineWidth = borderPx;
+        ctx.strokeRect(borderPx / 2, borderPx / 2, W - borderPx, H - borderPx);
+        const fontPx = Math.max(14, Math.round(Math.min(W, H) * 0.035));
+        ctx.font = `bold ${fontPx}px Arial`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        const label = name.toUpperCase();
+        const padPx = Math.round(fontPx * 0.4);
+        const boxW = ctx.measureText(label).width + padPx * 4;
+        const boxH = fontPx + padPx * 2;
+        ctx.fillStyle = accentColor;
+        ctx.fillRect(W / 2 - boxW / 2, borderPx, boxW, boxH);
+        ctx.fillStyle = "#020617";
+        ctx.fillText(label, W / 2, borderPx + padPx);
+      }
+
+      return canvas;
+  };
+
+  const exportTestPatternPngs = (selectedKeys: Set<string>) => {
+    try {
+      const chosen = testPatternSurfaces().filter((surface) => selectedKeys.has(surface.key));
+      if (!chosen.length) return;
+      chosen.forEach((surface) => {
+        const canvas = renderTestPatternCanvas(surface.panels, surface.name, surface.color);
+        const safeName = (surface.key === FULL_WALL_PATTERN_KEY ? `${fileSafeProjectName}-${fileSafePanelType}-Full-Wall` : surface.name)
+          .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
+          .replace(/\s+/g, "-");
+        const link = document.createElement("a");
+        link.href = canvas.toDataURL("image/png");
+        link.setAttribute("download", `${safeName}-Test-Pattern.png`);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      });
     } catch (err) {
       console.error("PNG test pattern failed", err);
       alert("PNG test pattern failed - check console");
@@ -3101,9 +3449,11 @@ const exportJson = () => {
   // display, keeping this main tab on the original one - see
   // screenPlacement.ts for the full fallback story (secure context/browser
   // support/permission all fail closed to today's plain window.open).
-  const openMovingTestPatternTab = async () => {
+  const openMovingTestPatternTab = async (project: TestPatternProject) => {
     try {
-      const payload = { formatVersion: 1, projectName: safeProjectName, surfaceName, panelType, panels: activePanels };
+      // formatVersion 2 adds subScreens; TestPatternView treats it as
+      // optional, so an older stored payload still opens fine.
+      const payload = { formatVersion: 2, ...project };
       localStorage.setItem("ledCablingTestPattern:v1", JSON.stringify(payload));
       const url = `${location.pathname}?testpattern=1`;
 
@@ -3179,14 +3529,13 @@ const exportJson = () => {
   // bitrate would produce on this pattern's large flat colour fields and
   // sharp edges/text. Shared by both the WebM and MP4 downloads - MP4 just
   // pipes this same recording through encodeWebmToMp4 afterwards.
-  const recordMovingTestPatternWebm = (): Promise<Blob> | null => {
+  const recordMovingTestPatternWebm = (project: TestPatternProject): Promise<Blob> | null => {
     if (isRecordingVideo) return null;
     const mimeType = pickVideoMimeType();
     if (!mimeType) {
       alert("This browser can't record video (no WebM/MediaRecorder support). Try Chrome, Edge or Firefox.");
       return null;
     }
-    const project: TestPatternProject = { projectName: safeProjectName, surfaceName, panelType, panels: activePanels };
     const layout = computeTestPatternLayout(project);
     if (layout.W <= 0 || layout.H <= 0) {
       alert("No active panels to render a test pattern from.");
@@ -3235,15 +3584,22 @@ const exportJson = () => {
     return result;
   };
 
-  const downloadMovingTestPatternVideo = () => {
-    const recording = recordMovingTestPatternWebm();
-    if (!recording) return;
-    recording.then((blob) => downloadBlob(blob, `${fileSafeProjectName}-front-test-pattern.webm`));
+  // Filename carries the chosen surface, so a folder of per-screen recordings
+  // is tellable apart without opening them.
+  const movingPatternFileName = (project: TestPatternProject, ext: string) => {
+    const surfacePart = project.surfaceName ? `-${project.surfaceName.replace(/[<>:"/\\|?*\x00-\x1F]/g, "-").replace(/\s+/g, "-")}` : "";
+    return `${fileSafeProjectName}${surfacePart}-front-test-pattern.${ext}`;
   };
 
-  const downloadMovingTestPatternMp4 = () => {
+  const downloadMovingTestPatternVideo = (project: TestPatternProject) => {
+    const recording = recordMovingTestPatternWebm(project);
+    if (!recording) return;
+    recording.then((blob) => downloadBlob(blob, movingPatternFileName(project, "webm")));
+  };
+
+  const downloadMovingTestPatternMp4 = (project: TestPatternProject) => {
     if (isEncodingMp4) return;
-    const recording = recordMovingTestPatternWebm();
+    const recording = recordMovingTestPatternWebm(project);
     if (!recording) return;
     recording.then(async (blob) => {
       setIsEncodingMp4(true);
@@ -3251,7 +3607,7 @@ const exportJson = () => {
       try {
         const { encodeWebmToMp4 } = await import("./testPattern/mp4Encode");
         const mp4Blob = await encodeWebmToMp4(blob, setMp4EncodeProgress);
-        downloadBlob(mp4Blob, `${fileSafeProjectName}-front-test-pattern.mp4`);
+        downloadBlob(mp4Blob, movingPatternFileName(project, "mp4"));
       } catch (err) {
         console.error("MP4 encode failed", err);
         alert("MP4 encoding failed - check console. You can still use Download Moving Test Pattern (WebM).");
@@ -3318,8 +3674,8 @@ const exportJson = () => {
         setWholeCanvasInputId(typeof data.wholeCanvasInputId === "number" ? data.wholeCanvasInputId : null);
         // formatVersion 6: older projects have neither field - default to
         // no date range set (Rentman availability just stays off).
-        setRentmanDateFrom(typeof data.rentmanDateFrom === "string" ? data.rentmanDateFrom : "");
-        setRentmanDateTo(typeof data.rentmanDateTo === "string" ? data.rentmanDateTo : "");
+        setProjectDateFrom(typeof data.rentmanDateFrom === "string" ? data.rentmanDateFrom : "");
+        setProjectDateTo(typeof data.rentmanDateTo === "string" ? data.rentmanDateTo : "");
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -3411,8 +3767,32 @@ const exportJson = () => {
     setImportPreview(null);
   };
 
-  const generatePdf = async () => {
+  // Which optional pages the PDF report can contain. Assembled fresh each
+  // time the picker opens so sections that don't apply to this project (no
+  // sub-screens, no Rentman data pulled) are simply not offered rather than
+  // being offered and then silently producing nothing.
+  const pdfSectionOptions = (): ExportSection[] => {
+    const sections: ExportSection[] = [
+      { key: "stock", label: "Stock Summary table", hint: "Required, spares, spares rounded to a full box and total required, per item" },
+    ];
+    if (stockTableRows.some((entry) => entry.projects.length > 0 || entry.repairItems.length > 0)) {
+      sections.push({ key: "rentmanDetail", label: "Other Projects & Repairs detail", hint: "Which projects and repair jobs are holding stock" });
+    }
+    if (sparePanelSummary.surfaceRows.length > 0) {
+      sections.push({ key: "sparePanels", label: "Spare Panels by Surface", hint: "Panel counts broken down per sub-screen and panel type" });
+    }
+    sections.push({ key: "ports", label: "Signal & Power Ports In Use", hint: "Per-port panel counts and first-to-last panel of each chain" });
+    if (subScreens.length > 0) sections.push({ key: "subScreens", label: "Sub-Screens summary" });
+    sections.push(
+      { key: "layoutBack", label: "Panel Layout - Back View" },
+      { key: "layoutFront", label: "Panel Layout - Front View" },
+    );
+    return sections;
+  };
+
+  const generatePdf = async (sections: Set<string>) => {
   try {
+    const wants = (key: string) => sections.has(key);
     const jsPDF = (await import("jspdf")).default;
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape", compress: true });
     const printedAt = new Date().toLocaleString();
@@ -3495,42 +3875,71 @@ const exportJson = () => {
       );
     };
 
-    const stockCols = { itemWrap: 128, required: 174, spare: 198, rounded: 226, stock: 252, net: 282 };
+    // Column x-positions shift left when the Rentman columns are present, so
+    // the widest layout still fits inside the 274mm usable width.
+    const stockCols = rentmanChecked
+      ? { itemWrap: 62, required: 116, spare: 134, spareRounded: 172, rounded: 192, stock: 212, other: 232, broken: 254, available: 270, result: 284 }
+      : { itemWrap: 105, required: 158, spare: 178, spareRounded: 228, rounded: 254, stock: 270, other: 0, broken: 0, available: 0, result: 284 };
     const drawStockTable = (startIndex: number, startY: number, maxY: number) => {
       let y = startY;
       const drawHeader = () => {
         pdf.setFillColor(226, 232, 240);
         pdf.rect(10, y - 5, 274, 7, "F");
         pdf.setFont("helvetica", "bold");
-        pdf.setFontSize(8);
+        pdf.setFontSize(rentmanChecked ? 7 : 8);
         pdf.text("Code", 12, y);
-        pdf.text("Item", 34, y);
-        pdf.text("Required", stockCols.required, y, { align: "right" });
-        pdf.text("Spare", stockCols.spare, y, { align: "right" });
-        pdf.text("Rounded + Spare", stockCols.rounded, y, { align: "right" });
-        pdf.text("Stock", stockCols.stock, y, { align: "right" });
-        pdf.text("Net", stockCols.net, y, { align: "right" });
+        pdf.text("Equipment", 34, y);
+        pdf.text(STOCK_COUNT_LABELS.required, stockCols.required, y, { align: "right" });
+        pdf.text(STOCK_COUNT_LABELS.spare, stockCols.spare, y, { align: "right" });
+        pdf.text(STOCK_COUNT_LABELS.spareRounded, stockCols.spareRounded, y, { align: "right" });
+        pdf.text(STOCK_COUNT_LABELS.total, stockCols.rounded, y, { align: "right" });
+        pdf.text(rentmanChecked ? "Rentman Stock" : "Stock", stockCols.stock, y, { align: "right" });
+        if (rentmanChecked) {
+          if (availabilityByCode) pdf.text("Other Projects", stockCols.other, y, { align: "right" });
+          if (repairsByCode) pdf.text("Broken / Repair", stockCols.broken, y, { align: "right" });
+          pdf.text("Available", stockCols.available, y, { align: "right" });
+        }
+        pdf.text(rentmanChecked ? "Result" : "Net", stockCols.result, y, { align: "right" });
         y += 6;
         pdf.setFont("helvetica", "normal");
       };
       drawHeader();
-      for (let index = startIndex; index < visibleStockRows.length; index += 1) {
-        const row = visibleStockRows[index];
+      for (let index = startIndex; index < stockTableRows.length; index += 1) {
+        const entry = stockTableRows[index];
+        const row = entry.row;
         if (y > maxY) return index;
-        if (row.net < 0) {
-          pdf.setFillColor(254, 226, 226);
+        const short = rentmanChecked ? entry.result === "SHORT" : row.net < 0;
+        if (short || (rentmanChecked && entry.result === "LOW")) {
+          if (short) pdf.setFillColor(254, 226, 226);
+          else pdf.setFillColor(254, 243, 199);
           pdf.rect(10, y - 4.5, 274, 6.2, "F");
         }
+        pdf.setFontSize(rentmanChecked ? 7 : 8);
         pdf.text(String(row.code), 12, y);
         pdf.text(pdf.splitTextToSize(row.name, stockCols.itemWrap)[0], 34, y);
         pdf.text(formatNumber(row.required), stockCols.required, y, { align: "right" });
         pdf.text(formatNumber(row.spare ?? 0), stockCols.spare, y, { align: "right" });
-        pdf.text(formatNumber(row.rounded ?? row.required), stockCols.rounded, y, { align: "right" });
+        pdf.text(formatNumber(row.spareRounded ?? row.spare ?? 0), stockCols.spareRounded, y, { align: "right" });
+        pdf.text(formatNumber(entry.totalRequired), stockCols.rounded, y, { align: "right" });
         pdf.text(formatNumber(row.stock), stockCols.stock, y, { align: "right" });
-        pdf.text(formatNumber(row.net), stockCols.net, y, { align: "right" });
+        if (rentmanChecked) {
+          if (availabilityByCode) pdf.text(formatNumber(entry.otherProjects ?? 0), stockCols.other, y, { align: "right" });
+          if (repairsByCode) pdf.text(formatNumber(entry.broken ?? 0), stockCols.broken, y, { align: "right" });
+          pdf.text(formatNumber(entry.available), stockCols.available, y, { align: "right" });
+        }
+        pdf.text(
+          rentmanChecked
+            ? entry.result === "SHORT"
+              ? `SHORT ${formatNumber(entry.shortBy)}`
+              : entry.result
+            : formatNumber(row.net),
+          stockCols.result,
+          y,
+          { align: "right" },
+        );
         y += 6;
       }
-      return visibleStockRows.length;
+      return stockTableRows.length;
     };
 
     const drawStockPage = (startIndex = 0) => {
@@ -3539,13 +3948,74 @@ const exportJson = () => {
       pdf.setFontSize(16);
       pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
       let nextIndex = drawStockTable(startIndex, 22, 190);
-      while (nextIndex < visibleStockRows.length) {
+      while (nextIndex < stockTableRows.length) {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
         pdf.text(`${safeProjectName} - Stock Summary continued`, 10, 12);
         nextIndex = drawStockTable(nextIndex, 22, 190);
       }
+    };
+
+    // Every project and repair job behind the Other Projects / Broken columns
+    // above, so the printed report stands on its own without needing the
+    // expandable cells in the app.
+    const drawRentmanDetailPage = () => {
+      const withDetail = stockTableRows.filter((entry) => entry.projects.length > 0 || entry.repairItems.length > 0);
+      if (!withDetail.length) return;
+      let y = 0;
+      const startPage = (continued: boolean) => {
+        pdf.addPage("a4", "landscape");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(16);
+        pdf.text(`${safeProjectName} - Other Projects & Repairs${continued ? " (continued)" : ""}`, 10, 12);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9);
+        pdf.setTextColor(100, 116, 139);
+        pdf.text(
+          availabilityCheckedRange
+            ? `Other projects overlapping ${availabilityCheckedRange.from} to ${availabilityCheckedRange.to}. Broken / repair is current, not date-ranged.`
+            : "Broken / repair is current, not date-ranged.",
+          10,
+          18,
+        );
+        pdf.setTextColor(15, 23, 42);
+        y = 26;
+      };
+      const ensureRoom = (linesNeeded: number) => {
+        if (y === 0 || y + linesNeeded * 5 > 195) startPage(y !== 0);
+      };
+      withDetail.forEach((entry) => {
+        ensureRoom(entry.projects.length + entry.repairItems.length + 3);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(11);
+        pdf.text(`${entry.row.code} - ${entry.row.name}`, 10, y);
+        y += 5;
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(8);
+        if (entry.projects.length) {
+          pdf.text(`Other Projects: ${formatNumber(entry.otherProjects ?? 0)}`, 14, y);
+          y += 4.5;
+          entry.projects.forEach((project) => {
+            pdf.text(
+              `#${project.projectNumber} - ${project.projectName} - ${project.status ?? "No status"} - ${formatNumber(project.quantity)} - ${formatDateLabel(project.planPeriodStart)} to ${formatDateLabel(project.planPeriodEnd)}`,
+              18,
+              y,
+            );
+            y += 4.5;
+          });
+        }
+        if (entry.repairItems.length) {
+          pdf.text(`Broken / Repair: ${formatNumber(entry.broken ?? 0)} unavailable`, 14, y);
+          y += 4.5;
+          entry.repairItems.forEach((item) => {
+            const line = `Serial ${item.serial ?? "not recorded"} - ${item.status} - ${formatDateLabel(item.reported)}${item.note ? ` - ${item.note}` : ""}`;
+            pdf.text(pdf.splitTextToSize(line, 260)[0], 18, y);
+            y += 4.5;
+          });
+        }
+        y += 3;
+      });
     };
 
     // Per-sub-screen summary: always re-derives each sub-screen's own stats
@@ -3657,7 +4127,13 @@ const exportJson = () => {
         ],
         usedSignalPorts.map((port) => {
           const stat = signalPortStats[port.id];
-          return [port.name, formatNumber(stat.panels), stat.firstKey ? `${stat.firstKey} -> ${stat.lastKey}` : "-"];
+          // The panel's visible R/C reference, never its internal cell id -
+          // a uuid in a printed report tells the reader nothing.
+          return [
+            port.name,
+            formatNumber(stat.panels),
+            stat.firstKey ? `${panelRefLabelById(stat.firstKey)} -> ${panelRefLabelById(stat.lastKey)}` : "-",
+          ];
         }),
         "No signal ports in use.",
       );
@@ -3667,13 +4143,20 @@ const exportJson = () => {
         `Power Outputs (${usedPowerPorts.length} of ${powerPorts.length} in use)`,
         [
           { label: "Plug", x: 0 },
-          { label: "Panels", x: 40, align: "right" },
-          { label: "Max W / A", x: 75, align: "right" },
+          { label: "Panels", x: 26, align: "right" },
+          { label: "Chain (first -> last)", x: 32 },
+          { label: "Max W / A", x: 100, align: "right" },
           { label: "Phase", x: 110 },
         ],
         usedPowerPorts.map((port) => {
           const stat = powerPortStats[port.id];
-          return [port.name, formatNumber(stat.panels), `${formatNumber(stat.maxWatts)}W / ${formatNumber(stat.maxAmps, 2)}A`, stat.phase || "-"];
+          return [
+            port.name,
+            formatNumber(stat.panels),
+            stat.firstKey ? `${panelRefLabelById(stat.firstKey)} -> ${panelRefLabelById(stat.lastKey)}` : "-",
+            `${formatNumber(stat.maxWatts)}W / ${formatNumber(stat.maxAmps, 2)}A`,
+            stat.phase || "-",
+          ];
         }),
         "No power outputs in use.",
       );
@@ -3685,7 +4168,7 @@ const exportJson = () => {
     // paginates itself since the number of surfaces is open-ended.
     const drawSparePanelsPage = () => {
       if (!sparePanelSummary.surfaceRows.length) return;
-      const colX = { type: 10, used: 140, spare: 178, rounded: 225 };
+      const colX = { type: 10, used: 130, spare: 168, spareRounded: 226, rounded: 274 };
       let y = 0;
       const startPage = (continued: boolean) => {
         pdf.addPage("a4", "landscape");
@@ -3698,7 +4181,7 @@ const exportJson = () => {
           pdf.setFontSize(9);
           pdf.setTextColor(100, 116, 139);
           pdf.text(
-            `Spare = ${formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 0)}% of panels used, per panel type, rounded up to full boxes where that type is boxed (shaped panels are one-way pieces bought individually, not boxed).`,
+            `${PANEL_COUNT_LABELS.spare} = ${formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 0)}% of ${PANEL_COUNT_LABELS.required.toLowerCase()}, per panel type. ${PANEL_COUNT_LABELS.total} then takes required + spare up to a whole number of equipment boxes, and ${PANEL_COUNT_LABELS.spareRounded} is the spare that falls out of that. Shaped panels are one-way pieces bought individually rather than boxed, so they are not rounded.`,
             10,
             18,
           );
@@ -3719,23 +4202,26 @@ const exportJson = () => {
         pdf.rect(10, y - 5, 274, 7, "F");
         pdf.setFontSize(8);
         pdf.text("Panel Type", colX.type, y);
-        pdf.text("Used", colX.used, y, { align: "right" });
-        pdf.text(`Spare (${formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 0)}%)`, colX.spare, y, { align: "right" });
-        pdf.text("Rounded + Spare", colX.rounded, y, { align: "right" });
+        pdf.text(PANEL_COUNT_LABELS.required, colX.used, y, { align: "right" });
+        pdf.text(PANEL_COUNT_LABELS.spare, colX.spare, y, { align: "right" });
+        pdf.text(PANEL_COUNT_LABELS.spareRounded, colX.spareRounded, y, { align: "right" });
+        pdf.text(PANEL_COUNT_LABELS.total, colX.rounded, y, { align: "right" });
         y += 6;
         pdf.setFont("helvetica", "normal");
         surface.bucketRows.forEach((row) => {
           pdf.text(row.label, colX.type, y);
           pdf.text(formatNumber(row.used), colX.used, y, { align: "right" });
           pdf.text(formatNumber(row.spare), colX.spare, y, { align: "right" });
-          pdf.text(formatNumber(row.rounded), colX.rounded, y, { align: "right" });
+          pdf.text(formatNumber(row.spareRounded), colX.spareRounded, y, { align: "right" });
+          pdf.text(formatNumber(row.total), colX.rounded, y, { align: "right" });
           y += 5.5;
         });
         pdf.setFont("helvetica", "bold");
         pdf.text("Subtotal", colX.type, y);
         pdf.text(formatNumber(surface.subtotal.used), colX.used, y, { align: "right" });
         pdf.text(formatNumber(surface.subtotal.spare), colX.spare, y, { align: "right" });
-        pdf.text(formatNumber(surface.subtotal.rounded), colX.rounded, y, { align: "right" });
+        pdf.text(formatNumber(surface.subtotal.spareRounded), colX.spareRounded, y, { align: "right" });
+        pdf.text(formatNumber(surface.subtotal.total), colX.rounded, y, { align: "right" });
         pdf.setFont("helvetica", "normal");
         y += 10;
       });
@@ -3746,7 +4232,7 @@ const exportJson = () => {
         pdf.setFontSize(11);
         pdf.setTextColor(3, 105, 161);
         pdf.text(
-          `Grand total: ${formatNumber(sparePanelSummary.grandTotal.used)} used, ${formatNumber(sparePanelSummary.grandTotal.spare)} spare, ${formatNumber(sparePanelSummary.grandTotal.rounded)} incl. spare`,
+          `Grand total: ${formatNumber(panelCounts.required)} ${PANEL_COUNT_LABELS.required.toLowerCase()}, ${formatNumber(panelCounts.spare)} ${PANEL_COUNT_LABELS.spare.toLowerCase()}, ${formatNumber(panelCounts.spareRounded)} rounded to full boxes, ${formatNumber(panelCounts.total)} total required`,
           colX.type,
           y,
         );
@@ -3761,6 +4247,8 @@ const exportJson = () => {
     pdf.setFont("helvetica", "normal");
     pdf.setFontSize(10);
     pdf.text(`Printed ${printedAt}`, 10, 18);
+    // Project date range, right next to the project name/details it belongs to.
+    pdf.text(projectDateRangeLabel, 150, 18);
 
     drawInfoBox("Wall", [
       `Panel type: ${panelTypeSummary}`,
@@ -3788,19 +4276,24 @@ const exportJson = () => {
       `Active support span: ${activeColsCount} cols x ${activeRowsCount} rows`,
     ], 150, 24, 66, 48);
 
-    drawInfoBox("Deployment + Stock", [
-      `Spare panels: ${sparePanels}`,
-      `Panels incl. spare: ${totalPanelsWithSpare}`,
-      `Boxes: ${boxCount} (${boxSparePanels} additional spare)`,
+    drawInfoBox("Panel Count", [
+      `${PANEL_COUNT_LABELS.required}: ${formatNumber(panelCounts.required)}`,
+      `${PANEL_COUNT_LABELS.spare}: ${formatNumber(panelCounts.spare)}`,
+      `${PANEL_COUNT_LABELS.spareRounded}: ${formatNumber(panelCounts.spareRounded)}`,
+      `${PANEL_COUNT_LABELS.total}: ${formatNumber(panelCounts.total)}`,
+      `Boxes: ${boxCount}`,
+    ], 220, 24, 66, 48);
+
+    drawInfoBox("Deployment", [
       `Backup signal loop: ${backupSignalLoop ? `Yes, effective signal ports ${effectiveSignalPortsUsed}` : "No"}`,
       `Reinforcement plate: ${includeReinforcementPlate ? "Yes" : "No"}`,
       `Deployment type: ${deploymentType || "Not selected"}`,
       ...(deploymentWarning ? [`Warning: ${deploymentWarning}`] : []),
-    ], 220, 24, 66, 48);
+    ], 80, 78, 66, 44);
 
     drawInfoBox("Phase Load", Object.entries(phaseStats).map(([phase, stat]) =>
       `Phase ${phase.replace("P", "")}: ${formatNumber(stat.maxWatts)} W / ${formatNumber(stat.maxAmps, 2)} A (${formatNumber(stat.utilisation, 1)}%)`
-    ), 10, 78, 92, 44);
+    ), 10, 78, 66, 44);
 
     // Full per-port detail lives on its own page (drawPortsInUsePage below) -
     // these boxes are just a compact count, since the old approach (one line
@@ -3810,26 +4303,28 @@ const exportJson = () => {
     drawInfoBox("Signal Ports In Use", [
       `${usedSignalPorts.length} of ${signalPorts.length} ports in use`,
       "See Signal & Power Ports page for full detail.",
-    ], 106, 78, 88, 44);
+    ], 150, 78, 66, 44);
 
     drawInfoBox("Power Outputs In Use", [
       `${usedPowerPorts.length} of ${powerPorts.length} outputs in use`,
       "See Signal & Power Ports page for full detail.",
-    ], 198, 78, 88, 44);
+    ], 220, 78, 66, 44);
 
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(12);
-    pdf.text("Stock Summary", 10, 128);
-    const nextStockIndex = drawStockTable(0, 138, 190);
+    let nextStockIndex = 0;
+    if (wants("stock")) {
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(12);
+      pdf.text("Stock Summary", 10, 128);
+      nextStockIndex = drawStockTable(0, 138, 190);
+    }
 
-    const backLayoutCanvas = buildLayoutCanvas(false, "Back View");
-    const frontLayoutCanvas = buildLayoutCanvas(true, "Front View");
-    if (nextStockIndex < visibleStockRows.length) drawStockPage(nextStockIndex);
-    drawSparePanelsPage();
-    drawPortsInUsePage();
-    if (subScreens.length > 0) drawSubScreensSummaryPage();
-    drawLayoutPage(backLayoutCanvas, "Back View");
-    drawLayoutPage(frontLayoutCanvas, "Front View");
+    if (wants("stock") && nextStockIndex < stockTableRows.length) drawStockPage(nextStockIndex);
+    if (wants("rentmanDetail")) drawRentmanDetailPage();
+    if (wants("sparePanels")) drawSparePanelsPage();
+    if (wants("ports")) drawPortsInUsePage();
+    if (wants("subScreens") && subScreens.length > 0) drawSubScreensSummaryPage();
+    if (wants("layoutBack")) drawLayoutPage(buildLayoutCanvas(false, "Back View"), "Back View");
+    if (wants("layoutFront")) drawLayoutPage(buildLayoutCanvas(true, "Front View"), "Front View");
     addPdfFooters();
     pdf.save(`${fileSafeProjectName}-${fileSafePanelType}-${cols}x${rows}.pdf`);
   } catch (err) {
@@ -4600,7 +5095,7 @@ const exportJson = () => {
 
   const createSubScreen = (name: string) => {
     const snapshot = captureLayout();
-    const screen = makeSubScreen(name, Date.now() + subScreens.length);
+    const screen = makeSubScreen(name, Date.now() + subScreens.length, subScreens.length);
     setSubScreens((prev) => [...prev, screen]);
     // Deliberately stay on whatever view the user was already on (usually
     // Canvas View) instead of jumping into the brand-new, empty sub-screen -
@@ -4612,6 +5107,10 @@ const exportJson = () => {
 
   const renameSubScreen = (id: string, name: string) => {
     commitSubScreensUpdate((prev) => prev.map((s) => (s.id === id ? { ...s, name } : s)));
+  };
+
+  const recolorSubScreen = (id: string, color: string) => {
+    commitSubScreensUpdate((prev) => prev.map((s) => (s.id === id ? { ...s, color } : s)));
   };
 
   // Deleting a sub-screen unassigns its panels (they become "unassigned",
@@ -4897,8 +5396,10 @@ const exportJson = () => {
           onCancel={() => setShowDownloadFormatModal(false)}
           onDownload={() => {
             setShowDownloadFormatModal(false);
-            if (downloadFormat === "mp4") downloadMovingTestPatternMp4();
-            else downloadMovingTestPatternVideo();
+            const project = movingPatternProjectFor(movingPatternSurfaceKey);
+            if (!project) return;
+            if (downloadFormat === "mp4") downloadMovingTestPatternMp4(project);
+            else downloadMovingTestPatternVideo(project);
           }}
         />
       ) : null}
@@ -4965,13 +5466,13 @@ const exportJson = () => {
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">
-              <Button intent="primary" onClick={generatePdf}>
+              <Button intent="primary" onClick={() => setPdfSectionPicker(pdfSectionOptions())}>
                 <FileText className="h-4 w-4" />Generate PDF
               </Button>
-              <Button intent="primary" onClick={exportTestPatternPng}>
+              <Button intent="primary" onClick={() => setTestPatternPicker(testPatternSectionOptions())}>
                 <ImageDown className="h-4 w-4" />Test Pattern
               </Button>
-              <Button intent="primary" onClick={openMovingTestPatternTab}>
+              <Button intent="primary" onClick={() => startMovingPattern("open")}>
                 <Video className="h-4 w-4" />Moving Test Pattern
               </Button>
               <button
@@ -4984,7 +5485,7 @@ const exportJson = () => {
               </button>
               <Button
                 intent="primary"
-                onClick={() => setShowDownloadFormatModal(true)}
+                onClick={() => startMovingPattern("download")}
                 disabled={isRecordingVideo || isEncodingMp4}
               >
                 <Download className="h-4 w-4" />
@@ -4994,10 +5495,6 @@ const exportJson = () => {
                     ? `Recording… ${videoRecordSeconds.toFixed(0)}/${LOOP_SECONDS}s`
                     : "Download Moving Test Pattern"}
               </Button>
-              <label className="flex items-center gap-1 px-1 text-xs text-slate-200" title="Include the vertical centre indicator in the PDF's Panel Layout pages">
-                <input type="checkbox" checked={includeCentreLineInExport} onChange={() => setIncludeCentreLineInExport((prev) => !prev)} />
-                Include Centre Line
-              </label>
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">
               <Button intent="secondary" onClick={exportJson}>
@@ -5031,6 +5528,14 @@ const exportJson = () => {
                 <div className="space-y-1 md:col-span-2">
                   <label className="text-xs text-slate-300">Project Name</label>
                   <Input className="bg-white text-black" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Enter project name" />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs text-slate-300">Start Date</label>
+                  <Input className="bg-white text-black" type="date" value={projectDateFrom} onChange={(e) => setProjectDateFrom(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-xs text-slate-300">End Date</label>
+                  <Input className="bg-white text-black" type="date" value={projectDateTo} onChange={(e) => setProjectDateTo(e.target.value)} />
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs text-slate-300">Columns →</label>
@@ -5247,6 +5752,13 @@ const exportJson = () => {
                   <div>Active support span: {activeColsCount} cols × {activeRowsCount} rows</div>
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
+                  <div className="mb-2 font-bold">Panel Count</div>
+                  <div>{PANEL_COUNT_LABELS.required}: {formatNumber(panelCounts.required)}</div>
+                  <div>{PANEL_COUNT_LABELS.spare}: {formatNumber(panelCounts.spare)}</div>
+                  <div>{PANEL_COUNT_LABELS.spareRounded}: {formatNumber(panelCounts.spareRounded)}</div>
+                  <div className="font-semibold">{PANEL_COUNT_LABELS.total}: {formatNumber(panelCounts.total)}</div>
+                </div>
+                <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Best Standard Output</div>
                   {bestResolution ? (
                     <>
@@ -5341,6 +5853,7 @@ const exportJson = () => {
             onSelectScreen={selectSubScreen}
             onCreate={createSubScreen}
             onRename={renameSubScreen}
+            onRecolor={recolorSubScreen}
             onDelete={deleteSubScreen}
             onSelectAllInSubScreen={selectAllInSubScreen}
           />
@@ -5568,15 +6081,16 @@ const exportJson = () => {
                 </Button>
               </ControlGroup>
 
-              <ControlGroup label="Overlays & display">
+              <ControlGroup label="Overlays & displays">
                 <Button
                   intent={showCentreLine ? "primary" : "secondary"}
                   size="sm"
                   onClick={() => setShowCentreLine((prev) => !prev)}
-                  title="Toggle the vertical centre indicator"
+                  title="Show or hide the vertical centre indicator - applies to this Panel Layout and to the PDF's Panel Layout pages"
                 >
                   {showCentreLine ? "Hide Centre Line" : "Show Centre Line"}
                 </Button>
+                <span className="text-xs text-slate-400">Applies to the layout here and in the PDF</span>
               </ControlGroup>
             </div>
             {overlapNotice ? (
@@ -5684,7 +6198,10 @@ const exportJson = () => {
                       const r = rectToPx(displayBBox);
                       const isActive = resolvedActiveSubScreenId === screen.id;
                       const isOtherActive = resolvedActiveSubScreenId !== null && !isActive;
-                      const color = PORT_COLORS[index % PORT_COLORS.length];
+                      // The user's own choice for this sub-screen (see
+                      // SubScreen.color) - the whole point is that it stays
+                      // recognisable, so it is never derived from list order.
+                      const color = normalizeSubScreenColor(screen.color, index);
                       return (
                         <g key={screen.id} opacity={isOtherActive ? 0.35 : 1}>
                           <rect
@@ -6157,24 +6674,56 @@ const exportJson = () => {
           onWholeCanvasInputChange={setWholeCanvasInputId}
         />
 
-        <RentmanPanel
-          dateFrom={rentmanDateFrom}
-          dateTo={rentmanDateTo}
-          onDateFromChange={setRentmanDateFrom}
-          onDateToChange={setRentmanDateTo}
-          onCheckStock={checkRentmanStock}
-          stockChecking={stockChecking}
-          stockCheckError={stockCheckError}
-          lastStockCheckedAt={lastStockCheckedAt}
-          onCheckAvailability={checkRentmanAvailability}
-          availabilityChecking={availabilityChecking}
-          availabilityError={availabilityError}
-        />
         {stockComparisonRows ? (
           <StockComparisonModal rows={stockComparisonRows} onApply={applyStockComparison} onClose={() => setStockComparisonRows(null)} />
         ) : null}
-        {availabilityRows ? (
-          <AvailabilityModal rows={availabilityRows} dateFrom={rentmanDateFrom} dateTo={rentmanDateTo} onClose={() => setAvailabilityRows(null)} />
+        {pdfSectionPicker ? (
+          <ExportSectionsModal
+            title="PDF Report Sections"
+            intro="Everything is included by default - untick anything you don't want in this report."
+            sections={pdfSectionPicker}
+            confirmLabel="Generate PDF"
+            onClose={() => setPdfSectionPicker(null)}
+            onConfirm={(selected) => {
+              setPdfSectionPicker(null);
+              void generatePdf(selected);
+            }}
+          />
+        ) : null}
+        {movingPatternPicker ? (
+          <ExportSectionsModal
+            title="Moving Test Pattern"
+            intro="Pick the one surface to show - the live pattern fills a single display, and a recording is a single file."
+            sections={movingPatternPicker.sections}
+            mode="single"
+            confirmLabel={movingPatternPicker.next === "open" ? "Open" : "Continue"}
+            onClose={() => setMovingPatternPicker(null)}
+            onConfirm={(selected) => {
+              const key = [...selected][0] ?? null;
+              const next = movingPatternPicker.next;
+              setMovingPatternPicker(null);
+              if (next === "open") {
+                const project = movingPatternProjectFor(key);
+                if (project) void openMovingTestPatternTab(project);
+                return;
+              }
+              setMovingPatternSurfaceKey(key);
+              setShowDownloadFormatModal(true);
+            }}
+          />
+        ) : null}
+        {testPatternPicker ? (
+          <ExportSectionsModal
+            title="Test Pattern PNGs"
+            intro="One PNG per selected item, each at its own true output resolution."
+            sections={testPatternPicker}
+            confirmLabel="Download PNGs"
+            onClose={() => setTestPatternPicker(null)}
+            onConfirm={(selected) => {
+              setTestPatternPicker(null);
+              exportTestPatternPngs(selected);
+            }}
+          />
         ) : null}
 
         <Card className="border-slate-700 bg-slate-800 print-card" collapsible defaultOpen={false}>
@@ -6187,42 +6736,128 @@ const exportJson = () => {
             </div>
           </CardHeader>
           <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
-            <div className="grid gap-3 md:grid-cols-3">
-              <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                <div className="text-xs text-slate-300">Spare ratio</div>
-                <div className="text-lg font-semibold">{formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 1)}%</div>
+            {/* Rentman lives here rather than in a tab of its own: everything
+                it returns (live stock, other projects' bookings, broken gear)
+                only ever means anything next to these numbers. */}
+            <div className="space-y-3 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 no-print">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Rentman</div>
+              {!rentmanProxyConfigured ? (
+                <div className="rounded-lg border border-amber-500 bg-amber-500/15 p-3 text-xs text-amber-200">
+                  Not configured - set <code>VITE_RENTMAN_PROXY_URL</code> and rebuild (see <code>.env.example</code> and{" "}
+                  <code>rentman-proxy/README.md</code>). Everything below works as normal using the built-in numbers until then.
+                </div>
+              ) : null}
+              <div className="flex flex-wrap items-end gap-2">
+                <Button intent="primary" size="sm" onClick={checkRentmanStock} disabled={!rentmanProxyConfigured || stockChecking}>
+                  {stockChecking ? "Checking..." : "Get Current Stock from Rentman"}
+                </Button>
+                <Button
+                  intent="primary"
+                  size="sm"
+                  onClick={checkRentmanAvailability}
+                  disabled={!rentmanProxyConfigured || availabilityChecking || !stockCheckFrom || !stockCheckTo}
+                  title={!stockCheckFrom || !stockCheckTo ? "Set a project date range in LED Wall Setup first" : undefined}
+                >
+                  {availabilityChecking ? "Checking..." : "Check Stock Availability by Date Range"}
+                </Button>
+                <Button intent="primary" size="sm" onClick={checkRentmanRepairs} disabled={!rentmanProxyConfigured || repairsChecking}>
+                  {repairsChecking ? "Checking..." : "Check Broken / Repair Equipment"}
+                </Button>
               </div>
-              <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                <div className="text-xs text-slate-300">Total spare panels</div>
-                <div className="text-lg font-semibold">{sparePanelSummary.grandTotal.spare}</div>
+              <div className="flex flex-wrap items-end gap-3 text-xs">
+                <label className="space-y-1">
+                  <div className="text-slate-400">Availability from</div>
+                  <Input
+                    type="date"
+                    className="w-40"
+                    value={stockCheckFrom}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setStockDateOverrideFrom(e.target.value)}
+                    disabled={!rentmanProxyConfigured}
+                  />
+                </label>
+                <label className="space-y-1">
+                  <div className="text-slate-400">Availability to</div>
+                  <Input
+                    type="date"
+                    className="w-40"
+                    value={stockCheckTo}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setStockDateOverrideTo(e.target.value)}
+                    disabled={!rentmanProxyConfigured}
+                  />
+                </label>
+                {stockDatesOverridden ? (
+                  <Button
+                    intent="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setStockDateOverrideFrom(null);
+                      setStockDateOverrideTo(null);
+                    }}
+                  >
+                    Back to project dates
+                  </Button>
+                ) : null}
+                <div className="text-slate-400">
+                  {stockDatesOverridden
+                    ? "Checking a different window - the project's own date range is unchanged."
+                    : "Using the project date range from LED Wall Setup."}
+                </div>
               </div>
-              <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                <div className="text-xs text-slate-300">Total incl. spare</div>
-                <div className="text-lg font-semibold">{sparePanelSummary.grandTotal.rounded}</div>
+              {stockCheckError ? <div className="rounded-lg border border-red-500 bg-red-500/15 p-2 text-xs text-red-200">{stockCheckError}</div> : null}
+              {availabilityError ? <div className="rounded-lg border border-red-500 bg-red-500/15 p-2 text-xs text-red-200">{availabilityError}</div> : null}
+              {repairsError ? <div className="rounded-lg border border-red-500 bg-red-500/15 p-2 text-xs text-red-200">{repairsError}</div> : null}
+              <div className="space-y-0.5 text-xs text-slate-500">
+                {lastStockCheckedAt ? <div>Stock last checked {lastStockCheckedAt.toLocaleString()}</div> : null}
+                {availabilityCheckedRange ? (
+                  <div>Availability checked for {availabilityCheckedRange.from} to {availabilityCheckedRange.to}</div>
+                ) : null}
+                {repairsByCode ? <div>Broken / repair figures are current as of the last check (not date-ranged).</div> : null}
               </div>
             </div>
 
+            <div className="grid gap-3 md:grid-cols-4">
+              <div className="rounded border border-slate-700 bg-slate-900 p-3">
+                <div className="text-xs text-slate-300">{PANEL_COUNT_LABELS.required}</div>
+                <div className="text-lg font-semibold">{formatNumber(panelCounts.required)}</div>
+              </div>
+              <div className="rounded border border-slate-700 bg-slate-900 p-3">
+                <div className="text-xs text-slate-300">{PANEL_COUNT_LABELS.spare} ({formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 1)}%)</div>
+                <div className="text-lg font-semibold">{formatNumber(panelCounts.spare)}</div>
+              </div>
+              <div className="rounded border border-slate-700 bg-slate-900 p-3">
+                <div className="text-xs text-slate-300">{PANEL_COUNT_LABELS.spareRounded}</div>
+                <div className="text-lg font-semibold">{formatNumber(panelCounts.spareRounded)}</div>
+              </div>
+              <div className="rounded border border-sky-700/60 bg-sky-900/20 p-3">
+                <div className="text-xs text-slate-300">{PANEL_COUNT_LABELS.total}</div>
+                <div className="text-lg font-semibold">{formatNumber(panelCounts.total)}</div>
+              </div>
+            </div>
+
+            {/* Hidden entirely when the project has no LED surfaces yet - an
+                empty per-surface breakdown adds nothing the headline figures
+                above have not already said. */}
+            {sparePanelSummary.surfaceRows.length === 0 ? null : (
             <div className="space-y-3">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                 Spare Panels by Surface{sparePanelSummary.multiSurface ? " & Type" : ""}
               </div>
-              {sparePanelSummary.surfaceRows.length === 0 ? (
-                <div className="text-sm text-slate-400">No panels placed yet.</div>
-              ) : (
+              {(
                 sparePanelSummary.surfaceRows.map((surface) => (
                   <div key={surface.name} className="overflow-x-auto rounded border border-slate-700">
                     <table className="min-w-full table-fixed text-left text-sm">
                       <thead className="bg-slate-900">
                         {sparePanelSummary.multiSurface ? (
                           <tr>
-                            <th className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-300" colSpan={4}>{surface.name}</th>
+                            <th className="px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-300" colSpan={5}>{surface.name}</th>
                           </tr>
                         ) : null}
                         <tr>
                           <th className="w-40 px-3 py-2">Panel Type</th>
-                          <th className="w-24 px-3 py-2 text-right">Used</th>
-                          <th className="w-28 px-3 py-2 text-right">Spare ({formatNumber(PANEL_TYPES.MG9.defaults.spareRatio * 100, 0)}%)</th>
-                          <th className="w-32 px-3 py-2 text-right">Rounded + Spare</th>
+                          <th className="w-28 px-3 py-2 text-right">{PANEL_COUNT_LABELS.required}</th>
+                          <th className="w-24 px-3 py-2 text-right">{PANEL_COUNT_LABELS.spare}</th>
+                          <th className="w-36 px-3 py-2 text-right">{PANEL_COUNT_LABELS.spareRounded}</th>
+                          <th className="w-32 px-3 py-2 text-right">{PANEL_COUNT_LABELS.total}</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -6231,14 +6866,16 @@ const exportJson = () => {
                             <td className="px-3 py-1.5">{row.label}</td>
                             <td className="px-3 py-1.5 text-right">{formatNumber(row.used)}</td>
                             <td className="px-3 py-1.5 text-right">{formatNumber(row.spare)}</td>
-                            <td className="px-3 py-1.5 text-right font-semibold">{formatNumber(row.rounded)}</td>
+                            <td className="px-3 py-1.5 text-right">{formatNumber(row.spareRounded)}</td>
+                            <td className="px-3 py-1.5 text-right font-semibold">{formatNumber(row.total)}</td>
                           </tr>
                         ))}
                         <tr className="border-t border-slate-600 bg-slate-900/60 font-semibold">
                           <td className="px-3 py-1.5">Subtotal</td>
                           <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.used)}</td>
                           <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.spare)}</td>
-                          <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.rounded)}</td>
+                          <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.spareRounded)}</td>
+                          <td className="px-3 py-1.5 text-right">{formatNumber(surface.subtotal.total)}</td>
                         </tr>
                       </tbody>
                     </table>
@@ -6247,39 +6884,153 @@ const exportJson = () => {
               )}
               {sparePanelSummary.multiSurface ? (
                 <div className="rounded border border-sky-700/60 bg-sky-900/20 p-3 text-sm">
-                  <span className="font-semibold">Grand total:</span> {formatNumber(sparePanelSummary.grandTotal.used)} used, {formatNumber(sparePanelSummary.grandTotal.spare)} spare, {formatNumber(sparePanelSummary.grandTotal.rounded)} incl. spare
+                  <span className="font-semibold">Grand total:</span> {formatNumber(panelCounts.required)} required, {formatNumber(panelCounts.spare)} spare, {formatNumber(panelCounts.spareRounded)} spare rounded to full boxes, {formatNumber(panelCounts.total)} total required
                 </div>
               ) : null}
             </div>
+            )}
 
             <div className="overflow-x-auto rounded border border-slate-700">
-              <table className="min-w-full table-fixed text-left text-sm">
+              <table className="min-w-full text-left text-sm">
                 <thead className="bg-slate-900">
                   <tr>
-                    <th className="w-24 px-3 py-2">Code</th>
-                    <th className="px-3 py-2">Item</th>
-                    <th className="w-24 px-3 py-2 text-right">Required</th>
-                    <th className="w-20 px-3 py-2 text-right">Spare</th>
-                    <th className="w-32 px-3 py-2 text-right">Rounded + Spare</th>
-                    <th className="w-20 px-3 py-2 text-right">Stock</th>
-                    <th className="w-24 px-3 py-2 text-right">Net</th>
+                    <th className="px-3 py-2">Code</th>
+                    <th className="px-3 py-2">Equipment</th>
+                    <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.required}</th>
+                    <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.spare}</th>
+                    <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.spareRounded}</th>
+                    <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.total}</th>
+                    <th className="px-3 py-2 text-right">{stockOverridesApplied ? "Rentman Stock" : "Stock"}</th>
+                    {availabilityByCode ? <th className="px-3 py-2 text-right">Other Projects</th> : null}
+                    {repairsByCode ? <th className="px-3 py-2 text-right">Broken / Repair</th> : null}
+                    {rentmanChecked ? <th className="px-3 py-2 text-right">Available Stock</th> : null}
+                    <th className="px-3 py-2 text-right">{rentmanChecked ? "Result" : "Net"}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleStockRows.map((row) => (
-                    <tr key={`${row.code}-${row.name}`} className={`border-t border-slate-700 ${row.net < 0 ? "bg-red-500/10" : ""}`}>
-                      <td className={`px-3 py-2 whitespace-nowrap ${row.net < 0 ? "text-red-200" : ""}`}>{row.code}</td>
-                      <td className="px-3 py-2 truncate">{row.name}</td>
-                      <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
-                      <td className="px-3 py-2 text-right">{formatNumber(row.spare ?? 0)}</td>
-                      <td className="px-3 py-2 text-right">{formatNumber(row.rounded ?? row.required)}</td>
-                      <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
-                      <td className={`px-3 py-2 text-right font-semibold ${row.net < 0 ? "text-red-300" : "text-emerald-300"}`}>{formatNumber(row.net)}</td>
-                    </tr>
-                  ))}
+                  {stockTableRows.map((entry) => {
+                    const { row } = entry;
+                    const short = rentmanChecked ? entry.result === "SHORT" : row.net < 0;
+                    const low = rentmanChecked && entry.result === "LOW";
+                    const openKind = expandedStockDetail?.code === row.code ? expandedStockDetail.kind : null;
+                    const toggleDetail = (kind: "projects" | "repairs") =>
+                      setExpandedStockDetail(openKind === kind ? null : { code: row.code, kind });
+                    // Code, Equipment, Required, Spares, Spares Rounded,
+                    // Total, Stock, Result = 8 fixed, plus whichever Rentman
+                    // columns are currently showing.
+                    const detailColSpan = 8 + (availabilityByCode ? 1 : 0) + (repairsByCode ? 1 : 0) + (rentmanChecked ? 1 : 0);
+                    return (
+                      <Fragment key={`${row.code}-${row.name}`}>
+                        <tr className={`border-t border-slate-700 ${short ? "bg-red-500/10" : low ? "bg-amber-500/10" : ""}`}>
+                          <td className={`px-3 py-2 whitespace-nowrap ${short ? "text-red-200" : ""}`}>{row.code}</td>
+                          <td className="px-3 py-2">{row.name}</td>
+                          <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
+                          <td className="px-3 py-2 text-right">{formatNumber(row.spare ?? 0)}</td>
+                          <td className="px-3 py-2 text-right">{formatNumber(row.spareRounded ?? row.spare ?? 0)}</td>
+                          <td className="px-3 py-2 text-right font-semibold">{formatNumber(entry.totalRequired)}</td>
+                          <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
+                          {availabilityByCode ? (
+                            <td className="px-3 py-2 text-right">
+                              {entry.projects.length ? (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleDetail("projects")}
+                                  aria-expanded={openKind === "projects"}
+                                  className="underline decoration-dotted underline-offset-2 hover:text-sky-300"
+                                  title="Show which projects need this in the checked date range"
+                                >
+                                  {formatNumber(entry.otherProjects ?? 0)} {openKind === "projects" ? "\u25be" : "\u25b8"}
+                                </button>
+                              ) : (
+                                formatNumber(entry.otherProjects ?? 0)
+                              )}
+                            </td>
+                          ) : null}
+                          {repairsByCode ? (
+                            <td className="px-3 py-2 text-right">
+                              {entry.repairItems.length ? (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleDetail("repairs")}
+                                  aria-expanded={openKind === "repairs"}
+                                  className="underline decoration-dotted underline-offset-2 hover:text-sky-300"
+                                  title="Show the open repair jobs behind this number"
+                                >
+                                  {formatNumber(entry.broken ?? 0)} {openKind === "repairs" ? "\u25be" : "\u25b8"}
+                                </button>
+                              ) : (
+                                formatNumber(entry.broken ?? 0)
+                              )}
+                            </td>
+                          ) : null}
+                          {rentmanChecked ? <td className="px-3 py-2 text-right">{formatNumber(entry.available)}</td> : null}
+                          <td
+                            className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${
+                              short ? "text-red-300" : low ? "text-amber-300" : "text-emerald-300"
+                            }`}
+                          >
+                            {rentmanChecked
+                              ? entry.result === "SHORT"
+                                ? `SHORT ${formatNumber(entry.shortBy)}`
+                                : entry.result
+                              : formatNumber(row.net)}
+                          </td>
+                        </tr>
+                        {openKind === "projects" ? (
+                          <tr className="border-t border-slate-800 bg-slate-950/60">
+                            <td colSpan={detailColSpan} className="px-3 py-2">
+                              <div className="mb-1 text-xs font-semibold text-slate-300">
+                                Other Projects: {formatNumber(entry.otherProjects ?? 0)}
+                              </div>
+                              <ul className="space-y-0.5 text-xs text-slate-300">
+                                {entry.projects.map((project, index) => (
+                                  <li key={index}>
+                                    #{project.projectNumber} - {project.projectName} -{" "}
+                                    <span className="font-semibold">{project.status ?? "No status"}</span> -{" "}
+                                    {formatNumber(project.quantity)} - {formatDateLabel(project.planPeriodStart)} to{" "}
+                                    {formatDateLabel(project.planPeriodEnd)}
+                                  </li>
+                                ))}
+                              </ul>
+                            </td>
+                          </tr>
+                        ) : null}
+                        {openKind === "repairs" ? (
+                          <tr className="border-t border-slate-800 bg-slate-950/60">
+                            <td colSpan={detailColSpan} className="px-3 py-2">
+                              <div className="mb-1 text-xs font-semibold text-slate-300">
+                                Broken / Repair: {formatNumber(entry.broken ?? 0)} unavailable
+                                {entry.repairItems.length !== (entry.broken ?? 0)
+                                  ? ` (${entry.repairItems.length} open repair jobs - some share a serial)`
+                                  : ""}
+                              </div>
+                              <ul className="space-y-0.5 text-xs text-slate-300">
+                                {entry.repairItems.map((item) => (
+                                  <li key={item.repairId}>
+                                    {row.name} - Serial {item.serial ?? "not recorded"} -{" "}
+                                    <span className="font-semibold">{item.status}</span> -{" "}
+                                    {formatDateLabel(item.reported)}
+                                    {item.note ? ` - ${item.note}` : ""}
+                                  </li>
+                                ))}
+                              </ul>
+                            </td>
+                          </tr>
+                        ) : null}
+                      </Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
+            {rentmanChecked ? (
+              <div className="text-xs text-slate-400">
+                Available Stock = Rentman Stock - Other Projects - Broken / Repair, compared against this project&apos;s{" "}
+                {STOCK_COUNT_LABELS.total}. <span className="font-semibold text-emerald-300">OK</span> = comfortably covered,{" "}
+                <span className="font-semibold text-amber-300">LOW</span> = covered by under 10%,{" "}
+                <span className="font-semibold text-red-300">SHORT</span> = not enough.
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 

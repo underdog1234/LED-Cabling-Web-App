@@ -25,6 +25,24 @@ export type EquipmentAvailability = {
   projects: EquipmentAvailabilityProject[];
 };
 
+export type EquipmentRepairItem = {
+  repairId: number;
+  /** The specific piece's serial, or null when the repair is logged against the equipment type rather than one unit. */
+  serial: string | null;
+  /** Rentman's own repair_status, e.g. "in-progress". Completed repairs are never returned. */
+  status: string;
+  /** ISO date the repair was raised. */
+  reported: string;
+  /** Rentman's repair remark, flattened to plain text by the Worker. */
+  note: string;
+};
+
+export type EquipmentRepairs = {
+  /** How many physical units are unavailable - deduped by serial, so two open faults on one panel count once (see the Worker). */
+  quantity: number;
+  items: EquipmentRepairItem[];
+};
+
 const PROXY_URL = (import.meta.env.VITE_RENTMAN_PROXY_URL ?? "").replace(/\/$/, "");
 
 export const isRentmanProxyConfigured = (): boolean => PROXY_URL.length > 0;
@@ -60,4 +78,10 @@ export async function fetchEquipmentAvailability(
 ): Promise<Record<string, EquipmentAvailability | null>> {
   if (!codes.length || !from || !to) return {};
   return proxyGet("/equipment-availability", { codes: codes.join(","), from, to });
+}
+
+/** Equipment currently unavailable because it is broken / under repair. Not date-ranged: a panel in the workshop is off the shelf today regardless of when the job is. */
+export async function fetchEquipmentRepairs(codes: string[]): Promise<Record<string, EquipmentRepairs | null>> {
+  if (!codes.length) return {};
+  return proxyGet("/equipment-repairs", { codes: codes.join(",") });
 }

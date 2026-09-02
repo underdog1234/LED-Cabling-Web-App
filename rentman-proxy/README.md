@@ -119,16 +119,17 @@ Wait for it to finish (green checkmark, usually under a minute).
 
 ## Step 9 — Check it worked
 
-Open your live site, expand **Stock Calculations**, then expand the **Rentman Integration** card. The amber "Not configured" message should be gone. Click **Get Current Stock** — you should see a comparison of real Rentman numbers against what's currently stored, with no mapping step needed first.
+Open your live site and expand **Stock Calculations**. The Rentman buttons are at the top of that card, and the amber "Not configured" message above them should be gone. Click **Get Current Stock from Rentman** — you should see a comparison of real Rentman numbers against what's currently stored, with no mapping step needed first. **Check Broken / Repair Equipment** and **Check Stock Availability by Date Range** should work too.
 
-You're done! This was all one-time setup — you won't need to repeat any of it unless you rotate your token or move the site to a new address.
+You're done! This was all one-time setup — you won't need to repeat any of it unless you rotate your token, move the site to a new address, or the Worker's own code changes (see Maintenance below).
 
 ---
 
 ## If something's not working
 
 - **"Not configured" banner still shows after Step 8** — the site only reads the address at build time, so it needs an actual rebuild *after* the variable was added (Step 8 again). Double-check the variable name is exactly `RENTMAN_PROXY_URL`, no typos.
-- **A red error message in the Rentman Integration card mentioning "502" or "Rentman proxy request failed"** — the stored Rentman token is likely wrong or expired. Repeat Step 4 with a fresh token from Rentman → Settings → API.
+- **A red error message under the Rentman buttons in Stock Calculations mentioning "502" or "Rentman proxy request failed"** — the stored Rentman token is likely wrong or expired. Repeat Step 4 with a fresh token from Rentman → Settings → API.
+- **"Get Current Stock" works but "Check Broken / Repair Equipment" fails with a 404 or "Not found"** — the Worker deployed on Cloudflare is an older build that predates that feature. Repeat Step 6 (`npm run deploy`) to publish the current code. Nothing else needs redoing; the address doesn't change.
 - **A browser error mentioning "CORS" or "blocked"** — the site's address doesn't match `ALLOWED_ORIGIN` in `wrangler.toml`. Fix the value (Step 5) and redeploy (Step 6).
 - **`wrangler` says "You are not authenticated"** — run Step 3 (`npx wrangler login`) again; login sessions occasionally expire.
 
@@ -146,12 +147,15 @@ You're done! This was all one-time setup — you won't need to repeat any of it 
 
 For anyone editing the Worker's code rather than just deploying it:
 
-This Worker is a separate deployable from the main site — it is **not** built or deployed by `npm run build` / the GitHub Pages workflow. It has no write access to Rentman at all; both endpoints are read-only GETs, and both look equipment up by `codes` directly (no id-mapping step - this catalog's codes already are Rentman's own equipment codes):
+This Worker is a separate deployable from the main site — it is **not** built or deployed by `npm run build` / the GitHub Pages workflow. It has no write access to Rentman at all; all three endpoints are read-only GETs, and each looks equipment up by `codes` directly (no id-mapping step - this catalog's codes already are Rentman's own equipment codes):
 
 - `GET /equipment-stock?codes=a,b,c` → `{ [code]: { name, currentQuantity } | null }`
 - `GET /equipment-availability?codes=a,b,c&from=YYYY-MM-DD&to=YYYY-MM-DD` → `{ [code]: { totalStock, totalRequired, remaining, projects: [{ projectName, projectNumber, status, quantity, planPeriodStart, planPeriodEnd }] } | null }` - `remaining` (`totalStock - totalRequired`) is deliberately not clamped at 0, since a negative number is the shortage this endpoint exists to surface. `projects` lists every other Rentman project whose plan period overlaps `[from, to]` for that equipment.
+- `GET /equipment-repairs?codes=a,b,c` → `{ [code]: { quantity, items: [{ repairId, serial, status, reported, note }] } | null }` - every Rentman repair for that equipment whose `repair_status` isn't `completed`. Deliberately not date-ranged: gear in the workshop is off the shelf today regardless of when the job is. `quantity` counts distinct serial numbers (several open repairs can name the same serial, and that's still only one physical unit unavailable); repairs logged with no serial each count as one. `note` is Rentman's repair remark flattened from its stored HTML to plain text.
 
-Both require a `codes` param (plus `from`/`to` for availability), are CORS-restricted to `ALLOWED_ORIGIN`, and return `502` with an error message if the underlying Rentman API call fails.
+All three require a `codes` param (plus `from`/`to` for availability), are CORS-restricted to `ALLOWED_ORIGIN`, and return `502` with an error message if the underlying Rentman API call fails.
+
+Adding or changing a route here has no effect until the Worker is redeployed (`npm run deploy`) — the main site and the Worker are deployed separately.
 
 ### Local development
 
