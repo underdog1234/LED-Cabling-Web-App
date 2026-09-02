@@ -54,7 +54,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.39.0";
+const APP_VERSION = "0.39.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -5653,7 +5653,28 @@ const exportJson = () => {
                 <Button intent="danger" onClick={clearAllPanels}>Clear All Panels</Button>
               </div>
 
+              {/* Signal first, then power - the order these are actually
+                  planned and patched in. */}
               <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2 rounded border border-slate-700 bg-slate-900 p-3">
+                  <label className="text-sm font-semibold">Panels per Signal Port</label>
+                  <Input
+                    className="bg-white text-black"
+                    type="number"
+                    min="1"
+                    max={panel.defaults.signalPanelsPerPort}
+                    value={safePanelsPerSignalPort}
+                    onChange={(e) => {
+                      const raw = Number.parseInt(e.target.value || "0", 10);
+                      const next = Math.min(Math.max(raw || 1, 1), panel.defaults.signalPanelsPerPort);
+                      setPanelsPerSignalPort(next);
+                    }}
+                  />
+                  <div className="text-xs">{formatNumber(signalPortPixels)} pixels</div>
+                  <UtilBar percent={signalPortPercent} />
+                  <div className="text-xs">{formatNumber(signalPortPercent, 1)}% of 650,000</div>
+                </div>
+
                 <div className="space-y-2 rounded border border-slate-700 bg-slate-900 p-3">
                   <label className="text-sm font-semibold">Panels per Power Outlet</label>
                   <Input
@@ -5672,25 +5693,6 @@ const exportJson = () => {
                   <div className="text-xs">{formatNumber(powerOutletAmps, 2)} A</div>
                   <UtilBar percent={powerOutletPercent} />
                   <div className="text-xs">{formatNumber(powerOutletPercent, 1)}% of 16A</div>
-                </div>
-
-                <div className="space-y-2 rounded border border-slate-700 bg-slate-900 p-3">
-                  <label className="text-sm font-semibold">Panels per Signal Port</label>
-                  <Input
-                    className="bg-white text-black"
-                    type="number"
-                    min="1"
-                    max={panel.defaults.signalPanelsPerPort}
-                    value={safePanelsPerSignalPort}
-                    onChange={(e) => {
-                      const raw = Number.parseInt(e.target.value || "0", 10);
-                      const next = Math.min(Math.max(raw || 1, 1), panel.defaults.signalPanelsPerPort);
-                      setPanelsPerSignalPort(next);
-                    }}
-                  />
-                  <div className="text-xs">{formatNumber(signalPortPixels)} pixels</div>
-                  <UtilBar percent={signalPortPercent} />
-                  <div className="text-xs">{formatNumber(signalPortPercent, 1)}% of 650,000</div>
                 </div>
               </div>
 

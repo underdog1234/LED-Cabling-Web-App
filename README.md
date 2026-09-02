@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.39.0`
+Version `0.39.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,10 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.39.1
+
+- Swapped **Panels per Signal Port** and **Panels per Power Outlet** in the LED Wall Setup card so signal comes first, matching the order these are actually planned and patched in
 
 ## Recent Changes In v0.39.0
 
