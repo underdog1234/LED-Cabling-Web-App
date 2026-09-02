@@ -1,6 +1,15 @@
 import React, { useState } from "react";
 import { ChevronUp, ChevronDown, FileText } from "lucide-react";
-import { PANEL_COUNT_LABELS, PANEL_TYPES, POWER_DISTROS, spareForBucket, type PanelTypeKey, type PowerDistroKey } from "../App";
+import {
+  PANEL_COUNT_LABELS,
+  PANEL_TYPES,
+  POSTER_SECTIONS,
+  POWER_DISTROS,
+  posterSpecsUnknown,
+  spareForBucket,
+  type PanelTypeKey,
+  type PowerDistroKey,
+} from "../App";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, Select } from "../components/ui";
 
 // Must match QUICK_LAYOUT_TRANSFER_KEY in App.tsx.
@@ -48,7 +57,26 @@ export default function QuickLayoutView() {
   // forward to become the main tool's project name via Send to Main Layout Tool.
   const [projectName, setProjectName] = useState("");
 
-  const panel = PANEL_TYPES[panelType];
+  // A POSTER in PANEL_TYPES is one QUARTER of a physical poster, because that
+  // is what a grid cell is in the main tool. Here the unit is the whole
+  // 640 x 1920mm fixture you actually order and rig, so its height and pixel
+  // height are the section's x4. Every other type is its own whole panel, so
+  // the multiplier is 1 and nothing else in this view changes.
+  const sectionSpec = PANEL_TYPES[panelType];
+  const isPoster = panelType === "POSTER";
+  const stack = isPoster ? POSTER_SECTIONS : 1;
+  const panel = {
+    ...sectionSpec,
+    h: sectionSpec.h * stack,
+    pixH: sectionSpec.pixH * stack,
+    weight: sectionSpec.weight * stack,
+    power: {
+      maxW: sectionSpec.power.maxW * stack,
+      maxA: sectionSpec.power.maxA * stack,
+      avgW: sectionSpec.power.avgW * stack,
+      avgA: sectionSpec.power.avgA * stack,
+    },
+  };
   const wallWidthM = cols * panel.w;
   const wallHeightM = rows * panel.h;
   // LED Wall Pixel Count - the panel's own native pixel grid (e.g. MT is
@@ -63,7 +91,14 @@ export default function QuickLayoutView() {
   // box" rule, same wording via PANEL_COUNT_LABELS) - shown as an early
   // heads-up here, before any real patching/stock list exists. This grid is
   // uniform, so it is exactly one spare bucket.
-  const panelCounts = spareForBucket(totalPanels, panelType === "MT" ? "MT" : "MG9_STANDARD");
+  // The unit here is a COMPLETE poster, whereas the POSTER spare bucket counts
+  // sections and boxes in fours (four sections = one poster). Running whole
+  // posters through that bucket would round 5 posters up to "8", mixing the two
+  // units - so posters get no box rounding in this view, only in the main tool
+  // where the unit really is sections.
+  const panelCounts = isPoster
+    ? { spare: 0, spareRounded: 0, total: totalPanels }
+    : spareForBucket(totalPanels, panelType === "MT" ? "MT" : "MG9_STANDARD");
 
   // MT is a transparent panel missing every second LED row, so its vertical
   // pixel pitch (7.8mm) is twice its horizontal pitch (3.9mm) - the raw
@@ -151,6 +186,13 @@ export default function QuickLayoutView() {
   const setWidthM = (valueM: number) => setCols(clampCells(Math.round(valueM / panel.w)));
   const setHeightM = (valueM: number) => setRows(clampCells(Math.round(valueM / panel.h)));
 
+  // Posters only ever stand one high, so force that the moment the type is
+  // picked rather than leaving a stale row count behind.
+  const changePanelType = (next: PanelTypeKey) => {
+    setPanelType(next);
+    if (next === "POSTER") setRows(1);
+  };
+
   const clearAll = () => {
     setPanelType("MG9");
     setCols(1);
@@ -236,12 +278,15 @@ export default function QuickLayoutView() {
       };
 
       const panelStats: Array<[string, string]> = [
-        ["Panel Type", panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)"],
-        ["Grid", `${cols} x ${rows} (${totalPanels} panels)`],
+        ["Panel Type", isPoster ? "LED Poster (0.64m x 1.92m)" : panelType === "MT" ? "MT (1m x 0.5m)" : "MG9 (0.5m x 0.5m)"],
+        ["Grid", `${cols} x ${rows} (${totalPanels} ${isPoster ? "posters" : "panels"})`],
         [PANEL_COUNT_LABELS.required, `${totalPanels}`],
         [PANEL_COUNT_LABELS.spare, `${panelCounts.spare}`],
         [PANEL_COUNT_LABELS.spareRounded, `${panelCounts.spareRounded}`],
-        [PANEL_COUNT_LABELS.total, `${panelCounts.total} (boxes of ${panel.defaults.panelsPerBox})`],
+        [
+          PANEL_COUNT_LABELS.total,
+          isPoster ? `${panelCounts.total} complete posters` : `${panelCounts.total} (boxes of ${panel.defaults.panelsPerBox})`,
+        ],
         [hasSquarePixels ? "Wall Size" : "Physical Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`],
       ];
       if (hasSquarePixels) {
@@ -398,10 +443,25 @@ export default function QuickLayoutView() {
 
               <div>
                 <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Panel Type</div>
-                <Select value={panelType} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setPanelType(e.target.value as PanelTypeKey)}>
+                <Select value={panelType} onChange={(e: React.ChangeEvent<HTMLSelectElement>) => changePanelType(e.target.value as PanelTypeKey)}>
                   <option value="MG9">MG9 (0.5m × 0.5m)</option>
                   <option value="MT">MT (1m × 0.5m)</option>
+                  <option value="POSTER">LED Poster (0.64m × 1.92m)</option>
                 </Select>
+                {isPoster ? (
+                  <div className="mt-1 space-y-0.5 text-xs text-slate-400">
+                    <div>Posters stand one high; each is {sectionSpec.pixW} × {sectionSpec.pixH * POSTER_SECTIONS} px.</div>
+                    <div>
+                      Sent to the main tool, each poster splits into {POSTER_SECTIONS} stacked {sectionSpec.w * 1000} × {sectionSpec.h * 1000}mm
+                      sections that stay grouped as one poster.
+                    </div>
+                    {posterSpecsUnknown ? (
+                      <div className="text-amber-300">
+                        ⚠ Poster weight and power draw aren&apos;t in the catalog yet, so the Weight and Power figures below read 0 for posters.
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -456,17 +516,19 @@ export default function QuickLayoutView() {
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-slate-400">Rows</div>
                   <div className="flex items-center gap-1">
-                    <Button size="sm" intent="secondary" onClick={() => setRows((r) => clampCells(r - 1))}>-</Button>
+                    <Button size="sm" intent="secondary" disabled={isPoster} onClick={() => setRows((r) => clampCells(r - 1))}>-</Button>
                     <Input
                       type="number"
                       min={MIN_CELLS}
-                      max={MAX_CELLS}
+                      max={isPoster ? 1 : MAX_CELLS}
                       value={rows}
+                      disabled={isPoster}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => setRows(clampCells(Number(e.target.value)))}
-                      className="text-center"
+                      className="text-center disabled:opacity-60"
                     />
-                    <Button size="sm" intent="secondary" onClick={() => setRows((r) => clampCells(r + 1))}>+</Button>
+                    <Button size="sm" intent="secondary" disabled={isPoster} onClick={() => setRows((r) => clampCells(r + 1))}>+</Button>
                   </div>
+                  {isPoster ? <div className="mt-1 text-xs text-slate-500">Locked to 1 for posters</div> : null}
                 </div>
               </div>
 
@@ -480,7 +542,10 @@ export default function QuickLayoutView() {
                   <dd>{panelCounts.spareRounded}</dd>
                   <dt className="text-slate-400 font-semibold">{PANEL_COUNT_LABELS.total}</dt>
                   <dd className="font-semibold">
-                    {panelCounts.total} <span className="font-normal text-slate-500">(boxes of {panel.defaults.panelsPerBox})</span>
+                    {panelCounts.total}{" "}
+                    <span className="font-normal text-slate-500">
+                      {isPoster ? "complete posters" : `(boxes of ${panel.defaults.panelsPerBox})`}
+                    </span>
                   </dd>
                   <dt className="text-slate-400">{hasSquarePixels ? "Wall size" : "Physical size"}</dt>
                   <dd>{formatM(wallWidthM)} × {formatM(wallHeightM)}</dd>

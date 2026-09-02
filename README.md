@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.39.1`
+Version `0.40.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,28 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.40.0
+
+**LED Poster panel type**
+
+- **LED Poster** is now a panel type in Quick Panel Layout: a complete poster is 640 x 1920mm / 344 x 1032px, and posters are locked to one high (the Rows control is disabled and says so)
+- Sending posters to the main Layout Tool splits each one into **four stacked 640 x 480mm / 344 x 258px sections**, which is the unit the main tool patches and maps in. The wall size and resolution come across unchanged - 3 posters read 1.92 x 1.92m / 1032 x 1032px in both tools
+- The four sections of a poster **stay grouped and behave as one physical poster**: clicking any section selects all four, and moving, rotating, copying, deleting or assigning to a sub-screen acts on the whole poster. Deleting one asks "Delete these 4 panels?" and takes the poster out in one go
+- ⚠️ **The poster's weight and power draw are not in the catalog**, so they are currently **0** and contribute nothing to the Weight, Power and phase-load figures. They are deliberately not guessed - an invented figure would flow silently into rigging and electrical totals. Quick Panel Layout shows a warning while posters are selected. Send me the per-poster weight (kg) and power draw (max/avg W and A) and I'll fill them in
+- There is also no stock line for posters yet: no matching equipment record was found in Rentman, so no code could be used. Send me the Rentman code and posters will appear in Stock Calculations like every other item
+
+**PowerPoint Content Setup**
+
+- The **Wall Details** panel now shows the recommended PowerPoint slide size, derived from the wall's own resolution - no inputs, no Calculate button, and it re-reads itself whenever the layout, panel type, orientation or resolution changes:
+  - PowerPoint slide size, in cm to three decimals, sized so the longest edge is 100cm and the slide's proportions match the wall exactly
+  - LED wall aspect ratio, reduced (2016 x 1176 shows as 12:7)
+  - Native content resolution in pixels
+- A 2016 x 1176 wall reads `100.000 x 58.333 cm`, `12:7`, `2016 x 1176 px`. On MT walls it uses the Recommended Content Resolution, since that is what content should actually be authored at. PowerPoint's 142.24cm ceiling is still checked and warned about, though the 100cm method stays well inside it for any realistic wall
+
+**Layout**
+
+- **LED Wall Setup** and **Wall Summary** can no longer be collapsed - they are the panels you work from and refer to constantly. Every other card still collapses as before
 
 ## Recent Changes In v0.39.1
 

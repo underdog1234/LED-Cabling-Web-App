@@ -54,7 +54,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.39.1";
+const APP_VERSION = "0.40.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -129,7 +129,49 @@ export const PANEL_TYPES = {
       reinforcementScrew: 400,
     },
   },
+  // ONE QUARTER of an LED poster. A complete poster is 640 x 1920mm /
+  // 344 x 1032px, but it is carried in the grid as four stacked 640 x 480mm
+  // sections sharing a posterGroupId (see POSTER_SECTIONS and Cell.posterGroupId)
+  // so the layout, patching and pixel maths all work in one consistent panel
+  // unit instead of needing a special case per feature.
+  //
+  // weight and power are ZERO because the real figures for this fixture have
+  // not been supplied - they are deliberately not guessed, since a plausible
+  // invented number would flow silently into the rigging-load and phase
+  // calculations. Anywhere those totals are shown, POSTER panels contribute
+  // nothing and the UI says so (see posterSpecsUnknown).
+  POSTER: {
+    name: "LED Poster",
+    w: 0.64,
+    h: 0.48,
+    pixW: 344,
+    pixH: 258,
+    weight: 0,
+    power: { maxW: 0, maxA: 0, avgW: 0, avgA: 0 },
+    defaults: {
+      // One whole poster per outlet until the real draw is known.
+      powerPanelsPerOutlet: 4,
+      // 344 x 258 = 88,752px per section, so 7 whole posters (28 sections)
+      // fit inside the 650,000px-per-port ceiling. Derived, not guessed.
+      signalPanelsPerPort: 28,
+      spareRatio: 0,
+      // Spares are counted in whole posters, which is 4 sections.
+      panelsPerBox: 4,
+      signalSpareRatio: 0.3,
+      powerSpareRatio: 0.2,
+      flyBarWeight: 0,
+      slingWeight: 0,
+    },
+    stock: {
+      panels: 0,
+    },
+  },
 } as const;
+
+// How many stacked sections make one complete LED poster.
+export const POSTER_SECTIONS = 4;
+/** True while the poster's real weight/power figures are still placeholders. */
+export const posterSpecsUnknown = PANEL_TYPES.POSTER.weight === 0;
 
 export const POWER_DISTROS = {
   "32A": { id: "32A", label: "32A distro (9 ports)", portCount: 9, safePhaseWatts: 6900 },
@@ -272,6 +314,13 @@ export type Cell = {
   panelType: PanelTypeKey;
   /** Sub-screen membership - null = unassigned. */
   subScreenId: string | null;
+  /**
+   * Which physical LED poster this section belongs to. Non-null only on
+   * POSTER panels: the four sections of one poster share an id, and every
+   * selection expands to the whole group (see getSelectedIds), so a poster
+   * moves, rotates, copies and deletes as the single physical object it is.
+   */
+  posterGroupId?: string | null;
 };
 
 // Copy/paste clipboard: each panel's offset from the copied selection's own
@@ -350,6 +399,15 @@ const QUICK_LAYOUT_TRANSFER_KEY = "ledCablingQuickLayoutTransfer:v1";
 // collide with a sub-screen id, which is always a uuid.
 const FULL_WALL_PATTERN_KEY = "__full_wall__";
 type QuickLayoutTransfer = { panelType: PanelTypeKey; cols: number; rows: number; projectName?: string };
+
+// A POSTER transfer carries `cols` COMPLETE posters; each becomes four stacked
+// sections here (see makePosterPanels). Quick Panel Layout shows a poster as
+// the whole 640 x 1920mm fixture, which is how you order and rig them; the
+// main tool needs the sections, which is how they patch.
+const buildTransferPanels = (payload: QuickLayoutTransfer, subScreenId: string | null = null): Cell[] =>
+  payload.panelType === "POSTER"
+    ? makePosterPanels(payload.cols, subScreenId)
+    : makeGridPanels(payload.cols, payload.rows, payload.panelType, subScreenId);
 
 type SignalPortStat = {
   panels: number;
@@ -506,16 +564,21 @@ export const cellPanelType = (cell: Cell): PanelTypeKey => cell.panelType ?? "MG
 // under-count once several buckets each need their own rounding-up). See
 // sparePanelSurfaces in the App component for the per-surface breakdown
 // this feeds.
-export type SpareBucketKey = "MG9_STANDARD" | "MG9_TRIANGLE" | "MG9_CURVED" | "MG9_CORNER" | "MT";
+export type SpareBucketKey = "MG9_STANDARD" | "MG9_TRIANGLE" | "MG9_CURVED" | "MG9_CORNER" | "MT" | "POSTER";
 export const SPARE_BUCKETS: Array<{ key: SpareBucketKey; label: string }> = [
   { key: "MG9_STANDARD", label: "MG9 Standard" },
   { key: "MG9_TRIANGLE", label: "MG9 Triangle" },
   { key: "MG9_CURVED", label: "MG9 Curved" },
   { key: "MG9_CORNER", label: "MG9 Corner" },
   { key: "MT", label: "MT" },
+  // Counted in sections; panelsPerBox is 4, so the box rounding lands on
+  // whole posters.
+  { key: "POSTER", label: "LED Poster (sections)" },
 ];
 export const spareBucketOfCell = (cell: Cell): SpareBucketKey => {
-  if (cellPanelType(cell) !== "MG9") return "MT";
+  const type = cellPanelType(cell);
+  if (type === "POSTER") return "POSTER";
+  if (type !== "MG9") return "MT";
   const variant = cell.panelVariant ?? "STANDARD";
   if (variant === "TRIANGLE") return "MG9_TRIANGLE";
   if (variant === "CURVED") return "MG9_CURVED";
@@ -528,6 +591,7 @@ const SPARE_BUCKET_RATIO: Record<SpareBucketKey, number> = {
   MG9_CURVED: PANEL_TYPES.MG9.defaults.spareRatio,
   MG9_CORNER: PANEL_TYPES.MG9.defaults.spareRatio,
   MT: PANEL_TYPES.MT.defaults.spareRatio,
+  POSTER: PANEL_TYPES.POSTER.defaults.spareRatio,
 };
 // Box size each bucket ships in - null means shaped panels (Triangle/Curved),
 // which are one-way physical pieces bought individually, not boxed, so their
@@ -538,6 +602,7 @@ export const SPARE_BUCKET_BOX_SIZE: Record<SpareBucketKey, number | null> = {
   MG9_CURVED: null,
   MG9_CORNER: PANEL_TYPES.MG9.defaults.panelsPerBox,
   MT: PANEL_TYPES.MT.defaults.panelsPerBox,
+  POSTER: PANEL_TYPES.POSTER.defaults.panelsPerBox,
 };
 // The one panel-count vocabulary used everywhere (Quick Panel Layout, Wall
 // Summary, Stock Calculations, PDF):
@@ -643,6 +708,7 @@ export const normalizePanels = (raw: unknown): Cell[] => {
       rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
       panelType: cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
       subScreenId: typeof cell.subScreenId === "string" ? cell.subScreenId : null,
+      posterGroupId: typeof cell.posterGroupId === "string" ? cell.posterGroupId : null,
     });
   });
   return panels;
@@ -750,6 +816,34 @@ const formatNumber = (value: number, digits = 0) =>
 
 // Rounds to at most 2 decimal places and trims trailing zeros (19.384... -> "19.38", 3.50 -> "3.5", 4.00 -> "4").
 const formatMeters = (value: number) => (Number(value) || 0).toFixed(2).replace(/\.?0+$/, "");
+
+// PowerPoint's own hard ceiling for a custom slide dimension (56in).
+export const POWERPOINT_MAX_SLIDE_CM = 142.24;
+
+/**
+ * Recommended PowerPoint slide size for a wall of `pixelW` x `pixelH`.
+ *
+ * PowerPoint sizes slides in physical units, not pixels, so what matters is
+ * the ASPECT RATIO: a slide with the same proportions as the wall fills it
+ * exactly with no letterboxing, whatever pixel density PowerPoint exports at.
+ * Fixing the longest edge to 100cm keeps the numbers memorable and lands well
+ * inside PowerPoint's 142.24cm limit for any ratio up to 1:1.42.
+ */
+export const powerPointSlideSize = (pixelW: number, pixelH: number) => {
+  if (!(pixelW > 0) || !(pixelH > 0)) return null;
+  const widthCm = pixelW >= pixelH ? 100 : (100 * pixelW) / pixelH;
+  const heightCm = pixelH > pixelW ? 100 : (100 * pixelH) / pixelW;
+  const divisor = gcd(Math.round(pixelW), Math.round(pixelH)) || 1;
+  return {
+    widthCm,
+    heightCm,
+    ratioW: Math.round(pixelW) / divisor,
+    ratioH: Math.round(pixelH) / divisor,
+    // Can only trip on an extreme ratio; kept because the limit is real and a
+    // silently-too-big slide is rejected by PowerPoint, not clamped.
+    exceedsLimit: widthCm > POWERPOINT_MAX_SLIDE_CM || heightCm > POWERPOINT_MAX_SLIDE_CM,
+  };
+};
 
 // Rentman hands back full ISO timestamps; only the day matters in these
 // tables. Falls back to the raw string rather than printing "Invalid Date".
@@ -1017,9 +1111,43 @@ export const trueOuterBBoxOf = (cells: Cell[]): RectMm => {
   return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
 };
 
-const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null) => {
-  if (selectedCells.size > 0) return selectedCells;
-  return selectedId ? new Set([selectedId]) : new Set<string>();
+/**
+ * The ids every selection-driven action should operate on.
+ *
+ * Passing `grid` expands the selection to whole LED posters: touching any one
+ * of a poster's four sections pulls in its siblings, so delete/move/rotate/
+ * copy/assign all treat a poster as one physical object without each of those
+ * call sites needing to know posters exist.
+ */
+const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null, grid?: Cell[]) => {
+  const base = selectedCells.size > 0 ? selectedCells : selectedId ? new Set([selectedId]) : new Set<string>();
+  if (!grid || base.size === 0) return base;
+  const groups = new Set<string>();
+  grid.forEach((cell) => {
+    if (cell.posterGroupId && base.has(cell.id)) groups.add(cell.posterGroupId);
+  });
+  if (groups.size === 0) return base;
+  const expanded = new Set(base);
+  grid.forEach((cell) => {
+    if (cell.posterGroupId && groups.has(cell.posterGroupId)) expanded.add(cell.id);
+  });
+  return expanded;
+};
+
+/** The four stacked sections of one complete LED poster, top-down, sharing a group id. */
+export const makePosterAt = (xMm: number, yMm: number, subScreenId: string | null = null): Cell[] => {
+  const groupId = newCellId();
+  const hMm = PANEL_TYPES.POSTER.h * 1000;
+  return Array.from({ length: POSTER_SECTIONS }, (_, i) => ({
+    ...makePanelAt(xMm, yMm + i * hMm, "POSTER", subScreenId),
+    posterGroupId: groupId,
+  }));
+};
+
+/** A row of `count` complete posters, side by side. */
+export const makePosterPanels = (count: number, subScreenId: string | null = null): Cell[] => {
+  const wMm = PANEL_TYPES.POSTER.w * 1000;
+  return Array.from({ length: Math.max(0, count) }, (_, i) => makePosterAt(i * wMm, 0, subScreenId)).flat();
 };
 
 // SVG outline path (in a 0..100 box) matching each variant's on-screen shape,
@@ -1738,7 +1866,7 @@ export default function App() {
   const [panelsPerSignalPort, setPanelsPerSignalPort] = useState<number>(panel.defaults.signalPanelsPerPort);
 
   const selectedPanel = findCellById(grid, selectedId);
-  const activeSelectedKeys = getSelectedIds(selectedCells, selectedId);
+  const activeSelectedKeys = getSelectedIds(selectedCells, selectedId, grid);
   const selectedCount = activeSelectedKeys.size;
   const isPatchTargetActive = patchMode === "signal" ? activePort > 0 : activePowerPort > 0;
 
@@ -1995,7 +2123,7 @@ export default function App() {
       setDraftCols(String(payload.cols));
       setDraftRows(String(payload.rows));
       setPanelType(payload.panelType);
-      setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
+      setGrid(buildTransferPanels(payload));
       setSelectedId(null);
       setSelectedCells(new Set());
       if (payload.projectName) setProjectName(payload.projectName);
@@ -2017,7 +2145,7 @@ export default function App() {
       setDraftCols(String(payload.cols));
       setDraftRows(String(payload.rows));
       setPanelType(payload.panelType);
-      setGrid(makeGridPanels(payload.cols, payload.rows, payload.panelType));
+      setGrid(buildTransferPanels(payload));
       // Replace wipes the whole project's panels - any existing sub-screens
       // no longer have valid members, so start clean (same as importing).
       setSubScreens([]);
@@ -2034,7 +2162,7 @@ export default function App() {
       const GAP_MM = 500;
       const offsetX = bbox.w > 0 ? bbox.x + bbox.w + GAP_MM : 0;
       const offsetY = bbox.w > 0 ? bbox.y : 0;
-      const added = makeGridPanels(payload.cols, payload.rows, payload.panelType, resolvedActiveSubScreenId).map((cell) => ({
+      const added = buildTransferPanels(payload, resolvedActiveSubScreenId).map((cell) => ({
         ...cell,
         x: cell.x + offsetX,
         y: cell.y + offsetY,
@@ -2152,7 +2280,9 @@ export default function App() {
     return cell ? panelRefLabel(cell) : "-";
   };
   const panelTypeCounts = useMemo(() => {
-    const counts = { MG9: 0, MT: 0 } as Record<PanelTypeKey, number>;
+    // Every key spelled out: an `as Record<...>` over a partial literal used
+    // to hide a missing type here, which then counted as NaN.
+    const counts: Record<PanelTypeKey, number> = { MG9: 0, MT: 0, POSTER: 0 };
     activePanels.forEach((cell) => {
       counts[cellPanelType(cell)] += 1;
     });
@@ -2470,6 +2600,11 @@ export default function App() {
 
     return phases;
   }, [powerPorts, powerPortStats, distro.safePhaseWatts]);
+
+  // Slide size for PowerPoint content, straight off the wall's own content
+  // resolution (which equals the LED resolution except on MT, where content is
+  // authored at the doubled vertical resolution - see contentPixelH).
+  const powerPointSetup = useMemo(() => powerPointSlideSize(contentPixelW, contentPixelH), [contentPixelW, contentPixelH]);
 
   const totalPowerMaxW = panelTotals.maxW;
   const totalPowerMaxA = panelTotals.maxA;
@@ -4614,7 +4749,7 @@ const exportJson = () => {
 
   // --- Copy / paste ---------------------------------------------------------
   const copySelectedPanels = () => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     const cells = grid.filter((c) => keys.has(c.id) && isActiveCell(c));
     if (!cells.length) return;
@@ -4781,11 +4916,13 @@ const exportJson = () => {
       } else if (moveJoinedGroup) {
         ids = [...joinedGroupIdsByGeom(grid, cellGeom, new Set([cell.id]))];
       } else {
-        ids = [cell.id];
+        // Dragging one section of an LED poster drags the whole poster - it is
+        // a single physical object, not four independent panels.
+        ids = [...getSelectedIds(new Set([cell.id]), null, grid)];
       }
       if (!activeSelectedKeys.has(cell.id)) {
         setSelectedId(cell.id);
-        setSelectedCells(new Set([cell.id]));
+        setSelectedCells(getSelectedIds(new Set([cell.id]), null, grid));
       }
       setOverlapNotice(null);
       setMoveDrag({ ids, startX: mm.x, startY: mm.y, dx: 0, dy: 0 });
@@ -5124,7 +5261,7 @@ const exportJson = () => {
   };
 
   const clearSelectedPanelPatching = () => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -5183,13 +5320,13 @@ const exportJson = () => {
   };
 
   const assignSelectedToSubScreen = (id: string) => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => prev.map((cell) => (keys.has(cell.id) ? { ...cell, subScreenId: id } : cell)));
   };
 
   const removeSelectedFromSubScreen = () => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => prev.map((cell) => (keys.has(cell.id) ? { ...cell, subScreenId: null } : cell)));
   };
@@ -5232,14 +5369,14 @@ const exportJson = () => {
   // Delete now prompts (Remove / Mark Inactive / Cancel); the button and the
   // Delete key just open the confirmation.
   const deleteSelectedPanel = () => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     setShowDeleteConfirm(true);
   };
 
   // Permanently remove the selected panels from the layout.
   const removeSelectedPanels = () => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => cloneGrid(prev).filter((cell) => !keys.has(cell.id)));
     setSelectedId(null);
@@ -5250,7 +5387,7 @@ const exportJson = () => {
   // Keep the selected panels in place but mark them inactive (excluded from
   // totals, patching and outputs).
   const markSelectedInactive = () => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -5270,7 +5407,7 @@ const exportJson = () => {
   };
 
   const restoreSelectedPanel = () => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -5291,7 +5428,7 @@ const exportJson = () => {
   };
 
   const applySelectedPanelVariant = (variant: PanelVariantKey) => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -5307,7 +5444,7 @@ const exportJson = () => {
   };
 
   const applySelectedPanelType = (type: PanelTypeKey) => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       let next = cloneGrid(prev);
@@ -5323,7 +5460,7 @@ const exportJson = () => {
   // move - so a multi-selected group's arrangement and spacing relative to
   // each other is preserved automatically.
   const rotateSelectedPanels = (deltaDeg: number = 90) => {
-    const keys = getSelectedIds(selectedCells, selectedId);
+    const keys = getSelectedIds(selectedCells, selectedId, grid);
     if (!keys.size) return;
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -5567,7 +5704,8 @@ const exportJson = () => {
         </div>
 
         <div className="grid gap-4 xl:grid-cols-[1.1fr_1.2fr]">
-          <Card className="border-slate-700 bg-slate-800 print-card" collapsible>
+          {/* Deliberately not collapsible - this is the panel you work from. */}
+          <Card className="border-slate-700 bg-slate-800 print-card">
             <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">LED Wall Setup</CardTitle>
           </CardHeader>
@@ -5743,7 +5881,8 @@ const exportJson = () => {
           </Card>
 
           <div className="space-y-4">
-          <Card className="border-slate-700 bg-slate-800 print-card" collapsible>
+          {/* Deliberately not collapsible - always-on reference while building. */}
+          <Card className="border-slate-700 bg-slate-800 print-card">
             <CardHeader>
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Wall Summary</CardTitle>
             </CardHeader>
@@ -5767,6 +5906,25 @@ const exportJson = () => {
                       <div>Ratio: {ratioLabel}</div>
                     </>
                   )}
+                  {/* Slide size for content authored in PowerPoint. Derived
+                      entirely from the resolution above, so it re-reads itself
+                      whenever the layout, panel type or orientation changes -
+                      there is deliberately nothing to type in or recalculate. */}
+                  {powerPointSetup ? (
+                    <div className="mt-2 border-t border-slate-700 pt-2">
+                      <div className="mb-1 font-bold">PowerPoint Content Setup</div>
+                      <div>
+                        PowerPoint slide size: {powerPointSetup.widthCm.toFixed(3)} × {powerPointSetup.heightCm.toFixed(3)} cm
+                      </div>
+                      <div>LED wall aspect ratio: {powerPointSetup.ratioW}:{powerPointSetup.ratioH}</div>
+                      <div>Native content resolution: {contentPixelW} × {contentPixelH} px</div>
+                      {powerPointSetup.exceedsLimit ? (
+                        <div className="text-amber-300">
+                          ⚠ Over PowerPoint&apos;s {POWERPOINT_MAX_SLIDE_CM} cm limit - scale both numbers down by the same factor.
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">{panel.name} Guts</div>
