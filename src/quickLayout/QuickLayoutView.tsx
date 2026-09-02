@@ -5,7 +5,6 @@ import {
   PANEL_TYPES,
   POSTER_SECTIONS,
   POWER_DISTROS,
-  posterSpecsUnknown,
   spareForBucket,
   type PanelTypeKey,
   type PowerDistroKey,
@@ -455,11 +454,9 @@ export default function QuickLayoutView() {
                       Sent to the main tool, each poster splits into {POSTER_SECTIONS} stacked {sectionSpec.w * 1000} × {sectionSpec.h * 1000}mm
                       sections that stay grouped as one poster.
                     </div>
-                    {posterSpecsUnknown ? (
-                      <div className="text-amber-300">
-                        ⚠ Poster weight and power draw aren&apos;t in the catalog yet, so the Weight and Power figures below read 0 for posters.
-                      </div>
-                    ) : null}
+                    <div>
+                      {panel.power.maxW} W per poster. Weight is set to 0 by choice, so posters add nothing to the weight estimate below.
+                    </div>
                   </div>
                 ) : null}
               </div>

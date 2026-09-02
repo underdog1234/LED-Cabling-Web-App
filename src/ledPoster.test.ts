@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { PANEL_TYPES, POSTER_SECTIONS, makePosterAt, makePosterPanels, normalizePanels, spareBucketOfCell, cellRect } from "./App";
+import {
+  PANEL_TYPES,
+  POSTER_SECTIONS,
+  POSTER_WATTS_PER_UNIT,
+  makePosterAt,
+  makePosterPanels,
+  normalizePanels,
+  spareBucketOfCell,
+  cellRect,
+} from "./App";
 
 // A complete LED poster is 640 x 1920mm / 344 x 1032px, but it lives in the
 // grid as four stacked 640 x 480mm / 344 x 258px sections sharing a
@@ -69,5 +78,59 @@ describe("LED poster geometry", () => {
   it("leaves non-poster panels ungrouped", () => {
     const restored = normalizePanels([{ x: 0, y: 0, panelType: "MG9" }]);
     expect(restored[0].posterGroupId).toBeNull();
+  });
+});
+
+// Power is specified per COMPLETE poster (575.00W); the catalog stores one
+// section, so the per-section figure is that divided by four. Amps use the
+// same 230V basis as every other panel in the catalog.
+describe("LED poster power", () => {
+  const VOLTAGE = 230;
+
+  it("four sections add up to exactly 575W per poster", () => {
+    expect(POSTER_WATTS_PER_UNIT).toBe(575);
+    expect(PANEL_TYPES.POSTER.power.maxW * POSTER_SECTIONS).toBe(575);
+    expect(PANEL_TYPES.POSTER.power.maxW).toBe(143.75);
+  });
+
+  it("derives amps from watts at 230V, consistently with MG9 and MT", () => {
+    const p = PANEL_TYPES.POSTER.power;
+    expect(p.maxA * POSTER_SECTIONS).toBeCloseTo(575 / VOLTAGE, 6);
+    expect(p.maxA).toBeCloseTo(p.maxW / VOLTAGE, 6);
+    // The existing entries are stored rounded to 2dp, so they only imply
+    // ~227-229V rather than exactly 230 - check they share the same basis
+    // within that rounding, not that they match to the decimal.
+    for (const spec of [PANEL_TYPES.MG9, PANEL_TYPES.MT, PANEL_TYPES.POSTER]) {
+      expect(spec.power.maxW / spec.power.maxA).toBeGreaterThan(225);
+      expect(spec.power.maxW / spec.power.maxA).toBeLessThanOrEqual(230);
+    }
+  });
+
+  it("uses peak for average too, since only one figure was supplied", () => {
+    const p = PANEL_TYPES.POSTER.power;
+    expect(p.avgW).toBe(p.maxW);
+    expect(p.avgA).toBe(p.maxA);
+  });
+
+  it("keeps a whole poster's draw inside one 16A outlet allowance", () => {
+    const perOutletW = PANEL_TYPES.POSTER.defaults.powerPanelsPerOutlet * PANEL_TYPES.POSTER.power.maxW;
+    expect(perOutletW).toBeLessThanOrEqual(16 * VOLTAGE);
+    // Whole posters only - never a part-poster on an outlet.
+    expect(PANEL_TYPES.POSTER.defaults.powerPanelsPerOutlet % POSTER_SECTIONS).toBe(0);
+  });
+
+  it("carries weight of 0 by choice, so posters add nothing to weight totals", () => {
+    expect(PANEL_TYPES.POSTER.weight).toBe(0);
+  });
+});
+
+// Regression: a catch-all `else` in topRowBars swept POSTER sections into the
+// MG9 tally, which handed them MG9's fly-bar/sling weights and ordered MG9
+// hanging bars for them. Posters carry their own (zero) rigging hardware.
+describe("LED poster rigging hardware", () => {
+  it("has its own fly bar and sling weights, not MG9's", () => {
+    expect(PANEL_TYPES.POSTER.defaults.flyBarWeight).toBe(0);
+    expect(PANEL_TYPES.POSTER.defaults.slingWeight).toBe(0);
+    expect(PANEL_TYPES.MG9.defaults.flyBarWeight).not.toBe(PANEL_TYPES.POSTER.defaults.flyBarWeight);
   });
 });

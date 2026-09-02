@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.40.0`
+Version `0.40.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,15 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.40.1
+
+- Filled in the **LED Poster** figures that were placeholders in v0.40.0:
+  - **Power: 575.00 W per complete poster** (143.75 W per section, 0.625 A at 230 V - the same voltage basis the rest of the catalog uses). Four posters read 2,300 W / 10.00 A. Only one power figure was supplied, so average is set equal to peak: it can over-state a distro's load but never under-state it
+  - **Weight stays 0** by instruction, so posters contribute nothing to the weight totals
+  - Stock line added: **Tentec P1.86 LED Poster, code 12199** (10 in stock), counted in complete posters rather than the four sections the grid holds
+  - Outlet allowance set to 24 sections (6 whole posters = 3,450 W), derived from the 16 A x 230 V ceiling and rounded down to whole posters
+- Fixed poster sections being counted as MG9 for rigging hardware: a catch-all branch gave every top-row poster section MG9's 1.9 kg fly bar and 1.5 kg sling, and put MG9 Hanging Bars in the stock list for them. Each panel type now carries its own hardware weight, so posters (0 kg) stay out of the rigging totals
 
 ## Recent Changes In v0.40.0
 

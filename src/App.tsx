@@ -54,7 +54,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.40.0";
+const APP_VERSION = "0.40.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -135,11 +135,16 @@ export const PANEL_TYPES = {
   // so the layout, patching and pixel maths all work in one consistent panel
   // unit instead of needing a special case per feature.
   //
-  // weight and power are ZERO because the real figures for this fixture have
-  // not been supplied - they are deliberately not guessed, since a plausible
-  // invented number would flow silently into the rigging-load and phase
-  // calculations. Anywhere those totals are shown, POSTER panels contribute
-  // nothing and the UI says so (see posterSpecsUnknown).
+  // weight is 0 by instruction, not by omission - posters are excluded from
+  // the rigging-weight totals on purpose.
+  //
+  // Power is specified as 575.00W for a COMPLETE poster, so each of the four
+  // sections carries a quarter of it: 575 / 4 = 143.75W. Amps follow the same
+  // 230V basis every other panel in this catalog uses (575 / 230 = 2.5A per
+  // poster, 0.625A per section). Only one power figure was supplied, so avg is
+  // set equal to max: with no separate average known, sizing on the peak is
+  // the safe direction to be wrong in - it can over-state a distro's load, but
+  // never under-state it.
   POSTER: {
     name: "LED Poster",
     w: 0.64,
@@ -147,10 +152,12 @@ export const PANEL_TYPES = {
     pixW: 344,
     pixH: 258,
     weight: 0,
-    power: { maxW: 0, maxA: 0, avgW: 0, avgA: 0 },
+    power: { maxW: 143.75, maxA: 0.625, avgW: 143.75, avgA: 0.625 },
     defaults: {
-      // One whole poster per outlet until the real draw is known.
-      powerPanelsPerOutlet: 4,
+      // 16A x 230V = 3,680W safe outlet ceiling / 143.75W per section = 25
+      // sections, but outlets are wired per whole poster, so round down to
+      // 6 posters = 24 sections.
+      powerPanelsPerOutlet: 24,
       // 344 x 258 = 88,752px per section, so 7 whole posters (28 sections)
       // fit inside the 650,000px-per-port ceiling. Derived, not guessed.
       signalPanelsPerPort: 28,
@@ -170,8 +177,8 @@ export const PANEL_TYPES = {
 
 // How many stacked sections make one complete LED poster.
 export const POSTER_SECTIONS = 4;
-/** True while the poster's real weight/power figures are still placeholders. */
-export const posterSpecsUnknown = PANEL_TYPES.POSTER.weight === 0;
+/** Power draw of one COMPLETE poster, as specified - the per-section figures above are this divided by POSTER_SECTIONS. */
+export const POSTER_WATTS_PER_UNIT = PANEL_TYPES.POSTER.power.maxW * POSTER_SECTIONS;
 
 export const POWER_DISTROS = {
   "32A": { id: "32A", label: "32A distro (9 ports)", portCount: 9, safePhaseWatts: 6900 },
@@ -211,6 +218,9 @@ const STOCK_CATALOG = {
   // (28512) - every lookup in this app goes through the code, so the id would
   // silently resolve to nothing.
   tempFencingWeight: { code: "12357", name: "Temporary Fencing Weight", stock: 51 },
+  // Stocked and ordered as COMPLETE posters, never as the four sections the
+  // grid holds - so this row's quantity is poster count, not section count.
+  ledPoster: { code: "12199", name: "Tentec P1.86 LED Poster", stock: 10 },
 } as const;
 
 // Ballast per metre of wall width for a ground-supported wall's fencing.
@@ -2557,17 +2567,30 @@ export default function App() {
   const topRowBars = useMemo(() => {
     // Hanging bars attach along the top edge of the wall: count panels whose
     // top edge sits on the bbox top (within half a module for near-misses).
+    // Counted per panel TYPE - a catch-all `else` here previously swept LED
+    // poster sections into the MG9 tally, which handed them MG9's fly-bar and
+    // sling weights and ordered MG9 hanging bars for them.
     let mg9 = 0;
     let mt = 0;
+    let poster = 0;
     activePanels.forEach((cell) => {
       if (Math.abs(cellRect(cell).y - wallBBox.y) > MODULE_MM / 2) return;
-      if (cellPanelType(cell) === "MT") mt += 1;
+      const type = cellPanelType(cell);
+      if (type === "MT") mt += 1;
+      else if (type === "POSTER") poster += 1;
       else mg9 += 1;
     });
-    return { mg9, mt };
+    return { mg9, mt, poster };
   }, [activePanels, wallBBox]);
-  const flyBarWeight = topRowBars.mg9 * PANEL_TYPES.MG9.defaults.flyBarWeight + topRowBars.mt * PANEL_TYPES.MT.defaults.flyBarWeight;
-  const slingWeight = (topRowBars.mg9 + topRowBars.mt) * PANEL_TYPES.MG9.defaults.slingWeight;
+  // Each type brings its own rigging hardware weight; POSTER's are 0, matching
+  // its 0 panel weight, so posters stay out of the rigging totals entirely.
+  const flyBarWeight =
+    topRowBars.mg9 * PANEL_TYPES.MG9.defaults.flyBarWeight +
+    topRowBars.mt * PANEL_TYPES.MT.defaults.flyBarWeight +
+    topRowBars.poster * PANEL_TYPES.POSTER.defaults.flyBarWeight;
+  const slingWeight =
+    (topRowBars.mg9 + topRowBars.mt) * PANEL_TYPES.MG9.defaults.slingWeight +
+    topRowBars.poster * PANEL_TYPES.POSTER.defaults.slingWeight;
   const powerCableWeight = powerPortsUsed * 3;
   const signalCableWeight = effectiveSignalPortsUsed * 1;
   const additionalWeight =
@@ -2615,6 +2638,18 @@ export default function App() {
   // Spares and boxes are per type (different spare ratios and box sizes).
   const mg9Count = panelTypeCounts.MG9;
   const mtCount = panelTypeCounts.MT;
+  // COMPLETE posters, counted by distinct group rather than sections/4, so a
+  // part-deleted poster still counts as the one physical unit it is.
+  const posterCount = useMemo(() => {
+    const groups = new Set<string>();
+    let ungrouped = 0;
+    activePanels.forEach((cell) => {
+      if (cellPanelType(cell) !== "POSTER") return;
+      if (cell.posterGroupId) groups.add(cell.posterGroupId);
+      else ungrouped += 1;
+    });
+    return groups.size + Math.ceil(ungrouped / POSTER_SECTIONS);
+  }, [activePanels]);
   const mg9Defaults = PANEL_TYPES.MG9.defaults;
   const mtDefaults = PANEL_TYPES.MT.defaults;
   const mg9Spare = Math.ceil(mg9Count * mg9Defaults.spareRatio);
@@ -2773,6 +2808,18 @@ export default function App() {
           );
         }
       }
+    }
+
+    if (posterCount > 0) {
+      // Whole posters, matching how Rentman stocks them - the grid's four
+      // sections per poster are an internal detail here.
+      rowsOut.push(
+        makeStockRow(
+          STOCK_CATALOG.ledPoster,
+          posterCount,
+          `${posterCount} complete poster${posterCount === 1 ? "" : "s"} (${posterCount * POSTER_SECTIONS} sections)`,
+        ),
+      );
     }
 
     if (mtCount > 0) {
