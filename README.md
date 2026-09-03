@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.41.0`
+Version `0.42.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,25 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.42.0
+
+**Wall Summary layout**
+
+- **PowerPoint Content Setup is now its own panel** in Wall Summary instead of sitting inside Wall Details
+- Dropped **LED wall aspect ratio** and **Native content resolution** from it - both are already shown in Wall Details, so the panel is just the slide size (plus the over-limit warning when it applies)
+- **Area** moved to the bottom of Wall Details, under the resolution and ratio lines
+
+**You can select and copy text again**
+
+- Yes, this was something we had coded in, and it was a bug. The panel-canvas keyboard shortcuts are bound to the whole window, so **Ctrl+C copied the selected panels instead of the selected text** - the clipboard came back silently wrong wherever you tried to copy a figure out of the tool. **Delete** had the same problem: with text highlighted it deleted panels
+- Ctrl+C, Ctrl+V and Delete now stand aside whenever text is highlighted, so copying works normally everywhere. With nothing highlighted they behave exactly as before, so copy/paste/delete of panels is unchanged. Undo, redo and the mode keys were never in conflict and are untouched
+
+**LED Posters**
+
+- Selecting the **LED Poster** panel type in the main tool now **greys out Rows and pins it to 1**, matching Quick Panel Layout - posters are always one high, and Apply Grid Size forces it too rather than trusting the box
+- **+ Add Panel** becomes **+ Add Poster** for posters, and adds a complete poster (all eight sections) instead of a single loose section
+- **Every poster is now its own sub-screen**, named `Poster 1`, `Poster 2`, ... with its own identity colour - whether it came from Quick Panel Layout, Apply Grid Size or + Add Poster. Each poster is a separate fixture with its own content feed, so it can be scoped, coloured, patched and given its own test pattern from the moment it is created. Names carry on past any sub-screens that already exist, so adding a second batch never reuses a name
 
 ## Recent Changes In v0.41.0
 

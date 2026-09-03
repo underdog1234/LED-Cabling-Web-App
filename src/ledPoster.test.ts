@@ -5,13 +5,14 @@ import {
   POSTER_ROWS,
   POSTER_SECTIONS,
   POSTER_WATTS_PER_UNIT,
-  POSTER_WIDTH_MM,
   makePosterAt,
   makePosterPanels,
   normalizePanels,
   spareBucketOfCell,
   cellRect,
   getSelectedIds,
+  makePosterUnits,
+  POSTER_WIDTH_MM,
 } from "./App";
 
 // A complete LED poster is 640 x 1920mm / 344 x 1032px, but it lives in the
@@ -203,5 +204,54 @@ describe("LED poster grouping survives the 2x4 split", () => {
   it("expands a bare selectedId too, not just a multi-selection", () => {
     const cells = makePosterPanels(1);
     expect(getSelectedIds(new Set(), cells[POSTER_SECTIONS - 1].id, cells).size).toBe(POSTER_SECTIONS);
+  });
+});
+
+// Every poster is its own sub-screen, however it was created - each is a
+// separate physical fixture with its own content feed.
+describe("posters arrive as their own sub-screens", () => {
+  it("gives each poster one sub-screen, and every section of it that id", () => {
+    const { cells, subScreens } = makePosterUnits(3);
+    expect(subScreens).toHaveLength(3);
+    expect(cells).toHaveLength(3 * POSTER_SECTIONS);
+    subScreens.forEach((screen) => {
+      const members = cells.filter((c) => c.subScreenId === screen.id);
+      expect(members).toHaveLength(POSTER_SECTIONS);
+      // ...and those sections are exactly one poster group, not a mix.
+      expect(new Set(members.map((c) => c.posterGroupId)).size).toBe(1);
+    });
+    expect(cells.every((c) => c.subScreenId)).toBe(true);
+  });
+
+  it("names them Poster 1..n and gives each its own colour", () => {
+    const { subScreens } = makePosterUnits(3);
+    expect(subScreens.map((s) => s.name)).toEqual(["Poster 1", "Poster 2", "Poster 3"]);
+    expect(new Set(subScreens.map((s) => s.color)).size).toBe(3);
+  });
+
+  it("continues past existing sub-screens instead of reusing a name", () => {
+    const first = makePosterUnits(2);
+    const second = makePosterUnits(2, first.subScreens);
+    expect(second.subScreens.map((s) => s.name)).toEqual(["Poster 3", "Poster 4"]);
+    const ids = [...first.subScreens, ...second.subScreens].map((s) => s.id);
+    expect(new Set(ids).size).toBe(4);
+  });
+
+  it("skips a name that is already taken by an unrelated sub-screen", () => {
+    const existing = makePosterUnits(1).subScreens;
+    const { subScreens } = makePosterUnits(1, [...existing, { ...existing[0], id: "x", name: "Poster 2" }]);
+    expect(subScreens[0].name).toBe("Poster 3");
+  });
+
+  it("lays the posters out side by side from the given origin", () => {
+    const { cells } = makePosterUnits(2, [], 1000, 250);
+    const rects = cells.map(cellRect);
+    expect(Math.min(...rects.map((r) => r.x))).toBe(1000);
+    expect(Math.min(...rects.map((r) => r.y))).toBe(250);
+    expect(Math.max(...rects.map((r) => r.x + r.w))).toBe(1000 + 2 * POSTER_WIDTH_MM);
+  });
+
+  it("builds nothing for a count of zero", () => {
+    expect(makePosterUnits(0)).toEqual({ cells: [], subScreens: [] });
   });
 });

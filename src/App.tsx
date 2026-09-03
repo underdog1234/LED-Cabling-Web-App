@@ -54,7 +54,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.41.0";
+const APP_VERSION = "0.42.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -419,13 +419,19 @@ const FULL_WALL_PATTERN_KEY = "__full_wall__";
 type QuickLayoutTransfer = { panelType: PanelTypeKey; cols: number; rows: number; projectName?: string };
 
 // A POSTER transfer carries `cols` COMPLETE posters; each becomes a 2-wide x
-// 4-high block of sections here (see makePosterPanels). Quick Panel Layout shows a poster as
-// the whole 640 x 1920mm fixture, which is how you order and rig them; the
-// main tool needs the sections, which is how they patch.
-const buildTransferPanels = (payload: QuickLayoutTransfer, subScreenId: string | null = null): Cell[] =>
+// 4-high block of sections here, in its OWN sub-screen (see makePosterUnits).
+// Quick Panel Layout shows a poster as the whole 640 x 1920mm fixture, which is
+// how you order and rig them; the main tool needs the sections, which is how
+// they patch. Non-poster types create no sub-screens, so the empty array leaves
+// all of those paths behaving exactly as before.
+const buildTransferPanels = (
+  payload: QuickLayoutTransfer,
+  subScreenId: string | null = null,
+  existingSubScreens: SubScreen[] = [],
+): { cells: Cell[]; subScreens: SubScreen[] } =>
   payload.panelType === "POSTER"
-    ? makePosterPanels(payload.cols, subScreenId)
-    : makeGridPanels(payload.cols, payload.rows, payload.panelType, subScreenId);
+    ? makePosterUnits(payload.cols, existingSubScreens)
+    : { cells: makeGridPanels(payload.cols, payload.rows, payload.panelType, subScreenId), subScreens: [] };
 
 type SignalPortStat = {
   panels: number;
@@ -1175,6 +1181,38 @@ export const POSTER_WIDTH_MM = PANEL_TYPES.POSTER.w * 1000 * POSTER_COLS;
 /** A row of `count` complete posters, side by side. */
 export const makePosterPanels = (count: number, subScreenId: string | null = null): Cell[] =>
   Array.from({ length: Math.max(0, count) }, (_, i) => makePosterAt(i * POSTER_WIDTH_MM, 0, subScreenId)).flat();
+
+/**
+ * `count` complete posters side by side, each one its OWN sub-screen.
+ *
+ * A poster is a standalone fixture that gets its own content feed, so it is
+ * scoped, coloured and patched on its own from the moment it is created -
+ * however that happens (Quick Panel Layout hand-off, Apply Grid Size, or
+ * "+ Add Poster"), which is why this lives here rather than in any one of
+ * those paths. Names continue past whatever sub-screens already exist rather
+ * than restarting at 1, so two batches never collide.
+ */
+export const makePosterUnits = (
+  count: number,
+  existingSubScreens: SubScreen[] = [],
+  originXMm = 0,
+  originYMm = 0,
+): { cells: Cell[]; subScreens: SubScreen[] } => {
+  const taken = new Set(existingSubScreens.map((s) => s.name));
+  const cells: Cell[] = [];
+  const created: SubScreen[] = [];
+  let next = 1;
+  for (let i = 0; i < Math.max(0, count); i += 1) {
+    while (taken.has(`Poster ${next}`)) next += 1;
+    const name = `Poster ${next}`;
+    taken.add(name);
+    const index = existingSubScreens.length + i;
+    const screen = makeSubScreen(name, Date.now() + index, index);
+    created.push(screen);
+    cells.push(...makePosterAt(originXMm + i * POSTER_WIDTH_MM, originYMm, screen.id));
+  }
+  return { cells, subScreens: created };
+};
 
 // SVG outline path (in a 0..100 box) matching each variant's on-screen shape,
 // used to draw the signal/power indicator outlines so they follow the panel shape.
@@ -2063,7 +2101,15 @@ export default function App() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target && ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) return;
+      if (target && (["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName) || target.isContentEditable)) return;
+      // These shortcuts are for the panel canvas but are bound to the whole
+      // window, so with text highlighted anywhere in the app they stole the
+      // browser's own behaviour: Ctrl+C copied the selected PANELS rather
+      // than the selected TEXT, leaving the clipboard silently wrong, and
+      // Delete wiped panels while the user was only working with text.
+      // Undo/redo and the mode keys don't clash with a text selection, so
+      // they are left alone.
+      const hasTextSelection = !(window.getSelection()?.isCollapsed ?? true);
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) redoLayout();
@@ -2076,11 +2122,13 @@ export default function App() {
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+        if (hasTextSelection) return;
         event.preventDefault();
         copySelectedPanels();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "v") {
+        if (hasTextSelection) return;
         event.preventDefault();
         startPaste();
         return;
@@ -2096,6 +2144,7 @@ export default function App() {
         return;
       }
       if (event.key === "Delete" || event.key === "Backspace") {
+        if (hasTextSelection) return;
         event.preventDefault();
         deleteSelectedPanel();
         return;
@@ -2153,7 +2202,12 @@ export default function App() {
       setDraftCols(String(payload.cols));
       setDraftRows(String(payload.rows));
       setPanelType(payload.panelType);
-      setGrid(buildTransferPanels(payload));
+      if (payload.panelType === "POSTER") setDraftRows("1");
+      // Posters arrive with one sub-screen each; every other type brings none,
+      // so this appends nothing and leaves any empty sub-screens alone.
+      const transfer = buildTransferPanels(payload, null, subScreens);
+      setGrid(transfer.cells);
+      if (transfer.subScreens.length) setSubScreens((prev) => [...prev, ...transfer.subScreens]);
       setSelectedId(null);
       setSelectedCells(new Set());
       if (payload.projectName) setProjectName(payload.projectName);
@@ -2175,10 +2229,13 @@ export default function App() {
       setDraftCols(String(payload.cols));
       setDraftRows(String(payload.rows));
       setPanelType(payload.panelType);
-      setGrid(buildTransferPanels(payload));
+      if (payload.panelType === "POSTER") setDraftRows("1");
+      const transfer = buildTransferPanels(payload);
+      setGrid(transfer.cells);
       // Replace wipes the whole project's panels - any existing sub-screens
-      // no longer have valid members, so start clean (same as importing).
-      setSubScreens([]);
+      // no longer have valid members, so start clean (same as importing), then
+      // keep whatever the incoming batch brought with it (one per poster).
+      setSubScreens(transfer.subScreens);
       setActiveSubScreenId(null);
       setSelectedId(null);
       setSelectedCells(new Set());
@@ -2192,12 +2249,15 @@ export default function App() {
       const GAP_MM = 500;
       const offsetX = bbox.w > 0 ? bbox.x + bbox.w + GAP_MM : 0;
       const offsetY = bbox.w > 0 ? bbox.y : 0;
-      const added = buildTransferPanels(payload, resolvedActiveSubScreenId).map((cell) => ({
+      const transfer = buildTransferPanels(payload, resolvedActiveSubScreenId, subScreens);
+      const added = transfer.cells.map((cell) => ({
         ...cell,
         x: cell.x + offsetX,
         y: cell.y + offsetY,
       }));
       setGrid((prev) => [...prev, ...added]);
+      // Posters bring their own sub-screens rather than joining the active one.
+      if (transfer.subScreens.length) setSubScreens((prev) => [...prev, ...transfer.subScreens]);
     }
     setPendingQuickLayoutTransfer(null);
   };
@@ -2659,6 +2719,13 @@ export default function App() {
   const unassignedPowerPanels = activePanels.filter((cell) => !cell.assignedPowerPort).length;
 
   // Spares and boxes are per type (different spare ratios and box sizes).
+  // Posters are always exactly one high, so the Rows control is disabled and
+  // pinned to 1 wherever this is true.
+  const isPosterType = panelType === "POSTER";
+  const changePanelType = (next: PanelTypeKey) => {
+    setPanelType(next);
+    if (next === "POSTER") setDraftRows("1");
+  };
   const mg9Count = panelTypeCounts.MG9;
   const mtCount = panelTypeCounts.MT;
   // COMPLETE posters, counted by distinct group rather than sections/4, so a
@@ -4597,16 +4664,22 @@ const exportJson = () => {
 
   const performApplyGridSize = () => {
     const nextCols = Number.parseInt(draftCols, 10);
-    const nextRows = Number.parseInt(draftRows, 10);
+    // Posters are always one high, so Rows is forced here as well as being
+    // disabled in the UI - a stale value must never reach the grid builder.
+    const nextRows = isPosterType ? 1 : Number.parseInt(draftRows, 10);
     if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows) || nextCols < 1 || nextRows < 1) return;
 
     pushUndoSnapshot();
     setCols(nextCols);
     setRows(nextRows);
-    setGrid(makeGridPanels(nextCols, nextRows, panelType));
     // Regenerating the grid replaces every panel - any existing sub-screens
-    // no longer have valid members, so start clean.
-    setSubScreens([]);
+    // no longer have valid members, so start clean. Posters then bring back
+    // one sub-screen each.
+    const built = isPosterType
+      ? makePosterUnits(nextCols)
+      : { cells: makeGridPanels(nextCols, nextRows, panelType), subScreens: [] };
+    setGrid(built.cells);
+    setSubScreens(built.subScreens);
     setActiveSubScreenId(null);
     setSelectedId(null);
     setSelectedCells(new Set());
@@ -4616,7 +4689,7 @@ const exportJson = () => {
 
   const applyGridSize = () => {
     const nextCols = Number.parseInt(draftCols, 10);
-    const nextRows = Number.parseInt(draftRows, 10);
+    const nextRows = isPosterType ? 1 : Number.parseInt(draftRows, 10);
     if (!Number.isFinite(nextCols) || !Number.isFinite(nextRows) || nextCols < 1 || nextRows < 1) return;
 
     // Regenerating the grid discards every existing panel - warn first
@@ -5799,14 +5872,24 @@ const exportJson = () => {
                 </div>
                 <div className="space-y-1">
                   <label className="text-xs text-slate-300">Rows ↓</label>
-                  <Input className="bg-white text-black" type="number" min="1" step="1" value={draftRows} onChange={(e) => setDraftRows(e.target.value)} />
+                  <Input
+                    className="bg-white text-black disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
+                    type="number"
+                    min="1"
+                    max={isPosterType ? 1 : undefined}
+                    step="1"
+                    disabled={isPosterType}
+                    value={isPosterType ? "1" : draftRows}
+                    onChange={(e) => setDraftRows(e.target.value)}
+                  />
+                  {isPosterType ? <div className="text-xs text-slate-400">Locked to 1 for LED Posters</div> : null}
                 </div>
               </div>
 
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="space-y-1">
                   <label className="text-xs text-slate-300">Panel Type</label>
-                  <select className="w-full rounded bg-white p-2 text-black" value={panelType} onChange={(e) => setPanelType(e.target.value as PanelTypeKey)}>
+                  <select className="w-full rounded bg-white p-2 text-black" value={panelType} onChange={(e) => changePanelType(e.target.value as PanelTypeKey)}>
                     {Object.entries(PANEL_TYPES).map(([key, value]) => (
                       <option key={key} value={key}>{value.name}</option>
                     ))}
@@ -5962,7 +6045,6 @@ const exportJson = () => {
                   <div className="mb-2 font-bold">Wall Details</div>
                   <div>Panels: {totalPanels} active across {panelBands.length} row band{panelBands.length === 1 ? "" : "s"}</div>
                   <div>{wallSizeLabel}: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
-                  <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
                   {isMtOnlyWall ? (
                     <>
                       <div>LED Wall Resolution: {wallPixelW} × {wallPixelH}</div>
@@ -5976,25 +6058,7 @@ const exportJson = () => {
                       <div>Ratio: {ratioLabel}</div>
                     </>
                   )}
-                  {/* Slide size for content authored in PowerPoint. Derived
-                      entirely from the resolution above, so it re-reads itself
-                      whenever the layout, panel type or orientation changes -
-                      there is deliberately nothing to type in or recalculate. */}
-                  {powerPointSetup ? (
-                    <div className="mt-2 border-t border-slate-700 pt-2">
-                      <div className="mb-1 font-bold">PowerPoint Content Setup</div>
-                      <div>
-                        PowerPoint slide size: {powerPointSetup.widthCm.toFixed(3)} × {powerPointSetup.heightCm.toFixed(3)} cm
-                      </div>
-                      <div>LED wall aspect ratio: {powerPointSetup.ratioW}:{powerPointSetup.ratioH}</div>
-                      <div>Native content resolution: {contentPixelW} × {contentPixelH} px</div>
-                      {powerPointSetup.exceedsLimit ? (
-                        <div className="text-amber-300">
-                          ⚠ Over PowerPoint&apos;s {POWERPOINT_MAX_SLIDE_CM} cm limit - scale both numbers down by the same factor.
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
+                  <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">{panel.name} Guts</div>
@@ -6015,6 +6079,25 @@ const exportJson = () => {
               </div>
 
               <div className="grid gap-4 md:grid-cols-3">
+                {/* Slide size for content authored in PowerPoint. Derived
+                    entirely from the wall resolution, so it re-reads itself
+                    whenever the layout, panel type or orientation changes -
+                    there is deliberately nothing to type in or recalculate.
+                    The wall's aspect ratio and native content resolution are
+                    already in Wall Details, so they are not repeated here. */}
+                {powerPointSetup ? (
+                  <div className="rounded border border-slate-700 bg-slate-900 p-3">
+                    <div className="mb-2 font-bold">PowerPoint Content Setup</div>
+                    <div>
+                      PowerPoint slide size: {powerPointSetup.widthCm.toFixed(3)} × {powerPointSetup.heightCm.toFixed(3)} cm
+                    </div>
+                    {powerPointSetup.exceedsLimit ? (
+                      <div className="text-amber-300">
+                        ⚠ Over PowerPoint&apos;s {POWERPOINT_MAX_SLIDE_CM} cm limit - scale both numbers down by the same factor.
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Weight</div>
                   <div>Panel weight: {panelOnlyWeight.toFixed(1)} kg</div>
@@ -6228,15 +6311,29 @@ const exportJson = () => {
                   intent="secondary"
                   size="sm"
                   onClick={() => {
-                    commitGridUpdate((prev) => [
-                      ...prev,
-                      makePanelAt(wallBBox.x, wallBBox.y + wallBBox.h + MODULE_MM, panelType, resolvedActiveSubScreenId),
-                    ]);
+                    const x = wallBBox.x;
+                    const y = wallBBox.y + wallBBox.h + MODULE_MM;
+                    if (isPosterType) {
+                      // A poster is a whole fixture, not one section, and it
+                      // arrives in its own sub-screen rather than joining the
+                      // active one.
+                      const { cells, subScreens: created } = makePosterUnits(1, subScreens, x, y);
+                      commitCanvasUpdate(() => {
+                        setGrid((prev) => [...prev, ...cells]);
+                        setSubScreens((prev) => [...prev, ...created]);
+                      });
+                    } else {
+                      commitGridUpdate((prev) => [...prev, makePanelAt(x, y, panelType, resolvedActiveSubScreenId)]);
+                    }
                     setEditMode("move");
                   }}
-                  title="Add a new panel below the wall, ready to move into place"
+                  title={
+                    isPosterType
+                      ? "Add a complete LED poster below the wall, in its own sub-screen, ready to move into place"
+                      : "Add a new panel below the wall, ready to move into place"
+                  }
                 >
-                  + Add Panel
+                  {isPosterType ? "+ Add Poster" : "+ Add Panel"}
                 </Button>
                 <select
                   className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
