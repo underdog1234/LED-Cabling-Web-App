@@ -54,7 +54,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.40.1";
+const APP_VERSION = "0.41.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -129,41 +129,46 @@ export const PANEL_TYPES = {
       reinforcementScrew: 400,
     },
   },
-  // ONE QUARTER of an LED poster. A complete poster is 640 x 1920mm /
-  // 344 x 1032px, but it is carried in the grid as four stacked 640 x 480mm
-  // sections sharing a posterGroupId (see POSTER_SECTIONS and Cell.posterGroupId)
-  // so the layout, patching and pixel maths all work in one consistent panel
-  // unit instead of needing a special case per feature.
+  // ONE EIGHTH of an LED poster. A complete poster is 640 x 1920mm /
+  // 344 x 1032px, but it is carried in the grid as a 2-wide x 4-high block of
+  // 320 x 480mm / 172 x 258px sections sharing a posterGroupId (see
+  // POSTER_COLS / POSTER_ROWS / POSTER_SECTIONS and Cell.posterGroupId) so the
+  // layout, patching and pixel maths all work in one consistent panel unit
+  // instead of needing a special case per feature.
   //
   // weight is 0 by instruction, not by omission - posters are excluded from
   // the rigging-weight totals on purpose.
   //
-  // Power is specified as 575.00W for a COMPLETE poster, so each of the four
-  // sections carries a quarter of it: 575 / 4 = 143.75W. Amps follow the same
+  // Power is specified as 575.00W for a COMPLETE poster, so each of the eight
+  // sections carries an eighth of it: 575 / 8 = 71.875W. Amps follow the same
   // 230V basis every other panel in this catalog uses (575 / 230 = 2.5A per
-  // poster, 0.625A per section). Only one power figure was supplied, so avg is
-  // set equal to max: with no separate average known, sizing on the peak is
+  // poster, 0.3125A per section). Only one power figure was supplied, so avg
+  // is set equal to max: with no separate average known, sizing on the peak is
   // the safe direction to be wrong in - it can over-state a distro's load, but
   // never under-state it.
   POSTER: {
     name: "LED Poster",
-    w: 0.64,
+    w: 0.32,
     h: 0.48,
-    pixW: 344,
+    pixW: 172,
     pixH: 258,
     weight: 0,
-    power: { maxW: 143.75, maxA: 0.625, avgW: 143.75, avgA: 0.625 },
+    power: { maxW: 71.875, maxA: 0.3125, avgW: 71.875, avgA: 0.3125 },
     defaults: {
-      // 16A x 230V = 3,680W safe outlet ceiling / 143.75W per section = 25
+      // 16A x 230V = 3,680W safe outlet ceiling / 71.875W per section = 51
       // sections, but outlets are wired per whole poster, so round down to
-      // 6 posters = 24 sections.
-      powerPanelsPerOutlet: 24,
-      // 344 x 258 = 88,752px per section, so 7 whole posters (28 sections)
-      // fit inside the 650,000px-per-port ceiling. Derived, not guessed.
-      signalPanelsPerPort: 28,
+      // 6 posters = 48 sections. (Unchanged in real terms by the 2x4 split:
+      // still 6 posters, now counted in eighths rather than quarters.)
+      powerPanelsPerOutlet: 48,
+      // 172 x 258 = 44,376px per section, so 14 sections fit inside the
+      // 650,000px-per-port ceiling; rounded down to whole posters that is
+      // 1 poster = 8 sections. Derived, not guessed - a whole poster is
+      // 344 x 1032 = 355,008px, so two of them (710,016px) genuinely will
+      // not fit on one port.
+      signalPanelsPerPort: 8,
       spareRatio: 0,
-      // Spares are counted in whole posters, which is 4 sections.
-      panelsPerBox: 4,
+      // Spares are counted in whole posters, which is 8 sections.
+      panelsPerBox: 8,
       signalSpareRatio: 0.3,
       powerSpareRatio: 0.2,
       flyBarWeight: 0,
@@ -175,8 +180,11 @@ export const PANEL_TYPES = {
   },
 } as const;
 
-// How many stacked sections make one complete LED poster.
-export const POSTER_SECTIONS = 4;
+// A complete LED poster is split into a POSTER_COLS x POSTER_ROWS block of
+// sections in the main tool; POSTER_SECTIONS is the total per poster.
+export const POSTER_COLS = 2;
+export const POSTER_ROWS = 4;
+export const POSTER_SECTIONS = POSTER_COLS * POSTER_ROWS;
 /** Power draw of one COMPLETE poster, as specified - the per-section figures above are this divided by POSTER_SECTIONS. */
 export const POSTER_WATTS_PER_UNIT = PANEL_TYPES.POSTER.power.maxW * POSTER_SECTIONS;
 
@@ -218,7 +226,7 @@ const STOCK_CATALOG = {
   // (28512) - every lookup in this app goes through the code, so the id would
   // silently resolve to nothing.
   tempFencingWeight: { code: "12357", name: "Temporary Fencing Weight", stock: 51 },
-  // Stocked and ordered as COMPLETE posters, never as the four sections the
+  // Stocked and ordered as COMPLETE posters, never as the eight sections the
   // grid holds - so this row's quantity is poster count, not section count.
   ledPoster: { code: "12199", name: "Tentec P1.86 LED Poster", stock: 10 },
 } as const;
@@ -326,7 +334,7 @@ export type Cell = {
   subScreenId: string | null;
   /**
    * Which physical LED poster this section belongs to. Non-null only on
-   * POSTER panels: the four sections of one poster share an id, and every
+   * POSTER panels: the eight sections of one poster share an id, and every
    * selection expands to the whole group (see getSelectedIds), so a poster
    * moves, rotates, copies and deletes as the single physical object it is.
    */
@@ -410,8 +418,8 @@ const QUICK_LAYOUT_TRANSFER_KEY = "ledCablingQuickLayoutTransfer:v1";
 const FULL_WALL_PATTERN_KEY = "__full_wall__";
 type QuickLayoutTransfer = { panelType: PanelTypeKey; cols: number; rows: number; projectName?: string };
 
-// A POSTER transfer carries `cols` COMPLETE posters; each becomes four stacked
-// sections here (see makePosterPanels). Quick Panel Layout shows a poster as
+// A POSTER transfer carries `cols` COMPLETE posters; each becomes a 2-wide x
+// 4-high block of sections here (see makePosterPanels). Quick Panel Layout shows a poster as
 // the whole 640 x 1920mm fixture, which is how you order and rig them; the
 // main tool needs the sections, which is how they patch.
 const buildTransferPanels = (payload: QuickLayoutTransfer, subScreenId: string | null = null): Cell[] =>
@@ -1125,11 +1133,11 @@ export const trueOuterBBoxOf = (cells: Cell[]): RectMm => {
  * The ids every selection-driven action should operate on.
  *
  * Passing `grid` expands the selection to whole LED posters: touching any one
- * of a poster's four sections pulls in its siblings, so delete/move/rotate/
+ * of a poster's eight sections pulls in its siblings, so delete/move/rotate/
  * copy/assign all treat a poster as one physical object without each of those
  * call sites needing to know posters exist.
  */
-const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null, grid?: Cell[]) => {
+export const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null, grid?: Cell[]) => {
   const base = selectedCells.size > 0 ? selectedCells : selectedId ? new Set([selectedId]) : new Set<string>();
   if (!grid || base.size === 0) return base;
   const groups = new Set<string>();
@@ -1144,21 +1152,29 @@ const getSelectedIds = (selectedCells: Set<string>, selectedId: string | null, g
   return expanded;
 };
 
-/** The four stacked sections of one complete LED poster, top-down, sharing a group id. */
+/** The POSTER_COLS x POSTER_ROWS sections of one complete LED poster, sharing a group id. */
 export const makePosterAt = (xMm: number, yMm: number, subScreenId: string | null = null): Cell[] => {
   const groupId = newCellId();
+  const wMm = PANEL_TYPES.POSTER.w * 1000;
   const hMm = PANEL_TYPES.POSTER.h * 1000;
-  return Array.from({ length: POSTER_SECTIONS }, (_, i) => ({
-    ...makePanelAt(xMm, yMm + i * hMm, "POSTER", subScreenId),
-    posterGroupId: groupId,
-  }));
+  const cells: Cell[] = [];
+  for (let row = 0; row < POSTER_ROWS; row += 1) {
+    for (let col = 0; col < POSTER_COLS; col += 1) {
+      cells.push({
+        ...makePanelAt(xMm + col * wMm, yMm + row * hMm, "POSTER", subScreenId),
+        posterGroupId: groupId,
+      });
+    }
+  }
+  return cells;
 };
 
+/** Width of one COMPLETE poster in mm - POSTER_COLS sections wide, not one. */
+export const POSTER_WIDTH_MM = PANEL_TYPES.POSTER.w * 1000 * POSTER_COLS;
+
 /** A row of `count` complete posters, side by side. */
-export const makePosterPanels = (count: number, subScreenId: string | null = null): Cell[] => {
-  const wMm = PANEL_TYPES.POSTER.w * 1000;
-  return Array.from({ length: Math.max(0, count) }, (_, i) => makePosterAt(i * wMm, 0, subScreenId)).flat();
-};
+export const makePosterPanels = (count: number, subScreenId: string | null = null): Cell[] =>
+  Array.from({ length: Math.max(0, count) }, (_, i) => makePosterAt(i * POSTER_WIDTH_MM, 0, subScreenId)).flat();
 
 // SVG outline path (in a 0..100 box) matching each variant's on-screen shape,
 // used to draw the signal/power indicator outlines so they follow the panel shape.
@@ -1976,15 +1992,19 @@ export default function App() {
     saveStockOverrides(stockOverrides);
   }, [stockOverrides]);
 
+  // Both allowances are derived from the panel's own pixel count and power
+  // draw, so a number chosen for one panel type means nothing for another -
+  // switching type resets them to that type's defaults.
+  //
+  // This used to carry the previous value over whenever it still "fit", with a
+  // hard-coded ceiling of 21 (MG9's outlet figure). That both under-used MT
+  // (kept at MG9's 23 panels per port instead of its own 39) and, once posters
+  // arrived, pinned them to 21 sections per outlet - 2.6 posters, splitting one
+  // poster across two outlets. Neither value is persisted in a saved project,
+  // so nothing is lost by re-deriving them here.
   useEffect(() => {
-    setPanelsPerPowerOutlet((prev) => {
-      const defaultVal = PANEL_TYPES[panelType].defaults.powerPanelsPerOutlet;
-      return Math.min(Math.max(prev || defaultVal, 1), 21);
-    });
-    setPanelsPerSignalPort((prev) => {
-      const defaultVal = PANEL_TYPES[panelType].defaults.signalPanelsPerPort;
-      return Math.min(Math.max(prev || defaultVal, 1), defaultVal);
-    });
+    setPanelsPerPowerOutlet(PANEL_TYPES[panelType].defaults.powerPanelsPerOutlet);
+    setPanelsPerSignalPort(PANEL_TYPES[panelType].defaults.signalPanelsPerPort);
   }, [panelType]);
 
   useEffect(() => {
@@ -2182,7 +2202,10 @@ export default function App() {
     setPendingQuickLayoutTransfer(null);
   };
 
-  const maxAllowedPowerPanels = 21;
+  // Per panel TYPE, not one hard-coded number. This was a flat 21, which is
+  // MG9's figure: it silently clamped every other type's derived default down
+  // to MG9's, and let MT be pushed to 21 panels - 22.9A on a 16A outlet.
+  const maxAllowedPowerPanels = panel.defaults.powerPanelsPerOutlet;
   const safePanelsPerPowerOutlet = Math.min(Math.max(panelsPerPowerOutlet, 1), maxAllowedPowerPanels);
   const safePanelsPerSignalPort = Math.min(Math.max(panelsPerSignalPort, 1), panel.defaults.signalPanelsPerPort);
 
@@ -2811,8 +2834,8 @@ export default function App() {
     }
 
     if (posterCount > 0) {
-      // Whole posters, matching how Rentman stocks them - the grid's four
-      // sections per poster are an internal detail here.
+      // Whole posters, matching how Rentman stocks them - the grid's 2x4 block
+      // of sections per poster is an internal detail here.
       rowsOut.push(
         makeStockRow(
           STOCK_CATALOG.ledPoster,
@@ -5866,7 +5889,7 @@ const exportJson = () => {
                     className="bg-white text-black"
                     type="number"
                     min="1"
-                    max="21"
+                    max={maxAllowedPowerPanels}
                     value={safePanelsPerPowerOutlet}
                     onChange={(e) => {
                       const raw = Number.parseInt(e.target.value || "0", 10);
@@ -6532,7 +6555,11 @@ const exportJson = () => {
                   const signalStat = cell.assignedPort ? signalPortStats[cell.assignedPort] : null;
                   const isEdge = signalStat?.firstKey === cell.id || signalStat?.lastKey === cell.id;
                   const { signalBadges, powerBadge } = getPanelIndicators(cell);
-                  const isSelected = selectedCells.has(cell.id) || selectedId === cell.id;
+                  // activeSelectedKeys, not the raw selection: a poster's sections
+                  // are one physical fixture, so clicking any one of them must
+                  // highlight the whole poster - which is what every operation
+                  // below already acts on.
+                  const isSelected = activeSelectedKeys.has(cell.id);
                   const isRemoved = cell.isRemoved;
                   const displayColor = isRemoved ? "transparent" : cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
                   const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];

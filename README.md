@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.40.1`
+Version `0.41.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -22,12 +22,28 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
 
+## Recent Changes In v0.41.0
+
+**LED Posters now split 2 wide x 4 high**
+
+- Sending a poster to the main Layout Tool now splits it into a **2 x 4 block of eight 320 x 480mm / 172 x 258px sections** instead of four stacked full-width ones. The complete poster is unchanged - still 640 x 1920mm / 344 x 1032px - and Quick Panel Layout still works in whole posters, so wall size, resolution and power all come across exactly as before (2 posters read 1.28 x 1.92m / 688 x 1032px, 1,150 W / 5.00 A)
+- All eight sections **stay grouped as one poster**: clicking any one of them selects the whole poster (the highlight now covers all eight, matching what move, rotate, copy, delete and sub-screen assignment already acted on), and never pulls in the poster next to it
+- Stock Calculations still counts **complete posters**, not sections - 2 posters on the canvas is a required quantity of 2 against code 12199
+- Per-section figures rescaled to eighths: **71.875 W / 0.3125 A** per section, still 575 W / 2.50 A per complete poster. Weight stays 0
+
+**Signal and power port fixes found while making the above**
+
+- **Panels per Signal Port was over the processor limit for posters.** It was set to 28 sections, which is 2,485,056 pixels - 382% of the 650,000-pixel-per-port ceiling the tool checks against. The figure had been worked out in posters and then written down as sections. It is now **8 sections = 1 complete poster = 355,008 px (54.6%)**, which is the real limit: two whole posters genuinely will not fit on one port
+- **Panels per Power Outlet was capped at 21 for every panel type**, which is MG9's figure hard-coded in two places. It silently held posters at 21 sections (2.6 posters, splitting one poster across two outlets) and let MT be pushed to 21 panels - 22.9 A on a 16 A outlet. Each panel type now uses its own ceiling: MG9 21, MT 14, LED Poster 48 sections (6 whole posters, 3,450 W / 15.00 A)
+- Changing Panel Type now **resets both port allowances to that panel's defaults** instead of carrying the previous panel's number over. The old behaviour kept any value that still "fit", so switching MG9 to MT left the port at MG9's 23 panels instead of MT's 39. Neither value is stored in a saved project, so nothing is lost
+- Quick Panel Layout's distro sizing was **dividing whole posters by a per-section outlet figure**, so it sized circuits as though one outlet could take 48 complete posters. It now converts to whole posters and says "assumes 6 posters per outlet"
+
 ## Recent Changes In v0.40.1
 
 - Filled in the **LED Poster** figures that were placeholders in v0.40.0:
   - **Power: 575.00 W per complete poster** (143.75 W per section, 0.625 A at 230 V - the same voltage basis the rest of the catalog uses). Four posters read 2,300 W / 10.00 A. Only one power figure was supplied, so average is set equal to peak: it can over-state a distro's load but never under-state it
   - **Weight stays 0** by instruction, so posters contribute nothing to the weight totals
-  - Stock line added: **Tentec P1.86 LED Poster, code 12199** (10 in stock), counted in complete posters rather than the four sections the grid holds
+  - Stock line added: **Tentec P1.86 LED Poster, code 12199** (10 in stock), counted in complete posters rather than the sections the grid holds
   - Outlet allowance set to 24 sections (6 whole posters = 3,450 W), derived from the 16 A x 230 V ceiling and rounded down to whole posters
 - Fixed poster sections being counted as MG9 for rigging hardware: a catch-all branch gave every top-row poster section MG9's 1.9 kg fly bar and 1.5 kg sling, and put MG9 Hanging Bars in the stock list for them. Each panel type now carries its own hardware weight, so posters (0 kg) stay out of the rigging totals
 

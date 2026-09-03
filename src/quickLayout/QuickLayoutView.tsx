@@ -3,6 +3,8 @@ import { ChevronUp, ChevronDown, FileText } from "lucide-react";
 import {
   PANEL_COUNT_LABELS,
   PANEL_TYPES,
+  POSTER_COLS,
+  POSTER_ROWS,
   POSTER_SECTIONS,
   POWER_DISTROS,
   spareForBucket,
@@ -56,18 +58,23 @@ export default function QuickLayoutView() {
   // forward to become the main tool's project name via Send to Main Layout Tool.
   const [projectName, setProjectName] = useState("");
 
-  // A POSTER in PANEL_TYPES is one QUARTER of a physical poster, because that
-  // is what a grid cell is in the main tool. Here the unit is the whole
-  // 640 x 1920mm fixture you actually order and rig, so its height and pixel
-  // height are the section's x4. Every other type is its own whole panel, so
-  // the multiplier is 1 and nothing else in this view changes.
+  // A POSTER in PANEL_TYPES is one EIGHTH of a physical poster, because that is
+  // what a grid cell is in the main tool (a 2-wide x 4-high block of sections).
+  // Here the unit is the whole 640 x 1920mm fixture you actually order and rig,
+  // so its size and pixel count are the section's x2 across and x4 down. Every
+  // other type is its own whole panel, so both multipliers are 1 and nothing
+  // else in this view changes.
   const sectionSpec = PANEL_TYPES[panelType];
   const isPoster = panelType === "POSTER";
-  const stack = isPoster ? POSTER_SECTIONS : 1;
+  const wide = isPoster ? POSTER_COLS : 1;
+  const tall = isPoster ? POSTER_ROWS : 1;
+  const stack = wide * tall;
   const panel = {
     ...sectionSpec,
-    h: sectionSpec.h * stack,
-    pixH: sectionSpec.pixH * stack,
+    w: sectionSpec.w * wide,
+    h: sectionSpec.h * tall,
+    pixW: sectionSpec.pixW * wide,
+    pixH: sectionSpec.pixH * tall,
     weight: sectionSpec.weight * stack,
     power: {
       maxW: sectionSpec.power.maxW * stack,
@@ -91,7 +98,7 @@ export default function QuickLayoutView() {
   // heads-up here, before any real patching/stock list exists. This grid is
   // uniform, so it is exactly one spare bucket.
   // The unit here is a COMPLETE poster, whereas the POSTER spare bucket counts
-  // sections and boxes in fours (four sections = one poster). Running whole
+  // sections and boxes in eights (eight sections = one poster). Running whole
   // posters through that bucket would round 5 posters up to "8", mixing the two
   // units - so posters get no box rounding in this view, only in the main tool
   // where the unit really is sections.
@@ -131,7 +138,11 @@ export default function QuickLayoutView() {
   const totalMaxA = totalPanels * powerSpec.maxA;
   const totalAvgW = totalPanels * powerSpec.avgW;
   const totalAvgA = totalPanels * powerSpec.avgA;
-  const safePanelsPerOutlet = panel.defaults.powerPanelsPerOutlet;
+  // powerPanelsPerOutlet counts SECTIONS, but this view's unit is a whole
+  // poster - so convert it (48 sections = 6 posters). `stack` is 1 for every
+  // other type, which leaves them exactly as before. Without this, circuits
+  // were sized as though one outlet could take 48 complete posters.
+  const safePanelsPerOutlet = Math.max(1, Math.floor(panel.defaults.powerPanelsPerOutlet / stack));
   const summarizeDistro = (key: PowerDistroKey) => {
     const distro = POWER_DISTROS[key];
     const circuits = totalPanels > 0 ? Math.ceil(totalPanels / Math.max(safePanelsPerOutlet, 1)) : 0;
@@ -284,7 +295,9 @@ export default function QuickLayoutView() {
         [PANEL_COUNT_LABELS.spareRounded, `${panelCounts.spareRounded}`],
         [
           PANEL_COUNT_LABELS.total,
-          isPoster ? `${panelCounts.total} complete posters` : `${panelCounts.total} (boxes of ${panel.defaults.panelsPerBox})`,
+          isPoster
+            ? `${panelCounts.total} complete poster${panelCounts.total === 1 ? "" : "s"}`
+            : `${panelCounts.total} (boxes of ${panel.defaults.panelsPerBox})`,
         ],
         [hasSquarePixels ? "Wall Size" : "Physical Size", `${formatM(wallWidthM)} x ${formatM(wallHeightM)}`],
       ];
@@ -449,10 +462,11 @@ export default function QuickLayoutView() {
                 </Select>
                 {isPoster ? (
                   <div className="mt-1 space-y-0.5 text-xs text-slate-400">
-                    <div>Posters stand one high; each is {sectionSpec.pixW} × {sectionSpec.pixH * POSTER_SECTIONS} px.</div>
+                    <div>Posters stand one high; each is {panel.pixW} × {panel.pixH} px.</div>
                     <div>
-                      Sent to the main tool, each poster splits into {POSTER_SECTIONS} stacked {sectionSpec.w * 1000} × {sectionSpec.h * 1000}mm
-                      sections that stay grouped as one poster.
+                      Sent to the main tool, each poster splits into a {POSTER_COLS} × {POSTER_ROWS} block of{" "}
+                      {sectionSpec.w * 1000} × {sectionSpec.h * 1000}mm sections ({POSTER_SECTIONS} in total) that stay grouped as one
+                      poster.
                     </div>
                     <div>
                       {panel.power.maxW} W per poster. Weight is set to 0 by choice, so posters add nothing to the weight estimate below.
@@ -541,7 +555,9 @@ export default function QuickLayoutView() {
                   <dd className="font-semibold">
                     {panelCounts.total}{" "}
                     <span className="font-normal text-slate-500">
-                      {isPoster ? "complete posters" : `(boxes of ${panel.defaults.panelsPerBox})`}
+                      {isPoster
+                        ? `complete poster${panelCounts.total === 1 ? "" : "s"}`
+                        : `(boxes of ${panel.defaults.panelsPerBox})`}
                     </span>
                   </dd>
                   <dt className="text-slate-400">{hasSquarePixels ? "Wall size" : "Physical size"}</dt>
@@ -703,7 +719,8 @@ export default function QuickLayoutView() {
               ))}
             </div>
             <div className="mt-2 text-xs text-slate-500">
-              Estimated sizing only - assumes {safePanelsPerOutlet} panels per outlet and even load across all phases (no per-panel patching in this tool).
+              Estimated sizing only - assumes {safePanelsPerOutlet} {isPoster ? "posters" : "panels"} per outlet and even load across all
+              phases (no per-panel patching in this tool).
             </div>
           </CardContent>
         </Card>
