@@ -22,7 +22,7 @@ import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
 import SubScreenPanel from "./subScreens/SubScreenPanel";
 import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
-import { finalCanvasPositionOf, subScreenResolutionOf } from "./canvasView/canvasModel";
+import { finalCanvasPositionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
 import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
 import { isMultiScreenLikely, requestScreenDetails, openWindowOnScreen } from "./testPattern/screenPlacement";
@@ -54,7 +54,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.44.0";
+const APP_VERSION = "0.45.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1222,11 +1222,19 @@ const variantOutlineSvgPath = (shape: string): string => {
   return "M0 0 H100 V100 H0 Z";
 };
 
-const getPanelSymbol = (cell: Cell) => {
-  const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+export const getPanelSymbol = (cell: Cell) => {
+  const variantKey = cell.panelVariant ?? "STANDARD";
+  const variant = PANEL_VARIANTS[variantKey];
   const parts = [];
   if (variant.symbol) parts.push(variant.symbol);
-  if (cell.rotation) parts.push("🔄");
+  // A shaped panel (MG12 triangle / MG13 quarter circle) is a one-way piece:
+  // where its rotation puts the right-angle corner decides which physical part
+  // it is, and each of LU / LD / RU / RD is its own stock line. Print that code
+  // on the panel so the drawing names the same part Stock Calculations counts -
+  // read from the front, exactly as the layout tool's inventory lists them.
+  const orientation = getShapeOrientation(variantKey, cell.rotation);
+  if (orientation) parts.push(orientation);
+  else if (cell.rotation) parts.push("🔄");
   return parts.join(" ");
 };
 
@@ -1377,6 +1385,52 @@ export const routeCablePx = (a: RectMm, b: RectMm, kind: CableKind): CableRoute 
   }
   pts = pts.filter((p, i) => i === 0 || Math.abs(p.x - pts[i - 1].x) > 0.01 || Math.abs(p.y - pts[i - 1].y) > 0.01);
   return { pts, entry: cableEntryInto(pts, b) };
+};
+
+// A run's axis-aligned segments, as (axis, fixed coordinate, span) - enough to
+// tell when two runs are about to be drawn on top of each other.
+type CableSegment = { horiz: boolean; fixed: number; lo: number; hi: number };
+const cableSegments = (pts: CablePoint[]): CableSegment[] => {
+  const segs: CableSegment[] = [];
+  for (let i = 1; i < pts.length; i += 1) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const horiz = Math.abs(a.y - b.y) < 0.01;
+    if (!horiz && Math.abs(a.x - b.x) >= 0.01) continue;
+    segs.push(
+      horiz
+        ? { horiz, fixed: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) }
+        : { horiz, fixed: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) },
+    );
+  }
+  return segs;
+};
+
+/** Would these two runs be drawn one on top of the other anywhere? */
+export const cableRunsClash = (a: CableSegment[], b: CableSegment[], tol = CABLE_STROKE.casing) =>
+  a.some((s) =>
+    b.some((t) => s.horiz === t.horiz && Math.abs(s.fixed - t.fixed) < tol && Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo) > tol),
+  );
+
+// Push a run off its lane so it no longer hides under the one already there -
+// a chain doubling back on itself, or a return leg retracing an earlier one,
+// which would otherwise look like a single cable with two arrows stacked on
+// it. The run keeps its true end points and steps aside in between, so it
+// still meets the hops either side of it and reads as two cables sharing a
+// route rather than one.
+//
+// `off` is always NEGATIVE: up for a run travelling across a panel, left for
+// one travelling down it. That is away from the centred label block in both
+// cases, so a nudged run can never eat into the clearance the label size was
+// worked out against (see panelLabelFontPx).
+export const spreadCableRun = (route: CableRoute, dest: RectMm, off: number): CableRoute => {
+  if (!off || route.pts.length < 2) return route;
+  const stepped = route.pts.map((p) => ({ x: p.x + off, y: p.y + off }));
+  // Short stubs at each end put the run back on its true anchors. The entry
+  // mark is measured on the stepped run alone - that is the orthogonal part,
+  // and it is where the arrow has to sit for the run it belongs to.
+  const pts = [route.pts[0], ...stepped, route.pts[route.pts.length - 1]];
+  return { pts, entry: cableEntryInto(stepped, dest) };
 };
 
 // The three points of the outline ">" that marks where a run enters a panel:
@@ -2452,27 +2506,20 @@ export default function App() {
     });
     return counts;
   }, [activePanels]);
-  // Pixel resolution uses each panel's native pixels. Because MG9 (168x168) and
-  // MT (256x64) have different pitches, a mixed wall isn't a single clean raster:
-  // width is the widest band's pixels, height sums each band's tallest panel.
-  const wallPixels = useMemo(() => {
-    let pixelW = 0;
-    let pixelH = 0;
-    panelBands.forEach((band) => {
-      let rowPixelW = 0;
-      let rowPixelH = 0;
-      band.forEach((cell) => {
-        const p = PANEL_TYPES[cellPanelType(cell)];
-        rowPixelW += p.pixW;
-        rowPixelH = Math.max(rowPixelH, p.pixH);
-      });
-      pixelW = Math.max(pixelW, rowPixelW);
-      pixelH += rowPixelH;
-    });
-    return { pixelW, pixelH };
-  }, [panelBands]);
-  const wallPixelW = wallPixels.pixelW;
-  const wallPixelH = wallPixels.pixelH;
+  // The wall's own pixel resolution: the FOOTPRINT its panels occupy, taken
+  // from their physical bounding box at the finest pixel pitch on the wall
+  // (see wallFootprintResolutionOf). Content has to span the whole rectangle
+  // the wall stands in, so a stepped or L-shaped layout is quoted across all
+  // of its module columns, not just the columns its longest row happens to
+  // fill. For a rectangular wall this is exactly the sum of its panels'
+  // pixels, so nothing changes there.
+  //
+  // NOT the same figure as the NovaStar export's own cabinet-topology space
+  // (canvasModel's resolutionOf), which packs panels together and leaves no
+  // gap pixels - see that function for why the two are, and must stay, apart.
+  const wallPixels = useMemo(() => wallFootprintResolutionOf(activePanels), [activePanels]);
+  const wallPixelW = wallPixels.w;
+  const wallPixelH = wallPixels.h;
   const panelVariantCounts = useMemo(() => {
     const counts = Object.fromEntries(Object.keys(PANEL_VARIANTS).map((key) => [key, 0])) as Record<PanelVariantKey, number>;
     activePanels.forEach((cell) => {
@@ -3289,10 +3336,30 @@ export default function App() {
     };
     Object.values(signalPortStats).forEach((stat) => collect(stat.path, "signal"));
     powerPorts.forEach((port) => collect(powerPortStats[port.id]?.path, "power"));
-    return [...hops.entries()].map(([key, hop]) => {
+    const runs = [...hops.entries()].map(([key, hop]) => {
       const kind: CableKind = hop.signal && hop.power ? "both" : hop.signal ? "signal" : "power";
-      return { key, kind, route: routeCablePx(rectOf(hop.from), rectOf(hop.to), kind) };
+      const dest = rectOf(hop.to);
+      return { key, kind, dest, route: routeCablePx(rectOf(hop.from), dest, kind) };
     });
+    // Two runs can still land on the same lane - a chain that doubles back on
+    // itself, or a return leg retracing one that went out earlier. Drawn as
+    // they are, that reads as ONE cable with two arrows piled on it. Give each
+    // clashing run a lane of its own so both are visible, each with its own
+    // arrow. Two spare lanes is plenty: a third clash on one lane is rare
+    // enough to leave stacked rather than push a run onto a panel's labels.
+    const placed: Array<{ segs: CableSegment[]; slot: number }> = [];
+    runs.forEach((run) => {
+      let segs = cableSegments(run.route.pts);
+      const taken = new Set(placed.filter((p) => cableRunsClash(p.segs, segs)).map((p) => p.slot));
+      let slot = 0;
+      while (taken.has(slot) && slot < 3) slot += 1;
+      if (slot > 0) {
+        run.route = spreadCableRun(run.route, run.dest, -slot * CABLE_STROKE.casing);
+        segs = cableSegments(run.route.pts);
+      }
+      placed.push({ segs, slot });
+    });
+    return runs;
   };
 
   // Cable runs, with a pale casing under the colour so they read over any panel

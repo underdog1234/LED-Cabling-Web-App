@@ -8,7 +8,9 @@ import {
   POWER_COLOR,
   SIGNAL_CABLE_COLOR,
   cableChevronPoints,
+  cableRunsClash,
   cableStrokes,
+  spreadCableRun,
   panelLabelFontPx,
   routeCablePx,
   type CableKind,
@@ -168,6 +170,70 @@ describe("routeCablePx", () => {
     const { pts, entry } = routeCablePx(panel(0, 0), panel(0, 0), "power");
     expect(pts).toHaveLength(1);
     expect(entry).toBeNull();
+  });
+});
+
+describe("runs that land on the same lane", () => {
+  // A chain that doubles back on itself, or a return leg retracing one that
+  // went out earlier, puts two cables on one lane. Drawn as they come out of
+  // the router that reads as a SINGLE line with two arrows piled on it, which
+  // is exactly the case that has to show as two.
+  const routeOf = (a: ReturnType<typeof panel>, b: ReturnType<typeof panel>) => routeCablePx(a, b, "both");
+  const segmentsOf = (pts: Array<{ x: number; y: number }>) => {
+    const segs: Array<{ horiz: boolean; fixed: number; lo: number; hi: number }> = [];
+    for (let i = 1; i < pts.length; i += 1) {
+      const from = pts[i - 1];
+      const to = pts[i];
+      const horiz = Math.abs(from.y - to.y) < 0.01;
+      if (!horiz && Math.abs(from.x - to.x) >= 0.01) continue;
+      segs.push(horiz
+        ? { horiz, fixed: from.y, lo: Math.min(from.x, to.x), hi: Math.max(from.x, to.x) }
+        : { horiz, fixed: from.x, lo: Math.min(from.y, to.y), hi: Math.max(from.y, to.y) });
+    }
+    return segs;
+  };
+
+  it("spots two runs drawn on top of each other, and leaves unrelated ones alone", () => {
+    const there = routeOf(panel(0, 0), panel(78, 0));
+    const back = routeOf(panel(78, 0), panel(0, 0));
+    expect(cableRunsClash(segmentsOf(there.pts), segmentsOf(back.pts))).toBe(true);
+
+    const elsewhere = routeOf(panel(0, 78), panel(78, 78));
+    expect(cableRunsClash(segmentsOf(there.pts), segmentsOf(elsewhere.pts))).toBe(false);
+  });
+
+  it("moves the second run clear, keeping its own end points and its own arrow", () => {
+    const dest = panel(0, 0);
+    const back = routeOf(panel(78, 0), dest);
+    const moved = spreadCableRun(back, dest, -CABLE_STROKE.casing);
+
+    // Same start and finish, so it still meets the hops either side of it.
+    expect(moved.pts[0]).toEqual(back.pts[0]);
+    expect(moved.pts[moved.pts.length - 1]).toEqual(back.pts[back.pts.length - 1]);
+    // ...but no longer sharing a lane with the run that was already there.
+    const there = routeOf(panel(0, 0), panel(78, 0));
+    expect(cableRunsClash(segmentsOf(there.pts), segmentsOf(moved.pts))).toBe(false);
+    // Its direction mark comes with it, so both runs are arrowed.
+    expect(moved.entry).not.toBeNull();
+    expect(moved.entry!.y).toBeLessThan(back.entry!.y);
+  });
+
+  it("always steps a run AWAY from the labels it would otherwise land on", () => {
+    // The nudge is negative - up for a run crossing a panel, left for one
+    // running down it - so it can never eat the clearance the label block was
+    // sized against.
+    const dest = panel(200, 200);
+    const route = routeCablePx(panel(200, 122), dest, "both");
+    const moved = spreadCableRun(route, dest, -CABLE_STROKE.casing);
+    const fontPx = panelLabelFontPx(dest.w, dest.h, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
+    const widest = Math.max(...cableStrokes("both").map((s) => s.width));
+    const hit = moved.pts.slice(1).some((p, i) => segmentHitsBox(moved.pts[i], p, widest, labelBox(dest, fontPx)));
+    expect(hit).toBe(false);
+  });
+
+  it("leaves a run untouched when there is nothing to step around", () => {
+    const route = routeOf(panel(0, 0), panel(78, 0));
+    expect(spreadCableRun(route, panel(78, 0), 0)).toBe(route);
   });
 });
 

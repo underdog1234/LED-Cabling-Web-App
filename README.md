@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.44.0`
+Version `0.45.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -18,11 +18,30 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
 - Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
+- Shaped panels (`MG12` triangle, `MG13` quarter circle) print the orientation code of the part they actually are - `LU` / `LD` / `RU` / `RD`, read from the front - so the drawing names the same stock line Stock Calculations counts
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.45.0
+
+**A cable that doubles back on itself now shows as two cables**
+
+- Where a chain turns back on itself, or a return leg retraces one that went out earlier, the two runs landed on the same lane. That drew as a **single line with two arrows piled on it** - it looked like one cable
+- The second run now **steps clear onto its own lane and keeps its own arrow**, so both read. It keeps its true end points and moves only in between, so it still joins the hops either side of it. The step is always **away** from the panel's text, so it can never cost the clearance the label size is worked out against
+
+**Wall Resolution was under-reporting a stepped layout**
+
+- The wall's **Resolution** was taken from the longest single row of panels. On a stepped or L-shaped wall that is narrower than the wall itself: the 18.5m test layout reported `5880 × 1344` when it stands across all 37 module columns - `6216 × 1344`
+- Resolution, aspect ratio, reduced ratio, recommended content resolution and best standard output are now measured from the wall's **physical footprint** at its finest pixel pitch. **A rectangular wall is unchanged** - the two figures agree exactly there
+- The NovaStar `.uprj` export is deliberately **not** affected: a processor's cabinet topology has no such thing as an empty gap pixel, so it keeps its own packed space (see `canvasModel.ts`)
+
+**Shaped panels name the part they are**
+
+- An `MG12` triangle or `MG13` quarter circle is a one-way piece: where its rotation puts the right-angle corner decides which physical part it is. Each panel now prints that code - **`LU`, `LD`, `RU` or `RD`, read from the front** - next to its shape symbol, instead of a generic "rotated" marker
+- Same four buckets Stock Calculations already counts against the shelf, so the drawing and the stock list name the same thing
 
 ## Recent Changes In v0.44.0
 
