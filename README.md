@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.50.0`
+Version `0.51.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -17,6 +17,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Hover any panel to read its **X / Y position** from the top-left corner of the layout, in mm and in content pixels
 - Every panel carries its **row and column reference**, counted off the wall's own module grid - so a panel set half a module out reads as `row 5 & 6` instead of throwing the numbering of everything after it
 - Flip the panel layout between `Back View` and `Front View`
+- Both PDF Panel Layout pages draw each **sub-screen's boundary and name**, and **Generate PDF** can limit those pages to the sub-screens you pick - the page is then rebuilt around just those panels and says on its face that it shows part of the wall
 - The PDF report carries an **Output Canvas page** - the full canvas resolution, every screen drawn to scale where it sits on it, and the same numbers as a table - plus a **key** on both Panel Layout views explaining every mark on the drawing
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
 - Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
@@ -29,6 +30,26 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.51.0
+
+**Sub-screens on the PDF's Panel Layout pages**
+
+- Both Panel Layout pages now draw each **sub-screen's boundary** the way the workspace does: a dashed box just outside that screen's panels, in the screen's own colour, with its name above it. The key gained a row explaining the mark
+- **Generate PDF** now lists every sub-screen. Untick one and its panels are left off those pages, which are then built around what is left - its own bounding box, its own rulers, its own centre line - exactly as the workspace does when a sub-screen is opened for editing. Panels in no sub-screen are their own entry
+- A page showing only part of the wall says so on its face: *"Showing Main Screen, Side Right only - 38 of 46 panels. The figures below are the whole wall's."*
+- A cable run to a panel the page does not show is left out whole, rather than drawn heading off into white space
+- Everything stays ticked by default, so a report nobody touches is the same report as before
+
+**Metre marks moved out of the way**
+
+- In the Panel Layout and in the PDF, the metre numbers now sit at the **edge of the canvas** rather than tight against the wall. That band belongs to the sub-screen name labels, and the two were landing on top of each other. The grid lines and ticks still line up with the numbers, so nothing is lost by moving them out
+
+**Moving test pattern**
+
+- The **black outline around the wall info text is gone** - at a distance it read as a smear around every letter
+- The info text now lands **on panels**. On a stepped or ring-shaped wall the middle of the bounding box has no LED in it, and the text hung in the air where it could not be read at all; it now moves to the nearest spot that is actually covered
+- **Panel numbers are much bigger on MT.** Their size came from the panel's short side, so a 256 x 64 MT panel carried 6px text - unreadable on the wall it was made for, with the 256px of width beside it unused. The size now has a pixel floor and is capped by what the two-line block can fit, which leaves MG9 close to where it was and roughly triples MT
 
 ## Recent Changes In v0.50.0
 

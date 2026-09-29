@@ -401,11 +401,83 @@ const dispRectPx = (layout: TestPatternLayout, cell: Cell): RectMm => {
   return { x: layout.W - r.x - r.w, y: r.y, w: r.w, h: r.h };
 };
 
-// Wall info text: centred in the middle of the wall - right where the
-// alignment overlay's diagonal lines and circle cross - so a thin black
-// stroke behind the white fill keeps it legible there too.
-const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+// Where the info block sits, per layout - the search below walks every panel,
+// so it is done once and kept rather than repeated sixty times a second.
+const infoAnchorCache = new WeakMap<TestPatternLayout, { x: number; y: number }>();
+
+/**
+ * Where to put the wall info text.
+ *
+ * The middle of the wall is the right place on a plain rectangle, and the
+ * wrong place on anything else: a stepped or ring-shaped wall has no panels
+ * in the middle of its bounding box, so the text hung in the air off the LED
+ * and could not be read at all. This looks for the spot nearest the middle
+ * where the block actually lands on panels, and only falls back to the middle
+ * when no run of panels can hold it.
+ *
+ * Coverage is sampled on a grid across the block: panels are rectangles here
+ * even when the panel is a triangle or a quarter circle, which is close
+ * enough for choosing where to put a caption and much cheaper than the real
+ * silhouette.
+ */
+const infoTextAnchor = (layout: TestPatternLayout, blockW: number, blockH: number): { x: number; y: number } => {
+  const cached = infoAnchorCache.get(layout);
+  if (cached) return cached;
   const { W, H } = layout;
+  const centre = { x: W / 2, y: H / 2 };
+  const rects = layout.activePanels.map((cell) => dispRectPx(layout, cell));
+  if (!rects.length) return centre;
+  const covers = (x: number, y: number) =>
+    rects.some((r) => x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h);
+  // Samples across the block, corners included - the corners are what hang off
+  // the end of a row.
+  const STEPS_X = 6;
+  const STEPS_Y = 4;
+  const coverage = (cx: number, cy: number) => {
+    let hits = 0;
+    let total = 0;
+    for (let i = 0; i <= STEPS_X; i += 1) {
+      for (let j = 0; j <= STEPS_Y; j += 1) {
+        const x = cx - blockW / 2 + (blockW * i) / STEPS_X;
+        const y = cy - blockH / 2 + (blockH * j) / STEPS_Y;
+        total += 1;
+        if (covers(x, y)) hits += 1;
+      }
+    }
+    return hits / total;
+  };
+  // Held on the canvas BEFORE being scored, never after: a candidate nudged
+  // back inside the frame afterwards is no longer the position that was
+  // measured, and that is how the block ends up half over a hole again.
+  const onCanvas = (p: { x: number; y: number }) => ({
+    x: Math.min(Math.max(p.x, blockW / 2), Math.max(blockW / 2, W - blockW / 2)),
+    y: Math.min(Math.max(p.y, blockH / 2), Math.max(blockH / 2, H - blockH / 2)),
+  });
+  // The middle first, then panel centres nearest the middle: the text moves as
+  // little as it has to.
+  const candidates = [centre, ...rects
+    .map((r) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 }))
+    .sort((a, b) => (a.x - centre.x) ** 2 + (a.y - centre.y) ** 2 - ((b.x - centre.x) ** 2 + (b.y - centre.y) ** 2))]
+    .map(onCanvas);
+  let best = candidates[0];
+  let bestScore = -1;
+  for (const candidate of candidates) {
+    const score = coverage(candidate.x, candidate.y);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+    if (score >= 1) break;
+  }
+  infoAnchorCache.set(layout, best);
+  return best;
+};
+
+// Wall info text: white, no outline - it is drawn over the panels it names,
+// and a black stroke around every letter read as a smear at a distance, which
+// is the one thing this caption cannot afford.
+const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  const { W } = layout;
   const fontPx = Math.max(16, Math.min(40, Math.round(W * 0.016)));
   const lineH = Math.round(fontPx * 1.4);
   const lines: string[] = [];
@@ -419,21 +491,16 @@ const drawInfoText = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) 
     `Panels: ${layout.totalPanels}`,
     `Grid: ${layout.activeColsCount} columns x ${layout.activeRowsCount} rows`,
   );
-  const cx = W / 2;
-  const startY = H / 2 - (lineH * (lines.length - 1)) / 2;
   ctx.save();
   ctx.font = `bold ${fontPx}px Arial`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = "#000000";
-  ctx.lineWidth = Math.max(2, Math.round(fontPx * 0.12));
+  const blockW = lines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
+  const blockH = lineH * lines.length;
+  const anchor = infoTextAnchor(layout, blockW, blockH);
+  const startY = anchor.y - (lineH * (lines.length - 1)) / 2;
   ctx.fillStyle = "#ffffff";
-  lines.forEach((line, i) => {
-    const ly = startY + i * lineH;
-    ctx.strokeText(line, cx, ly);
-    ctx.fillText(line, cx, ly);
-  });
+  lines.forEach((line, i) => ctx.fillText(line, anchor.x, startY + i * lineH));
   ctx.restore();
 };
 
@@ -838,7 +905,16 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    let fontPx = Math.max(6, Math.floor(Math.min(r.w, r.h) * 0.08));
+    // Legibility is measured in PIXELS, not in fractions of a panel. Taking
+    // the size from the short side made an MT panel - 256 x 64 - carry 6px
+    // text, unreadable on the wall it was made for, while the 256px of width
+    // beside it went unused. So: a floor of LABEL_MIN_PX, then whatever the
+    // panel is big enough for, capped at what the two-line block can fit.
+    const LABEL_MIN_PX = 18;
+    let fontPx = Math.max(
+      6,
+      Math.floor(Math.min(Math.max(Math.min(r.w, r.h) * 0.08, LABEL_MIN_PX), r.h / 2.6, r.w / 4)),
+    );
     const blockWidth = () => {
       ctx.font = `bold ${fontPx}px Arial`;
       const gap = Math.max(2, Math.round(fontPx * 0.25));

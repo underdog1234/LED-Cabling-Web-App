@@ -82,7 +82,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.50.0";
+const APP_VERSION = "0.51.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1166,6 +1166,22 @@ const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
 // into the project file.
 const stockCatalogLookup = (code: string): { name: string; stock: number } | null =>
   Object.values(STOCK_CATALOG).find((item) => item.code === code) ?? null;
+
+/**
+ * Which sub-screens a Panel Layout page covers.
+ *
+ * `null` is the whole wall. Otherwise the page is limited to the named
+ * sub-screens, plus - when `unassigned` is set - the panels that belong to no
+ * sub-screen at all. A wall with no sub-screens never has one of these.
+ */
+/** Section keys for "which sub-screens do the Panel Layout pages draw". */
+const PDF_SCREEN_KEY_PREFIX = "screen:";
+const PDF_UNASSIGNED_SCREEN_KEY = "__unassigned__";
+
+export type LayoutScreenFilter = { ids: Set<string>; unassigned: boolean } | null;
+
+export const layoutScreenIncludes = (filter: NonNullable<LayoutScreenFilter>, cell: Cell): boolean =>
+  cell.subScreenId ? filter.ids.has(cell.subScreenId) : filter.unassigned;
 
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
@@ -3614,7 +3630,7 @@ export default function App() {
   // mark - instead of a parallel pair. On a wall patched with "Match Power To
   // Signal Pattern" that is most of the cabling, and collapsing it is the
   // single biggest thing keeping a complicated layout readable.
-  const cableRoutesIn = (rectOf: (cell: Cell) => RectMm) => {
+  const cableRoutesIn = (rectOf: (cell: Cell) => RectMm, includes?: (cell: Cell) => boolean) => {
     type Hop = { from: Cell; to: Cell; signal: boolean; power: boolean };
     const hops = new Map<string, Hop>();
     const collect = (path: Cell[] | undefined, kind: "signal" | "power") => {
@@ -3630,7 +3646,11 @@ export default function App() {
     };
     Object.values(signalPortStats).forEach((stat) => collect(stat.path, "signal"));
     powerPorts.forEach((port) => collect(powerPortStats[port.id]?.path, "power"));
-    const runs = [...hops.entries()].map(([key, hop]) => {
+    const runs = [...hops.entries()]
+      // A hop with an end the caller is not drawing is dropped whole: half a
+      // run is worse than none, since it points at a panel that is not there.
+      .filter(([, hop]) => !includes || (includes(hop.from) && includes(hop.to)))
+      .map(([key, hop]) => {
       const kind: CableKind = hop.signal && hop.power ? "both" : hop.signal ? "signal" : "power";
       const dest = rectOf(hop.to);
       return { key, kind, dest, route: routeCablePx(rectOf(hop.from), dest, kind) };
@@ -3661,8 +3681,12 @@ export default function App() {
   // off the labels) and BEHIND the port-number badges and text. Every run
   // carries one outline ">" where it enters each panel, and nothing anywhere
   // else along it.
-  const drawCanvasCables = (ctx: CanvasRenderingContext2D, rectOf: (cell: Cell) => RectMm) => {
-    const routes = cableRoutesIn(rectOf);
+  const drawCanvasCables = (
+    ctx: CanvasRenderingContext2D,
+    rectOf: (cell: Cell) => RectMm,
+    includes?: (cell: Cell) => boolean,
+  ) => {
+    const routes = cableRoutesIn(rectOf, includes);
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
@@ -3691,11 +3715,22 @@ export default function App() {
     ctx.restore();
   };
 
-  const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
+  /**
+   * The Panel Layout image for one PDF page.
+   *
+   * `screens` limits the page to certain sub-screens: the panels of any other
+   * screen are not drawn, and the page is built around what is left - its own
+   * bounding box, its own rulers, its own centre line - exactly as the
+   * workspace does when one sub-screen is opened for editing. Null means the
+   * whole wall, which is what every page was before the option existed.
+   */
+  const buildLayoutCanvas = (flipped = false, viewLabel = "Back View", screens: LayoutScreenFilter = null) => {
     const px = CELL_SIZE / MODULE_MM; // export scale, independent of on-screen zoom
     const margin = 52;
-    const wallW = Math.max(1, Math.round(wallBBox.w * px));
-    const wallH = Math.max(1, Math.round(wallBBox.h * px));
+    const layoutPanels = screens ? activePanels.filter((cell) => layoutScreenIncludes(screens, cell)) : activePanels;
+    const layoutBBox = screens ? activeBBox(layoutPanels.map(cellRect)) : wallBBox;
+    const wallW = Math.max(1, Math.round(layoutBBox.w * px));
+    const wallH = Math.max(1, Math.round(layoutBBox.h * px));
     const contentW = wallW + margin * 2;
     const contentH = wallH + margin * 2 + 20;
 
@@ -3731,8 +3766,13 @@ export default function App() {
     // Panel rect in export px, mirrored for the front view.
     const dispRectPx = (cell: Cell): RectMm => {
       const raw = cellRect(cell);
-      const d = flipped ? mirrorRectX(raw, wallBBox) : raw;
-      return { x: (d.x - wallBBox.x) * px, y: (d.y - wallBBox.y) * px, w: d.w * px, h: d.h * px };
+      const d = flipped ? mirrorRectX(raw, layoutBBox) : raw;
+      return { x: (d.x - layoutBBox.x) * px, y: (d.y - layoutBBox.y) * px, w: d.w * px, h: d.h * px };
+    };
+    // Same mapping for a box that is not a panel - a sub-screen's bounds.
+    const dispBoxPx = (box: RectMm): RectMm => {
+      const d = flipped ? mirrorRectX(box, layoutBBox) : box;
+      return { x: (d.x - layoutBBox.x) * px, y: (d.y - layoutBBox.y) * px, w: d.w * px, h: d.h * px };
     };
 
     // Metre ruler along the top and left edges.
@@ -3741,29 +3781,37 @@ export default function App() {
     ctx.font = "11px Arial";
     ctx.textAlign = "center";
     ctx.lineWidth = 1;
-    for (let m = 0; m * 1000 <= wallBBox.w + 1; m += 0.5) {
+    // The metre NUMBERS sit at the edge of the image, not tight against the
+    // wall: the band just above the wall is where a sub-screen's name label
+    // goes. The tick for each whole metre is drawn long enough to reach its
+    // number, so the two still read as one ruler.
+    const rulerTextY = -(margin - 14);
+    // Right-aligned, so it needs room to its LEFT inside the margin - ending
+    // at 30px in, not 12, or a "10m" runs off the edge of the image.
+    const rulerTextX = -(margin - 30);
+    for (let m = 0; m * 1000 <= layoutBBox.w + 1; m += 0.5) {
       const x = m * 1000 * px;
       ctx.beginPath();
       ctx.moveTo(x, -4);
-      ctx.lineTo(x, m % 1 === 0 ? -12 : -8);
+      ctx.lineTo(x, m % 1 === 0 ? rulerTextY + 4 : -8);
       ctx.stroke();
-      if (m % 1 === 0) drawOutlinedText(ctx, `${m}m`, x, -16, 11);
+      if (m % 1 === 0) drawOutlinedText(ctx, `${m}m`, x, rulerTextY, 11);
     }
     ctx.textAlign = "right";
     // Height ruler reads bottom-up (0m at the wall's base), matching the live
     // workspace - only the printed label flips, not the tick positions.
-    const maxHeightM = Math.floor(wallBBox.h / 1000);
-    for (let m = 0; m * 1000 <= wallBBox.h + 1; m += 0.5) {
+    const maxHeightM = Math.floor(layoutBBox.h / 1000);
+    for (let m = 0; m * 1000 <= layoutBBox.h + 1; m += 0.5) {
       const y = m * 1000 * px;
       ctx.beginPath();
       ctx.moveTo(-4, y);
-      ctx.lineTo(m % 1 === 0 ? -12 : -8, y);
+      ctx.lineTo(m % 1 === 0 ? rulerTextX + 4 : -8, y);
       ctx.stroke();
-      if (m % 1 === 0) drawOutlinedText(ctx, `${maxHeightM - m}m`, -16, y + 4, 11);
+      if (m % 1 === 0) drawOutlinedText(ctx, `${maxHeightM - m}m`, rulerTextX, y + 4, 11);
     }
 
     // Panel graphics first: fill, outline and the chain-start rings.
-    activePanels.forEach((cell) => {
+    layoutPanels.forEach((cell) => {
       if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
@@ -3773,9 +3821,12 @@ export default function App() {
 
     // Then the cabling, over the panel graphics but under everything that has
     // to stay readable - exactly the order the live workspace uses.
-    drawCanvasCables(ctx, dispRectPx);
+    // Cables are drawn for the panels on THIS page only: a run to a panel the
+    // page does not show would be a line heading off into white space.
+    const onThisPage = new Set(layoutPanels.map((cell) => cell.id));
+    drawCanvasCables(ctx, dispRectPx, screens ? (cell) => onThisPage.has(cell.id) : undefined);
 
-    activePanels.forEach((cell) => {
+    layoutPanels.forEach((cell) => {
       if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
       const cx = r.x + r.w / 2;
@@ -3862,10 +3913,10 @@ export default function App() {
     const drawCentreLine = (bbox: RectMm, color: string, label: string) => {
       if (bbox.w <= 0) return;
       const centreTrueX = bbox.x + bbox.w / 2;
-      const centreDisplayTrueX = flipped ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
-      const lineX = (centreDisplayTrueX - wallBBox.x) * px;
-      const yTop = (bbox.y - wallBBox.y) * px;
-      const yBottom = (bbox.y + bbox.h - wallBBox.y) * px;
+      const centreDisplayTrueX = flipped ? 2 * layoutBBox.x + layoutBBox.w - centreTrueX : centreTrueX;
+      const lineX = (centreDisplayTrueX - layoutBBox.x) * px;
+      const yTop = (bbox.y - layoutBBox.y) * px;
+      const yBottom = (bbox.y + bbox.h - layoutBBox.y) * px;
       ctx.save();
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
@@ -3887,9 +3938,43 @@ export default function App() {
       ctx.restore();
     };
 
-    if (showCentreLine) drawCentreLine(trueOuterBBox, "#eab308", "Centre");
+    // Sub-screen boundaries, drawn exactly as the workspace draws them: a
+    // dashed box just outside the screen's panels, in that screen's own
+    // colour, with its name above the box. Below the centre lines so a centre
+    // label is never buried, and above the panels so the box reads as a
+    // grouping rather than as part of any one panel.
+    subScreens.forEach((screen, index) => {
+      const cells = layoutPanels.filter((cell) => cell.subScreenId === screen.id);
+      if (!cells.length) return;
+      const box = dispBoxPx(activeBBox(cells.map(cellRect)));
+      const color = normalizeSubScreenColor(screen.color, index);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([9, 7]);
+      const pad = 6;
+      const radius = 8;
+      const x = box.x - pad;
+      const y = box.y - pad;
+      const w = box.w + pad * 2;
+      const h = box.h + pad * 2;
+      ctx.beginPath();
+      if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, w, h, radius);
+      else ctx.rect(x, y, w, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "bold 13px Arial";
+      ctx.textAlign = "left";
+      ctx.fillStyle = color;
+      drawOutlinedText(ctx, screen.name, x + 2, y - 5, 13);
+      ctx.restore();
+    });
+
+    if (showCentreLine) drawCentreLine(screens ? trueOuterBBoxOf(layoutPanels) : trueOuterBBox, "#eab308", "Centre");
     if (showSubScreenCentreLines) {
-      subScreenCentreLines.forEach((entry) => drawCentreLine(entry.bbox, entry.color, entry.name));
+      subScreenCentreLines
+        .filter((entry) => !screens || layoutPanels.some((cell) => cell.subScreenId === entry.id))
+        .forEach((entry) => drawCentreLine(entry.bbox, entry.color, entry.name));
     }
 
     ctx.restore();
@@ -4632,6 +4717,28 @@ const exportJson = () => {
       { key: "layoutBack", label: "Panel Layout - Back View" },
       { key: "layoutFront", label: "Panel Layout - Front View" },
     );
+    // Which sub-screens the Panel Layout pages draw. Everything is ticked by
+    // default, which is the whole wall exactly as before; untick one and its
+    // panels are left off those pages, which are then built around what is
+    // left - its own bounds, rulers and centre line.
+    if (subScreens.length > 0) {
+      subScreens.forEach((screen) => {
+        const count = grid.filter((cell) => isActiveCell(cell) && cell.subScreenId === screen.id).length;
+        sections.push({
+          key: `${PDF_SCREEN_KEY_PREFIX}${screen.id}`,
+          label: `Panel Layout: ${screen.name}`,
+          hint: `${count} panel${count === 1 ? "" : "s"}`,
+        });
+      });
+      const unassigned = grid.filter((cell) => isActiveCell(cell) && !cell.subScreenId).length;
+      if (unassigned > 0) {
+        sections.push({
+          key: `${PDF_SCREEN_KEY_PREFIX}${PDF_UNASSIGNED_SCREEN_KEY}`,
+          label: "Panel Layout: panels in no sub-screen",
+          hint: `${unassigned} panel${unassigned === 1 ? "" : "s"}`,
+        });
+      }
+    }
     return sections;
   };
 
@@ -4766,6 +4873,18 @@ const exportJson = () => {
       pdf.setLineDashPattern([], 0);
       label(0, 4, "Centre of the wall");
 
+      // Only worth a row when the drawing actually has sub-screen boxes on it.
+      if (subScreens.length > 0) {
+        const [ssR, ssG, ssB] = rgbOf(normalizeSubScreenColor(subScreens[0].color, 0));
+        pdf.setDrawColor(ssR, ssG, ssB);
+        pdf.setLineWidth(0.6);
+        pdf.setLineDashPattern([1.4, 1.1], 0);
+        const sy = y + 4 + 5 * rowH;
+        pdf.roundedRect(x, sy - 1.6, swatchW, 3.2, 0.8, 0.8, "S");
+        pdf.setLineDashPattern([], 0);
+        label(0, 5, "Sub-screen, named above its box");
+      }
+
       badgeSwatch(1, 0, SIGNAL_START_COLOR, "1");
       label(1, 0, "Signal chain start (port)");
       badgeSwatch(1, 1, POWER_START_COLOR, "1");
@@ -4779,7 +4898,7 @@ const exportJson = () => {
       pdf.setLineWidth(0.2);
     };
 
-    const drawLayoutPage = (canvas: HTMLCanvasElement, viewLabel: string) => {
+    const drawLayoutPage = (canvas: HTMLCanvasElement, viewLabel: string, screenNote?: string) => {
       pdf.addPage("a4", "landscape");
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
@@ -4788,6 +4907,17 @@ const exportJson = () => {
       pdf.text(`${safeProjectName} - Panel Layout - ${viewLabel}`, 10, 12);
 
       pdf.setFont("helvetica", "normal");
+      // A page that shows only some of the wall says so on its own face - the
+      // figures below it are still the whole wall's, and a drawing of part of
+      // a wall that does not admit it is how the wrong thing gets built.
+      if (screenNote) {
+        pdf.setFontSize(8);
+        pdf.setTextColor(37, 99, 235);
+        // In the gap between the last header line (y 44) and the top of the
+        // drawing (y 50) - the only strip on this page that is always empty.
+        pdf.text(screenNote, 10, 47.5, { maxWidth: 270 });
+        pdf.setTextColor(15, 23, 42);
+      }
       pdf.setFontSize(10);
       pdf.text(`Project name: ${safeProjectName}`, 10, 20);
       pdf.text(`Panel type: ${panelTypeSummary}`, 10, 26);
@@ -5491,8 +5621,31 @@ const exportJson = () => {
     if (wants("ports")) drawPortsInUsePage();
     if (wants("subScreens") && subScreens.length > 0) drawSubScreensSummaryPage();
     if (wants("outputCanvas")) drawOutputCanvasPage();
-    if (wants("layoutBack")) drawLayoutPage(buildLayoutCanvas(false, "Back View"), "Back View");
-    if (wants("layoutFront")) drawLayoutPage(buildLayoutCanvas(true, "Front View"), "Front View");
+    // The Panel Layout pages cover the ticked sub-screens. All of them ticked
+    // is the whole wall and no filter at all, so nothing changes for a project
+    // that has no sub-screens or leaves them alone.
+    const screenFilter: LayoutScreenFilter = (() => {
+      if (!subScreens.length) return null;
+      const ids = new Set(subScreens.filter((screen) => wants(`${PDF_SCREEN_KEY_PREFIX}${screen.id}`)).map((s) => s.id));
+      const hasUnassigned = activePanels.some((cell) => !cell.subScreenId);
+      const unassigned = !hasUnassigned || wants(`${PDF_SCREEN_KEY_PREFIX}${PDF_UNASSIGNED_SCREEN_KEY}`);
+      if (ids.size === subScreens.length && unassigned) return null;
+      return { ids, unassigned };
+    })();
+    const layoutPanelCount = screenFilter
+      ? activePanels.filter((cell) => layoutScreenIncludes(screenFilter, cell)).length
+      : activePanels.length;
+    // Every sub-screen unticked leaves nothing to draw - the pages are skipped
+    // rather than printed empty.
+    const layoutNote = screenFilter
+      ? `Showing ${[...subScreens.filter((screen) => screenFilter.ids.has(screen.id)).map((s) => s.name),
+          ...(screenFilter.unassigned && activePanels.some((cell) => !cell.subScreenId) ? ["panels in no sub-screen"] : [])]
+          .join(", ")} only - ${layoutPanelCount} of ${activePanels.length} panels. The figures below are the whole wall's.`
+      : undefined;
+    if (layoutPanelCount > 0) {
+      if (wants("layoutBack")) drawLayoutPage(buildLayoutCanvas(false, "Back View", screenFilter), "Back View", layoutNote);
+      if (wants("layoutFront")) drawLayoutPage(buildLayoutCanvas(true, "Front View", screenFilter), "Front View", layoutNote);
+    }
     addPdfFooters();
     pdf.save(`${fileSafeProjectName}-${fileSafePanelType}-${cols}x${rows}.pdf`);
   } catch (err) {
@@ -7386,11 +7539,17 @@ const exportJson = () => {
                     }
                     return lines;
                   })()}
+                  {/* The metre numbers sit on the EDGE OF THE WORKSPACE, not tight
+                      against the wall: the band just above a wall is where each
+                      sub-screen's name label goes, and the two were landing on top of
+                      each other. They still line up with the metre grid lines above,
+                      which run the full height and width, so nothing is lost by
+                      moving them out to the edge. */}
                   {Array.from({ length: Math.floor(wallBBox.w / 1000) + 1 }).map((_, m) => (
                     <text
                       key={`rx-${m}`}
                       x={mmToPx(wallBBox.x + m * 1000 - workspaceOrigin.x)}
-                      y={mmToPx(wallBBox.y - workspaceOrigin.y) - 8}
+                      y={12}
                       fill="#94a3b8"
                       fontSize="10"
                       textAnchor="middle"
@@ -7404,11 +7563,11 @@ const exportJson = () => {
                   {Array.from({ length: Math.floor(wallBBox.h / 1000) + 1 }).map((_, m) => (
                     <text
                       key={`ry-${m}`}
-                      x={mmToPx(wallBBox.x - workspaceOrigin.x) - 10}
+                      x={4}
                       y={mmToPx(wallBBox.y + m * 1000 - workspaceOrigin.y) + 3}
                       fill="#94a3b8"
                       fontSize="10"
-                      textAnchor="end"
+                      textAnchor="start"
                     >
                       {Math.floor(wallBBox.h / 1000) - m}m
                     </text>
