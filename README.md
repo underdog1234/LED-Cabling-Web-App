@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.49.0`
+Version `0.49.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -30,6 +30,23 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
 
+## Recent Changes In v0.49.1
+
+**Stock codes corrected**
+
+- **Triangle is `12399`, quarter circle is `12398`** - the opposite way round to what the names suggest, and the opposite way round to what this catalogue had. A stock check on the old codes was returning each other's item
+- Three floor items were on codes that belong to something else entirely. They now read:
+
+| Item | Was | Now |
+| --- | --- | --- |
+| 500mm x 500mm Tempered Glass Floor Cover | `12272` | `12250` |
+| Modular Frame Floor Reinforcement Bar | `12274` | `12251` |
+| Modular Frame Floor Taper Mounting Pin | `12275` | `12252` |
+
+- `12272`, `12274` and `12275` are the **Patch F/M - F/M Signal Cable**, the **MT Corner Connecting Bracket** and its **Bolt** - none of which this app calculates a requirement for, so they are not in the catalogue
+- Their shelf quantities go back to the catalogue's own figures (`384`, `384`, `1,536`): the `14`, `100` and `400` that came back in the stock check were counts of those other three items, not of these
+- If a **Get Current Stock** result was applied before this, its confirmed figures are stored against the old codes and no longer match anything - run the check again to refresh them
+
 ## Recent Changes In v0.49.0
 
 **The stock list can be edited by hand**
@@ -49,7 +66,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 
 - Shelf quantities updated from a Rentman stock check: 150 Flat Connector `320`, 180 Connector `80`, Horizontal Connector `1,170`, Dance Floor Feet `576`, Floor Reinforcement Bar `100`, Floor Taper Pin `400`, Tempered Glass Floor Cover `14`, MG9 panels `320`, 15m PowerCON `93`, 15m Signal `57`
 - The distros and the two 15m cables are one stock line each for the business, not one per panel type - they used to read `0` on an MT wall, reporting every cable as a full shortfall
-- **Worth checking:** in that stock check five codes came back under a different name than this catalogue has for them - `12398` and `12399` (triangle and curve, which Rentman appears to have the other way round), and `12272`, `12274`, `12275` (a signal cable and two MT bracket parts, against this catalogue's glass floor cover, reinforcement bar and taper pin). The quantities above are as supplied; if those codes point at different items in Rentman, the codes are what needs correcting, not the numbers
+- Five codes in that check came back under a different name than this catalogue had for them. They were the catalogue's codes that were wrong, and they are corrected in v0.49.1 below
 
 ## Recent Changes In v0.48.0
 

@@ -80,7 +80,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.49.0";
+const APP_VERSION = "0.49.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -244,11 +244,20 @@ export const STOCK_CATALOG = {
   bottomBeam1m: { code: "12270", name: "YES TECH Modular Frame Bottom Beam 1m", stock: 8 },
   connectingJoint: { code: "12273", name: "YES TECH Modular Frame Connecting Joint", stock: 192 },
   danceFloorFeet: { code: "12276", name: "YES TECH Modular Frame Feet for Dance Floor Mode", stock: 576 },
-  floorReinforcementBar: { code: "12274", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 100 },
-  floorTaperPin: { code: "12275", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 400 },
-  temperedGlass: { code: "12272", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 14 },
-  mg12Triangle: { code: "12398", name: "Triangle Panel", stock: 20 },
-  mg13Curved: { code: "12399", name: "1/4 Curved Panel", stock: 20 },
+  // These three carried 12274 / 12275 / 12272 until a Rentman stock check came
+  // back with someone else's name against each of them: those codes are the MT
+  // Corner Connecting Bracket, its Bolt, and the Patch F/M - F/M Signal Cable.
+  // The codes below are the confirmed ones. Their shelf quantities are the
+  // catalogue's own again - the figures that check returned belonged to the
+  // three items above, not to these.
+  floorReinforcementBar: { code: "12251", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 384 },
+  floorTaperPin: { code: "12252", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 1536 },
+  temperedGlass: { code: "12250", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 384 },
+  // Triangle is 12399 and quarter circle is 12398, the opposite way round to
+  // what the names suggest - confirmed against Rentman, where a check on the
+  // old codes returned each other's item. Do not "tidy" these back.
+  mg12Triangle: { code: "12399", name: "Triangle Panel", stock: 20 },
+  mg13Curved: { code: "12398", name: "1/4 Curved Panel", stock: 20 },
   mg9Corner: { code: "12225", name: "YES TECH MG9 P2.9 500mm x 500mm LED Corner Panel", stock: 80 },
   // The "150 Connector" of the connector rules (see model/connectors.ts) -
   // one stock item, whichever rule asks for it.
