@@ -1,7 +1,7 @@
 ﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ImageDown, Video, LayoutGrid } from "lucide-react";
-import { HelpCircle, Redo2, Undo2 } from "lucide-react";
+import { HelpCircle, Redo2, Undo2, X } from "lucide-react";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
 import {
   type RectMm,
@@ -47,6 +47,17 @@ import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, t
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
 import { applyStockOverrides, baseCodeOf, buildStockComparison, loadStockOverrides, saveStockOverrides, type StockComparisonRow, type StockOverrides } from "./rentman/stockOverrides";
 import {
+  applyStockEdits,
+  calculatedTotalOf,
+  normalizeStockEdits,
+  removedStockRows,
+  stockEditCount,
+  withStockQty,
+  withStockRemoved,
+  withStockRowReset,
+  type StockEdits,
+} from "./stock/stockEdits";
+import {
   fetchEquipmentStock,
   fetchEquipmentAvailability,
   fetchEquipmentRepairs,
@@ -69,7 +80,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.48.0";
+const APP_VERSION = "0.49.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -103,13 +114,13 @@ export const PANEL_TYPES = {
       slingWeight: 1.5,
     },
     stock: {
-      panels: 319,
+      panels: 320,
       vx1000: 2,
       vx2000: 2,
       distro32: 4,
       distro63: 4,
-      powerCable15m: 85,
-      signalCable15m: 53,
+      powerCable15m: 93,
+      signalCable15m: 57,
       hangingBar: 40,
       reinforcementPlate: 160,
       reinforcementScrew: 400,
@@ -135,10 +146,15 @@ export const PANEL_TYPES = {
     },
     stock: {
       panels: 100,
-      distro32: 0,
-      distro63: 0,
-      powerCable15m: 0,
-      signalCable15m: 0,
+      distro32: 4,
+      // 12246 / 12254 / 12263 are single stock lines for the business, not
+      // one shelf per panel type - an MT wall pulls the same distros and the
+      // same cables off the same shelf as an MG9 one, so these carry the same
+      // quantities. They read 0 here before, which reported every cable on an
+      // MT project as a full shortfall.
+      distro63: 4,
+      powerCable15m: 93,
+      signalCable15m: 57,
       hangingBar: 10,
       reinforcementPlate: 100,
       reinforcementScrew: 400,
@@ -227,27 +243,28 @@ export const STOCK_CATALOG = {
   modularFrame860: { code: "12269", name: "YES TECH Modular Frame 860mm x 500mm (Side Piece)", stock: 3 },
   bottomBeam1m: { code: "12270", name: "YES TECH Modular Frame Bottom Beam 1m", stock: 8 },
   connectingJoint: { code: "12273", name: "YES TECH Modular Frame Connecting Joint", stock: 192 },
-  danceFloorFeet: { code: "12276", name: "YES TECH Modular Frame Feet for Dance Floor Mode", stock: 384 },
-  floorReinforcementBar: { code: "12274", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 384 },
-  floorTaperPin: { code: "12275", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 1536 },
-  temperedGlass: { code: "12272", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 384 },
+  danceFloorFeet: { code: "12276", name: "YES TECH Modular Frame Feet for Dance Floor Mode", stock: 576 },
+  floorReinforcementBar: { code: "12274", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 100 },
+  floorTaperPin: { code: "12275", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 400 },
+  temperedGlass: { code: "12272", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 14 },
   mg12Triangle: { code: "12398", name: "Triangle Panel", stock: 20 },
   mg13Curved: { code: "12399", name: "1/4 Curved Panel", stock: 20 },
   mg9Corner: { code: "12225", name: "YES TECH MG9 P2.9 500mm x 500mm LED Corner Panel", stock: 80 },
   // The "150 Connector" of the connector rules (see model/connectors.ts) -
   // one stock item, whichever rule asks for it.
-  cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 240 },
+  cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 320 },
   // The "MG9 Corner Connector". The connector brief gave this 12260 as well,
   // the same code as the 150 Connector above; the catalogue has it as its own
   // item on 12258, with its own shelf quantity, so that is what is used. Two
   // rules pulling one code would have ordered the wrong part for half of them.
   cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 160 },
-  // Shelf quantities for the three items below are not in this catalogue yet,
-  // so they start at 0 and read as a full shortfall until Rentman fills them
-  // in (or someone sets an override) - honest about what is not known, rather
-  // than a guess that quietly under-orders.
-  connector180: { code: "12476", name: "YES TECH MG9 180 Connector", stock: 0 },
-  horizontalConnector: { code: "12623", name: "YES TECH MG9 Horizontal Connector", stock: 0 },
+  // Shelf quantities below came from a Rentman stock check (see the stock
+  // figures note in README). mg9VerticalConnector and distro32Adaptor were
+  // not in that return, so they stay at 0 and read as a full shortfall until
+  // a stock check or an override fills them in - honest about what is not
+  // known, rather than a guess that quietly under-orders.
+  connector180: { code: "12476", name: "YES TECH MG9 180 Connector", stock: 80 },
+  horizontalConnector: { code: "12623", name: "YES TECH MG9 Horizontal Connector", stock: 1170 },
   mg9VerticalConnector: { code: "12480", name: "YES TECH MG9 Vertical Connector", stock: 0 },
   distro32Adaptor: { code: "6650", name: "32A 3\u03a6 PDL - 32A 3\u03a6 Ceeform Power Adaptor", stock: 0 },
   // Ballast for the temporary fencing around a ground-supported wall.
@@ -343,6 +360,10 @@ export type StockRow = {
   spareRounded?: number;
   /** TOTAL required = required + spareRounded. The real order/pull quantity, and what `net` is measured against. */
   rounded?: number;
+  /** Set when a manual edit replaced the order quantity - what the tool itself worked out, kept so every reader of this row can show both (see stock/stockEdits). */
+  calculated?: number;
+  /** True when this row's quantity was typed in by hand rather than calculated. */
+  edited?: boolean;
 };
 
 // A panel in the free workspace. x/y are the TOP-LEFT corner in workspace
@@ -532,6 +553,8 @@ type OpenJsonPayload = {
   outputCanvas?: { w?: number; h?: number };
   /** v3: whole-layout canvas position, used only when subScreens is empty. */
   wholeLayoutCanvasPos?: { x?: number; y?: number };
+  /** v7: manual changes to the stock list - a typed-over quantity or a row taken off it, keyed by stock code. */
+  stockEdits?: unknown;
   /** v4: selected NovaStar processor model, "" = none selected. */
   processorModel?: ProcessorModelId | "";
   /** v4: per-canvas-entry input assignment, keyed by sub-screen id (or the whole-layout sentinel). */
@@ -1368,6 +1391,74 @@ export const panelLabelFontPx = (w: number, h: number, max: number, stackPerFont
   return px >= PANEL_LABEL_MIN_PX ? px : 0;
 };
 
+// One shared measuring canvas for label text that is laid out by hand rather
+// than by the browser (the workspace's shaped panels). Cached per font+string:
+// the workspace re-renders on every drag frame, and measuring 141 panels'
+// labels from scratch each time is work for nothing.
+const labelMeasureCache = new Map<string, number>();
+let labelMeasureCtx: CanvasRenderingContext2D | null = null;
+export const measureLabelWidthPx = (text: string, fontPx: number, font = "600 %spx ui-sans-serif, system-ui, sans-serif"): number => {
+  const key = `${fontPx}|${text}`;
+  const hit = labelMeasureCache.get(key);
+  if (hit !== undefined) return hit;
+  if (!labelMeasureCtx) labelMeasureCtx = document.createElement("canvas").getContext("2d");
+  if (!labelMeasureCtx) return text.length * fontPx * 0.6;
+  labelMeasureCtx.font = font.replace("%s", String(fontPx));
+  const width = labelMeasureCtx.measureText(text).width;
+  labelMeasureCache.set(key, width);
+  return width;
+};
+
+/**
+ * Where a panel's stack of label lines goes, for a renderer that positions the
+ * lines itself.
+ *
+ * The foot of the panel is the first choice everywhere - it is the band the
+ * cable router leaves clear (see PANEL_LABEL_BOTTOM_PX), so moving the text
+ * off it only to dodge the silhouette would walk it into a cable run. A
+ * triangle or quarter circle whose foot is its empty corner has nothing to sit
+ * on there, so those fall back to a point inside the shape, after trying
+ * smaller text at the foot first. Identical rule to the PDF's own label
+ * placement, so the workspace, the PNG exports and the report agree.
+ */
+export type PanelLabelPlacement = { fontPx: number; centre: { x: number; y: number } | null };
+export const panelLabelPlacement = (
+  rectW: number,
+  rectH: number,
+  shape: PanelShape,
+  rotation: number,
+  mirrorX: boolean,
+  lines: string[],
+  basePx: number,
+  bottomPad: number,
+  lineRatio: number,
+): PanelLabelPlacement => {
+  if (!basePx || !lines.length || !panelShapeNeedsInsetLabel(shape)) return { fontPx: basePx, centre: null };
+  const r: RectMm = { x: 0, y: 0, w: rectW, h: rectH };
+  // A little wider than measured: the measuring font is not byte-for-byte the
+  // one the browser lays the div out in, and text spilling off the shape is a
+  // worse miss than text one pixel smaller than it had to be.
+  const halfSize = (px: number) => ({
+    halfW: (Math.max(...lines.map((line) => measureLabelWidthPx(line, px))) * 1.06) / 2,
+    halfH: (lines.length * px * lineRatio) / 2,
+  });
+  const fitsAtFoot = (px: number) => {
+    const { halfW, halfH } = halfSize(px);
+    return panelLabelBlockFitsAt(r, shape, rotation, mirrorX, rectW / 2, rectH - bottomPad - halfH, halfW, halfH);
+  };
+  if (fitsAtFoot(basePx)) return { fontPx: basePx, centre: null };
+  let fontPx = basePx;
+  while (fontPx > PANEL_LABEL_MIN_PX && !fitsAtFoot(fontPx)) fontPx -= 1;
+  if (fitsAtFoot(fontPx)) return { fontPx, centre: null };
+  fontPx = basePx;
+  const fitsInside = (px: number) => {
+    const { halfW, halfH } = halfSize(px);
+    return panelLabelBlockFits(r, shape, rotation, mirrorX, halfW, halfH);
+  };
+  while (fontPx > PANEL_LABEL_MIN_PX && !fitsInside(fontPx)) fontPx -= 1;
+  return { fontPx, centre: panelLabelAnchor(r, shape, rotation, mirrorX) };
+};
+
 const pointInRect = (p: CablePoint, r: RectMm, tol = 0.01) =>
   p.x >= r.x - tol && p.x <= r.x + r.w + tol && p.y >= r.y - tol && p.y <= r.y + r.h + tol;
 
@@ -2111,6 +2202,9 @@ export default function App() {
   // The surface chosen for a download, held while the format modal is up.
   const [movingPatternSurfaceKey, setMovingPatternSurfaceKey] = useState<string | null>(null);
   const [stockOverrides, setStockOverrides] = useState<StockOverrides>(() => loadStockOverrides());
+  // Manual changes to this project's stock list - a typed-over quantity or a
+  // row taken off it. Project state, saved with the project (see stockEdits).
+  const [stockEdits, setStockEdits] = useState<StockEdits>({});
   const [stockChecking, setStockChecking] = useState(false);
   const [stockCheckError, setStockCheckError] = useState<string | null>(null);
   const [lastStockCheckedAt, setLastStockCheckedAt] = useState<Date | null>(null);
@@ -3298,10 +3392,27 @@ export default function App() {
   // free. An empty stockOverrides map makes applyStockOverrides a full
   // no-op, so this is a zero-behaviour-change default until you actually
   // apply a Get Current Stock result.
-  const visibleStockRows = useMemo(
+  //
+  // Manual edits go on LAST, over the Rentman figures, for the same reason:
+  // a quantity somebody typed in is the final word on what gets pulled, and
+  // every consumer of visibleStockRows gets it without asking.
+  const calculatedStockRows = useMemo(
     () => applyStockOverrides(stockRows.filter((row) => (row.rounded ?? row.required) > 0), stockOverrides),
     [stockRows, stockOverrides],
   );
+  const visibleStockRows = useMemo(() => applyStockEdits(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
+  const stockRowsRemoved = useMemo(() => removedStockRows(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
+  const stockEditsApplied = useMemo(() => stockEditCount(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
+  // Edits are keyed by stock code and are deliberately NOT pruned when their
+  // row stops appearing: switching deployment type or emptying the layout
+  // takes whole rows out of the list, and a note quietly dropped there would
+  // not come back when the row did.
+  const setStockQty = (code: string, qty: number | null, calculated: number) =>
+    setStockEdits((edits) => withStockQty(edits, code, qty, calculated));
+  const setStockRowRemoved = (code: string, removed: boolean) =>
+    setStockEdits((edits) => withStockRemoved(edits, code, removed));
+  const resetStockRow = (code: string) => setStockEdits((edits) => withStockRowReset(edits, code));
+  const resetAllStockEdits = () => setStockEdits({});
   // visibleStockRows joined to whatever Rentman data has been pulled, and the
   // one place the availability sum lives:
   //
@@ -3362,8 +3473,11 @@ export default function App() {
     setStockCheckError(null);
     try {
       const fetched = await fetchEquipmentStock(codes);
+      // calculatedStockRows, not visibleStockRows: this compares what the
+      // WAREHOUSE holds against what Rentman now says, and a row somebody took
+      // off this project's pull list still has a shelf quantity.
       const currentRows = rentmanEligibleItems.map((item) => {
-        const effective = visibleStockRows.find((row) => baseCodeOf(row.code) === item.code);
+        const effective = calculatedStockRows.find((row) => baseCodeOf(row.code) === item.code);
         return { code: item.code, name: item.name, stock: effective ? effective.stock : 0 };
       });
       setStockComparisonRows(buildStockComparison(currentRows, fetched));
@@ -3813,16 +3927,21 @@ export default function App() {
 
 const exportJson = () => {
   try {
-    // formatVersion 6: adds the Rentman availability date range (v1-v5
-    // files still open, see openJson - the number bump itself is purely
-    // documentation, there's no branching logic tied to it anywhere).
+    // formatVersion 7: adds manual stock-list edits (v1-v6 files still open,
+    // see openJson - the number bump itself is purely documentation, there's
+    // no branching logic tied to it anywhere).
+    //
+    // The edits are saved, the edited rows are not: they are notes against a
+    // stock code ("pull 4 of these, not 6", "not this time"), so reopening the
+    // file recalculates the list from the layout as it always did and lays the
+    // same notes back over it.
     // stockRows here is always the plain catalog-based numbers (this file
     // snapshots the theoretical required/spare/rounded math, not a live
     // Rentman read that would just go stale the moment the file is
     // reopened) - the equipment mapping that drives live data is account-
     // wide and lives in localStorage instead, not in this per-project file.
     const payload = {
-      formatVersion: 6,
+      formatVersion: 7,
       appVersion: APP_VERSION,
       projectName: safeProjectName,
       surfaceName,
@@ -3844,6 +3963,7 @@ const exportJson = () => {
       wholeCanvasInputId,
       rentmanDateFrom: projectDateFrom,
       rentmanDateTo: projectDateTo,
+      stockEdits,
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
@@ -4342,6 +4462,9 @@ const exportJson = () => {
         // no date range set (Rentman availability just stays off).
         setProjectDateFrom(typeof data.rentmanDateFrom === "string" ? data.rentmanDateFrom : "");
         setProjectDateTo(typeof data.rentmanDateTo === "string" ? data.rentmanDateTo : "");
+        // formatVersion 7: older projects have no manual stock edits, which
+        // is the same as having none - the list opens as the tool calculates it.
+        setStockEdits(normalizeStockEdits(data.stockEdits));
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -4419,8 +4542,10 @@ const exportJson = () => {
     setGrid(panels);
     // Import replaces the whole project's panels wholesale - any existing
     // sub-screens no longer have valid members, so start clean rather than
-    // leaving stale/empty sub-screens behind.
+    // leaving stale/empty sub-screens behind. Manual stock edits go the same
+    // way: they were notes about a different wall's pull list.
     setSubScreens([]);
+    setStockEdits({});
     setActiveSubScreenId(null);
     setSelectedId(null);
     setSelectedCells(new Set());
@@ -4677,7 +4802,7 @@ const exportJson = () => {
       for (let index = startIndex; index < stockTableRows.length; index += 1) {
         const entry = stockTableRows[index];
         const row = entry.row;
-        if (y > maxY) return index;
+        if (y > maxY) return { next: index, y };
         const short = rentmanChecked ? entry.result === "SHORT" : row.net < 0;
         if (short || (rentmanChecked && entry.result === "LOW")) {
           if (short) pdf.setFillColor(254, 226, 226);
@@ -4686,7 +4811,9 @@ const exportJson = () => {
         }
         pdf.setFontSize(rentmanChecked ? 7 : 8);
         pdf.text(String(row.code), 12, y);
-        pdf.text(pdf.splitTextToSize(row.name, stockCols.itemWrap)[0], 34, y);
+        // A quantity somebody typed in is not the tool's answer, and a printed
+        // pull sheet has to say so - the mark is explained under the table.
+        pdf.text(pdf.splitTextToSize(`${row.edited ? "* " : ""}${row.name}`, stockCols.itemWrap)[0], 34, y);
         pdf.text(formatNumber(row.required), stockCols.required, y, { align: "right" });
         pdf.text(formatNumber(row.spare ?? 0), stockCols.spare, y, { align: "right" });
         pdf.text(formatNumber(row.spareRounded ?? row.spare ?? 0), stockCols.spareRounded, y, { align: "right" });
@@ -4709,7 +4836,7 @@ const exportJson = () => {
         );
         y += 6;
       }
-      return stockTableRows.length;
+      return { next: stockTableRows.length, y };
     };
 
     const drawStockPage = (startIndex = 0) => {
@@ -4717,15 +4844,56 @@ const exportJson = () => {
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
       pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
-      let nextIndex = drawStockTable(startIndex, 22, 190);
-      while (nextIndex < stockTableRows.length) {
+      let table = drawStockTable(startIndex, 22, 190);
+      while (table.next < stockTableRows.length) {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
         pdf.text(`${safeProjectName} - Stock Summary continued`, 10, 12);
-        nextIndex = drawStockTable(nextIndex, 22, 190);
+        table = drawStockTable(table.next, 22, 190);
       }
+      drawStockEditNotes(table.y);
     };
+
+    // Manual changes are declared under the table, not left to be spotted: a
+    // pull sheet that quietly differs from what the tool worked out is the one
+    // thing this page must never be. Called wherever the table happens to
+    // finish - the front page when it is short enough, its own page when it
+    // is not.
+    function drawStockEditNotes(afterY: number) {
+      const edited = visibleStockRows.filter((row) => row.edited);
+      const notes = [
+        edited.length
+          ? `* Quantity set by hand, not calculated: ${edited
+              .map((row) => `${row.code} ${formatNumber(row.rounded ?? row.required)} (tool: ${formatNumber(row.calculated ?? 0)})`)
+              .join(", ")}`
+          : null,
+        stockRowsRemoved.length
+          ? `Taken off this list by hand: ${stockRowsRemoved.map((row) => `${row.code} ${row.name}`).join(", ")}`
+          : null,
+      ].filter((note): note is string => note !== null);
+      if (!notes.length) return;
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(8);
+      // Wrapped here rather than by maxWidth, so the space the notes need is
+      // known before they are placed - they go under the table when they fit
+      // above the page footer, and on a page of their own when they do not.
+      const lines = notes.flatMap((note) => pdf.splitTextToSize(note, 274) as string[]);
+      const FOOTER_TOP = 198;
+      let noteY = afterY + 4;
+      if (noteY + lines.length * 4.5 > FOOTER_TOP) {
+        pdf.addPage("a4", "landscape");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(16);
+        pdf.text(`${safeProjectName} - Stock Summary continued`, 10, 12);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(8);
+        noteY = 22;
+      }
+      pdf.setTextColor(120, 53, 15);
+      lines.forEach((line, index) => pdf.text(line, 10, noteY + index * 4.5));
+      pdf.setTextColor(15, 23, 42);
+    }
 
     // Every project and repair job behind the Other Projects / Broken columns
     // above, so the printed report stands on its own without needing the
@@ -5244,15 +5412,21 @@ const exportJson = () => {
       "See Signal & Power Ports page for full detail.",
     ], 220, 78, 66, 44);
 
-    let nextStockIndex = 0;
+    let stockTableEnd = { next: 0, y: 138 };
     if (wants("stock")) {
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(12);
       pdf.text("Stock Summary", 10, 128);
-      nextStockIndex = drawStockTable(0, 138, 190);
+      stockTableEnd = drawStockTable(0, 138, 190);
     }
 
-    if (wants("stock") && nextStockIndex < stockTableRows.length) drawStockPage(nextStockIndex);
+    if (wants("stock")) {
+      // The notes belong under whichever page the table ends on, so they are
+      // drawn by the continuation page when there is one and here when the
+      // whole table fitted on this page.
+      if (stockTableEnd.next < stockTableRows.length) drawStockPage(stockTableEnd.next);
+      else drawStockEditNotes(stockTableEnd.y);
+    }
     if (wants("rentmanDetail")) drawRentmanDetailPage();
     if (wants("sparePanels")) drawSparePanelsPage();
     if (wants("ports")) drawPortsInUsePage();
@@ -7409,7 +7583,39 @@ const exportJson = () => {
                   // on a zoomed-out workspace or a narrow poster section, where
                   // the old fixed size spilled out over the neighbours.
                   // 5.5 = the flex gaps + the 2px border the overlay carries.
-                  const fontPx = panelLabelFontPx(rect.w, rect.h, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5);
+                  const baseFontPx = panelLabelFontPx(rect.w, rect.h, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5);
+                  // The same lines the block below renders, in the same order,
+                  // so the placement is measured on what is actually drawn.
+                  const labelLines = [
+                    `↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`,
+                    cell.assignedPort ? `🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})` : null,
+                    cell.assignedPowerPort ? `⚡ Plug ${cell.assignedPowerPort}` : null,
+                    getPanelSymbol(cell) || null,
+                  ].filter((line): line is string => Boolean(line));
+                  // On a triangle or quarter circle the foot of the panel can
+                  // be its empty corner - the text moves onto the lit part,
+                  // exactly as it does in the PDF and the PNG exports.
+                  const placement = panelLabelPlacement(
+                    rect.w,
+                    rect.h,
+                    PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape,
+                    cell.rotation ?? 0,
+                    isFlippedView,
+                    labelLines,
+                    baseFontPx,
+                    PANEL_LABEL_BOTTOM_PX - 2,
+                    1.18,
+                  );
+                  const fontPx = placement.fontPx;
+                  const blockStyle: React.CSSProperties = placement.centre
+                    ? {
+                        position: "absolute",
+                        left: 0,
+                        right: 0,
+                        top: placement.centre.y - (labelLines.length * fontPx * 1.18) / 2,
+                        transform: `translateX(${placement.centre.x - rect.w / 2}px)`,
+                      }
+                    : { position: "absolute", left: 0, right: 0, bottom: PANEL_LABEL_BOTTOM_PX - 2 };
                   return (
                     <div
                       key={`labels-${cell.id}`}
@@ -7423,10 +7629,9 @@ const exportJson = () => {
                         border: "2px solid transparent",
                         color: "#020617",
                         fontSize: fontPx,
-                        paddingBottom: PANEL_LABEL_BOTTOM_PX - 2,
                         pointerEvents: "none",
                       }}
-                      className="flex select-none flex-col items-center justify-end gap-px px-0.5 pt-0.5 font-semibold leading-tight tracking-tight"
+                      className="select-none px-0.5 pt-0.5 font-semibold leading-tight tracking-tight"
                     >
                       {cornerBadges.map((b, i) => (
                         <div key={`cb-${i}`} style={{ ...badgeStyle, left: badgePad + i * (badgeD + badgePad), background: b.color }}>
@@ -7434,12 +7639,12 @@ const exportJson = () => {
                         </div>
                       ))}
                       {fontPx ? (
-                        <>
+                        <div style={blockStyle} className="flex flex-col items-center gap-px px-0.5">
                           <div>{`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`}</div>
                           {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
                           {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
                           {getPanelSymbol(cell) ? <div style={{ fontSize: fontPx + 2 }}>{getPanelSymbol(cell)}</div> : null}
-                        </>
+                        </div>
                       ) : null}
                     </div>
                   );
@@ -7796,9 +8001,31 @@ const exportJson = () => {
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Stock Calculations</CardTitle>
-              <Button variant="outline" className="no-print" onClick={(e) => { e.stopPropagation(); exportStockCsv(); }}>
-                <Download className="mr-2 h-4 w-4" />Download CSV
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Manual changes are shown and undone HERE, at the top of the
+                    card, so a list somebody has been editing can never be read
+                    as the tool's own answer - the count says how many rows are
+                    no longer what the layout works out, and one click puts
+                    every one of them back. */}
+                {stockEditsApplied > 0 ? (
+                  <>
+                    <StatusChip tone="amber">
+                      {stockEditsApplied} row{stockEditsApplied === 1 ? "" : "s"} edited by hand
+                    </StatusChip>
+                    <Button
+                      variant="outline"
+                      className="no-print"
+                      title="Drop every manual quantity change and every removed row - back to exactly what the tool works out from the layout"
+                      onClick={(e) => { e.stopPropagation(); resetAllStockEdits(); }}
+                    >
+                      <Undo2 className="mr-2 h-4 w-4" />Reset to calculated
+                    </Button>
+                  </>
+                ) : null}
+                <Button variant="outline" className="no-print" onClick={(e) => { e.stopPropagation(); exportStockCsv(); }}>
+                  <Download className="mr-2 h-4 w-4" />Download CSV
+                </Button>
+              </div>
             </div>
           </CardHeader>
           <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
@@ -7971,6 +8198,7 @@ const exportJson = () => {
                     {repairsByCode ? <th className="px-3 py-2 text-right">Broken / Repair</th> : null}
                     {rentmanChecked ? <th className="px-3 py-2 text-right">Available Stock</th> : null}
                     <th className="px-3 py-2 text-right">{rentmanChecked ? "Result" : "Net"}</th>
+                    <th className="px-3 py-2 text-right no-print">Edit</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -7984,7 +8212,7 @@ const exportJson = () => {
                     // Code, Equipment, Required, Spares, Spares Rounded,
                     // Total, Stock, Result = 8 fixed, plus whichever Rentman
                     // columns are currently showing.
-                    const detailColSpan = 8 + (availabilityByCode ? 1 : 0) + (repairsByCode ? 1 : 0) + (rentmanChecked ? 1 : 0);
+                    const detailColSpan = 9 + (availabilityByCode ? 1 : 0) + (repairsByCode ? 1 : 0) + (rentmanChecked ? 1 : 0);
                     return (
                       <Fragment key={`${row.code}-${row.name}`}>
                         <tr className={`border-t border-slate-700 ${short ? "bg-red-500/10" : low ? "bg-amber-500/10" : ""}`}>
@@ -7993,7 +8221,17 @@ const exportJson = () => {
                           <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.spare ?? 0)}</td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.spareRounded ?? row.spare ?? 0)}</td>
-                          <td className="px-3 py-2 text-right font-semibold">{formatNumber(entry.totalRequired)}</td>
+                          {/* The one figure a manual edit replaces. The
+                              calculated number stays on the row beside it, so
+                              nobody has to take the new one on trust. */}
+                          <td className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${row.edited ? "text-amber-200" : ""}`}>
+                            {formatNumber(entry.totalRequired)}
+                            {row.edited ? (
+                              <div className="text-[10px] font-normal text-amber-300/80">
+                                edited - tool says {formatNumber(row.calculated ?? 0)}
+                              </div>
+                            ) : null}
+                          </td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
                           {availabilityByCode ? (
                             <td className="px-3 py-2 text-right">
@@ -8040,6 +8278,45 @@ const exportJson = () => {
                                 ? `SHORT ${formatNumber(entry.shortBy)}`
                                 : entry.result
                               : formatNumber(row.net)}
+                          </td>
+                          {/* Type a quantity over the calculated one, or take
+                              the row off the list entirely. Both travel with
+                              the project and reach every export. */}
+                          <td className="px-3 py-2 text-right no-print">
+                            <div className="flex items-center justify-end gap-1">
+                              <Input
+                                type="number"
+                                min={0}
+                                className="w-20 py-1 text-right text-sm"
+                                value={String(entry.totalRequired)}
+                                aria-label={`Quantity for ${row.name}`}
+                                title="Quantity to pull for this job - type over the calculated figure"
+                                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                  const raw = e.target.value.trim();
+                                  setStockQty(row.code, raw === "" ? null : Number(raw), row.calculated ?? calculatedTotalOf(row));
+                                }}
+                              />
+                              {row.edited ? (
+                                <button
+                                  type="button"
+                                  onClick={() => resetStockRow(row.code)}
+                                  title="Put this row's calculated quantity back"
+                                  aria-label={`Reset ${row.name} to the calculated quantity`}
+                                  className="rounded p-1 text-slate-300 hover:bg-slate-700 hover:text-white"
+                                >
+                                  <Undo2 className="h-4 w-4" />
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => setStockRowRemoved(row.code, true)}
+                                title="Take this item off the stock list for this project"
+                                aria-label={`Remove ${row.name} from the stock list`}
+                                className="rounded p-1 text-slate-300 hover:bg-red-500/20 hover:text-red-200"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                         {openKind === "projects" ? (
@@ -8089,6 +8366,42 @@ const exportJson = () => {
                 </tbody>
               </table>
             </div>
+            {/* Rows taken off the list. They are gone from the table and from
+                every export, but not hidden from the person who took them off:
+                each one says what it was and goes back with one click. */}
+            {stockRowsRemoved.length ? (
+              <div className="space-y-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 no-print">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                  Removed from this project&apos;s list
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {stockRowsRemoved.map((row) => (
+                    <div
+                      key={`removed-${row.code}-${row.name}`}
+                      className="flex items-center gap-2 rounded-full border border-slate-600 bg-slate-800 px-3 py-1 text-xs"
+                    >
+                      <span className="text-slate-400">{row.code}</span>
+                      <span>{row.name}</span>
+                      <span className="text-slate-400">({formatNumber(calculatedTotalOf(row))})</span>
+                      <button
+                        type="button"
+                        onClick={() => setStockRowRemoved(row.code, false)}
+                        className="rounded px-1 font-semibold text-sky-300 hover:bg-slate-700 hover:text-sky-200"
+                        title="Put this item back on the stock list"
+                      >
+                        Put back
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {stockEditsApplied ? (
+              <div className="text-xs text-amber-300/90">
+                {stockEditsApplied} row{stockEditsApplied === 1 ? "" : "s"} on this list {stockEditsApplied === 1 ? "is" : "are"} set by hand
+                rather than calculated - the CSV, the PDF and the shortfall list all use the edited figures.
+              </div>
+            ) : null}
             {rentmanChecked ? (
               <div className="text-xs text-slate-400">
                 Available Stock = Rentman Stock - Other Projects - Broken / Repair, compared against this project&apos;s{" "}

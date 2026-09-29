@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.48.0`
+Version `0.49.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -26,8 +26,30 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
+- **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.49.0
+
+**The stock list can be edited by hand**
+
+- Every row of Stock Calculations now has its **quantity in a box you can type in**, and an **X** to take the item off this project's list altogether
+- A **Reset to calculated** button at the top of the card puts every one of them back, and a chip beside it says how many rows are currently set by hand - so a list somebody has been editing can never be mistaken for the tool's own answer
+- An edited row shows the figure the tool worked out beside the new one (`edited - tool says 10`), and the Required / Spares columns still show where that figure came from
+- Removed rows are listed under the table with a **Put back** button, so taking one off is never a one-way door
+- Edits reach **everything**: the CSV, the PDF Stock Summary, the shortfall list. The PDF marks each edited row with `*` and prints, under the table, exactly what was changed and what was taken off - a printed pull sheet never differs silently from what the tool calculated
+- They are saved **with the project** (`formatVersion` 7), because they are decisions about this job. Rentman's confirmed stock figures still live per browser, because those are facts about the warehouse
+
+**Panel text stays on the panel in the workspace too**
+
+- v0.48.0 moved the text inside the shape for the PNG exports and the PDF. The on-screen Panel Layout now uses the **same rule**: the foot of the panel first, because that is the band the cable router keeps clear, and a point inside the silhouette only when that foot is the shape's empty corner
+
+**Stock figures updated**
+
+- Shelf quantities updated from a Rentman stock check: 150 Flat Connector `320`, 180 Connector `80`, Horizontal Connector `1,170`, Dance Floor Feet `576`, Floor Reinforcement Bar `100`, Floor Taper Pin `400`, Tempered Glass Floor Cover `14`, MG9 panels `320`, 15m PowerCON `93`, 15m Signal `57`
+- The distros and the two 15m cables are one stock line each for the business, not one per panel type - they used to read `0` on an MT wall, reporting every cable as a full shortfall
+- **Worth checking:** in that stock check five codes came back under a different name than this catalogue has for them - `12398` and `12399` (triangle and curve, which Rentman appears to have the other way round), and `12272`, `12274`, `12275` (a signal cable and two MT bracket parts, against this catalogue's glass floor cover, reinforcement bar and taper pin). The quantities above are as supplied; if those codes point at different items in Rentman, the codes are what needs correcting, not the numbers
 
 ## Recent Changes In v0.48.0
 
