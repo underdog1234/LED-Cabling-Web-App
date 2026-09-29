@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.42.0`
+Version `0.43.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -13,6 +13,8 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Select a **NovaStar processor model** (`VX1000 Pro` / `VX2000 Pro`), see its live pixel/port capacity vs. current usage, assign a video input per sub-screen or one input for the whole canvas, and generate a real, importable `.uprj` processor configuration file - validated against the selected processor's port count, per-port and total pixel limits, and canvas size, with a summary of what will be exported and any blocking errors or warnings before download
 - Import projects from the Creative Layout Tool
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected. The first panel of each signal chain shows its port number in a blue circle (top-left) and the first panel of each power chain shows its port number in an orange circle (top-right), in both the Panel Layout and the PDF Report. With **Do backup signal loop** enabled, the chain's last panel also shows the backup port number (the second half of the available signal ports, e.g. port 11 backs up port 1 on a 20-port setup) - the number of signal ports itself follows the selected NovaStar processor (10 for VX1000 Pro, 20 for VX2000 Pro, 20 if none is selected), and the backup half is hatched and unselectable in the Signal Patching panel
+- See every signal and power run drawn over the panels, routed around the panel text so no label is ever covered: signal is a plain line, power carries a single outline `>` where it enters each panel. Identical on screen and in the PDF
+- Hover any panel to read its **X / Y position** from the top-left corner of the layout, in mm and in content pixels
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
 - Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
@@ -21,6 +23,30 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.43.0
+
+**Signal and power cabling is drawn over the panels, and never over the text**
+
+- Cable runs now sit **in front of the panel graphics** instead of behind them. On a normal wall every panel touches its neighbours, so the old behind-the-panels runs were completely hidden - all you ever saw was an arrowhead on each seam, and those landed straight on top of the panel labels
+- The router keeps every run in the clear lanes a panel actually has: the strip **above the topmost label** for runs travelling left/right, and the **margin beside the centred text** for runs travelling up/down. Signal and power get a lane each, so the two never sit on top of one another either
+- **Signal is a plain line with no arrows at all.** **Power is a plain line with one outline `>`** where it enters each panel - drawn open, never a solid arrowhead, and never repeated along a run
+- Signal runs are drawn in a darker shade of their port colour. A signal run only ever crosses panels filled with its own port colour, so at full strength it was invisible now that it sits on top of them; the hue is unchanged, so a run still reads as that port's cable
+- **The Panel Layout pages of the PDF use exactly the same routing, line weights and `>` marks as the workspace**, so the two finally match
+- The port-number badges and the panel text are painted back over the cabling, so even where a run passes a badge the number stays readable
+
+**Panel text is sized to the panel it is in**
+
+- Panel labels were a fixed size, so they overflowed and overlapped once a panel got small - a zoomed-out workspace, or a narrow LED poster section, where the text was wider than the section itself
+- They now step down to whatever fits the panel clear of the cable lanes, and are dropped entirely below the point where there is nothing readable left to fit. **A full 0.5m panel at 100% zoom or more, and every panel in the PDF, keeps exactly the text size it always had**
+
+**Panel X / Y on hover**
+
+- Hovering a panel in the Panel Layout shows **X** and **Y** for that panel, measured from the **top-left corner of the whole layout**, in mm and in content pixels. Like the row/column reference numbers, the figures come from the layout's true geometry, so Front View doesn't renumber anything
+
+**Stray text gone from the PDF**
+
+- The Panel Layout pages printed a `CX ... CY ...` line inside each panel whenever sub-screens or output-canvas positioning were in use - raw output-canvas coordinates that meant nothing on a cabling drawing. It is gone; the hover readout above is where a panel's position lives now
 
 ## Recent Changes In v0.42.0
 
