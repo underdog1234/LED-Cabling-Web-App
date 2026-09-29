@@ -48,13 +48,13 @@ const GRID_GAP = 8;
 const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
-const POWER_COLOR = "#f97316";
+export const POWER_COLOR = "#f97316";
 // Chain-start (and backup-loop end) indicator outlines drawn alongside the
 // existing panel borders. Blue = first panel of a signal chain (and the last
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.43.0";
+const APP_VERSION = "0.44.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1236,55 +1236,79 @@ const getPanelSymbol = (cell: Cell) => {
 //
 // Every panel prints its labels centred and stacked upward from its bottom
 // edge, which leaves exactly two clear bands to cross it by - the strip above
-// the topmost label (`across`, used by runs travelling left/right) and the
-// narrow margin either side of the centred text (`beside`, used by runs
-// travelling up/down). Both are fractions of the panel's OWN width/height
-// measured from its top-left corner, so they hold at any zoom, panel size or
-// export scale, and giving signal and power a lane of their own in each band
-// is also what stops the two runs sitting on top of each other.
+// the topmost label (`across`) and the narrow margin beside the centred text
+// (`beside`). Each panel therefore gets ONE anchor point, where those two
+// bands meet, and every hop is a straight line (or a single 90-degree step)
+// between two anchors. Corners meet exactly, so a chain reads as one
+// continuous cable rather than a string of jogs.
 //
 // The numbers come from the worst case: a panel is 78px across in the PDF and
 // at 100% zoom on screen, and its widest label ("🔌 P20 (999)") takes about
-// 59px of that, stacked four lines deep on a rotated or shaped panel. That
-// leaves roughly 9px either side of the text and 23px above it, and these
-// fractions put both lanes inside it with a couple of px of clearance - from
-// the text, from the panel edge and from each other - at full stroke width.
-export const CABLE_LANE = {
-  signal: { across: 0.07, beside: 0.05 },
-  power: { across: 0.17, beside: 0.95 },
-} as const;
+// 59px of that, stacked four lines deep on a rotated or shaped panel.
+export const CABLE_LANE = { across: 0.12, beside: 0.04 } as const;
+
+// How far signal and power are pulled apart when they do NOT share a run. The
+// shift is the same in x and y, so a run that turns a corner still meets the
+// next run exactly, whichever way each of them travels.
+export const CABLE_SEPARATION = 2.25;
 
 // Cable stroke: a pale casing with the cable's own colour running down the
-// middle of it. White is what makes one run read everywhere it has to - over a
+// middle of it. White is what makes a run read everywhere it has to - over a
 // mid-tone panel fill, over the workspace's dark background where a run
 // crosses open space, and on the PDF's white paper, where the casing simply
 // disappears and leaves the coloured core.
-export const CABLE_STROKE = { casing: 5.5, core: 4, chevron: 8 } as const;
+export const CABLE_STROKE = { casing: 4.5, core: 2.5, chevron: 8 } as const;
 export const CABLE_CASING_COLOR = "#f8fafc";
 
-// Colour a cable run is drawn in. Now that runs are painted over the panels
-// rather than behind them, a signal run would otherwise be invisible: it only
-// ever crosses panels filled with its own port colour. Drawing it in a darker
-// shade of that colour keeps the hue - so a run still reads as "the port 3
-// cable" against the port swatches and the panel fills - while giving it
-// enough contrast to be followed across the wall. Power keeps its own colour,
-// which never matches a panel fill.
-export const cableColorFor = (kind: CableKind, color: string) => {
-  if (kind !== "signal") return color;
-  const hex = /^#([0-9a-f]{6})$/i.exec(color.trim());
-  if (!hex) return color;
-  const v = Number.parseInt(hex[1], 16);
-  const channel = (shift: number) => Math.round(((v >> shift) & 0xff) * 0.55);
-  return `#${((1 << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0)).toString(16).slice(1)}`;
+// Signal is ALWAYS this blue, whatever port it belongs to - the port is
+// already named by the panel fill and by the numbered badge on the chain's
+// first panel, and one colour per service is what makes a busy wall readable.
+// It is the same blue as the signal chain-start badge.
+export const SIGNAL_CABLE_COLOR = SIGNAL_START_COLOR;
+
+export type CableKind = "signal" | "power" | "both";
+export type CablePoint = { x: number; y: number };
+export type CableRoute = {
+  /** Orthogonal polyline for the hop, in the same px space as the rects. */
+  pts: CablePoint[];
+  /** Where the run crosses into the destination panel, and its heading there. */
+  entry: { x: number; y: number; angle: number } | null;
 };
+
+// How a run of each kind is stroked, outermost first. A hop that carries signal
+// AND power is drawn as ONE cable rather than a parallel pair: blue with the
+// power orange dashed over it, so a single line still says "both services run
+// here", and it gets a single direction mark instead of two.
+export const cableStrokes = (kind: CableKind, scale = 1): Array<{ color: string; width: number; dash?: number[] }> => [
+  { color: CABLE_CASING_COLOR, width: CABLE_STROKE.casing * scale },
+  { color: kind === "power" ? POWER_COLOR : SIGNAL_CABLE_COLOR, width: CABLE_STROKE.core * scale },
+  ...(kind === "both"
+    ? [{ color: POWER_COLOR, width: CABLE_STROKE.core * scale, dash: [6 * scale, 6 * scale] }]
+    : []),
+];
+
+// The one point on a panel every run of this kind starts and ends at.
+const cableAnchor = (r: RectMm, kind: CableKind): CablePoint => {
+  const shift = kind === "signal" ? -CABLE_SEPARATION : kind === "power" ? CABLE_SEPARATION : 0;
+  return { x: r.x + r.w * CABLE_LANE.beside + shift, y: r.y + r.h * CABLE_LANE.across + shift };
+};
+
+// Furthest a run of any kind reaches from its lane, including its direction
+// mark - what the label block has to stay clear of. See panelLabelFontPx.
+const CABLE_REACH = CABLE_SEPARATION + CABLE_STROKE.chevron * 0.71 + CABLE_STROKE.casing / 2;
+
+// How far a label block has to sit off its panel's bottom edge. An entry mark
+// straddles the edge it crosses, so it reaches this far back into the panel
+// the run is leaving - and that panel's own labels finish right about there.
+export const PANEL_LABEL_BOTTOM_PX = Math.ceil(CABLE_STROKE.chevron * 0.36 + CABLE_STROKE.casing / 2) + 1;
 
 // Largest label font (px) that still leaves a panel's label block clear of the
 // cable lanes. A panel can carry four lines (row/column, signal, power and a
 // shape/rotation symbol), centred and stacked up from the bottom edge, so the
 // block is bounded in both directions:
-//   - vertically it has to finish above the power lane, and a line costs
-//     `stackPerFont` px of font size on top of the block's fixed `stackFixed`
-//     padding and leading;
+//   - vertically it has to finish below the power lane and its entry mark, and
+//     a line costs `stackPerFont` px of font size on top of the block's fixed
+//     `stackFixed` padding and leading;
 //   - horizontally the widest label ("🔌 P20 (999)", about 5.9x the font size)
 //     has to stay inside the two side lanes.
 // Each renderer passes its own natural size and stack metrics, so a standard
@@ -1295,27 +1319,18 @@ export const cableColorFor = (kind: CableKind, color: string) => {
 // spilling it over the panel, its neighbours and the cabling.
 export const PANEL_LABEL_MIN_PX = 6;
 export const panelLabelFontPx = (w: number, h: number, max: number, stackPerFont: number, stackFixed: number) => {
-  const byHeight = (h * (1 - CABLE_LANE.power.across) - CABLE_STROKE.casing / 2 - stackFixed) / stackPerFont;
-  const byWidth = (w * (1 - 2 * CABLE_LANE.signal.beside) - CABLE_STROKE.casing) / 5.9;
+  const byHeight = (h * (1 - CABLE_LANE.across) - CABLE_REACH - stackFixed) / stackPerFont;
+  const byWidth = (w * (1 - 2 * CABLE_LANE.beside) - 2 * CABLE_SEPARATION - CABLE_STROKE.casing) / 5.9;
   const px = Math.floor(Math.min(max, byHeight, byWidth));
   return px >= PANEL_LABEL_MIN_PX ? px : 0;
-};
-
-export type CableKind = keyof typeof CABLE_LANE;
-export type CablePoint = { x: number; y: number };
-export type CableRoute = {
-  /** Orthogonal polyline for the hop, in the same px space as the rects. */
-  pts: CablePoint[];
-  /** Where the run crosses into the destination panel, and its heading there. */
-  entry: { x: number; y: number; angle: number } | null;
 };
 
 const pointInRect = (p: CablePoint, r: RectMm, tol = 0.01) =>
   p.x >= r.x - tol && p.x <= r.x + r.w + tol && p.y >= r.y - tol && p.y <= r.y + r.h + tol;
 
 // Where a route first crosses into `r` and which way it is heading at that
-// moment. This is the anchor for the power cable's single "enters here" mark,
-// so it has to be the boundary crossing rather than the segment's end point.
+// moment. This is the anchor for the run's single "enters here" mark, so it
+// has to be the boundary crossing rather than the segment's end point.
 const cableEntryInto = (pts: CablePoint[], r: RectMm): CableRoute["entry"] => {
   if (pts.length < 2) return null;
   for (let i = 1; i < pts.length; i += 1) {
@@ -1335,58 +1350,47 @@ const cableEntryInto = (pts: CablePoint[], r: RectMm): CableRoute["entry"] => {
   return null;
 };
 
-// Orthogonal (Manhattan) cable route between two panel rects in px space, from
-// the middle of panel `a` to the middle of panel `b` along that kind's lanes.
-// Returns a polyline with only horizontal/vertical segments and 90-degree
-// corners: a left/right hop runs straight along the `across` lane, and an
-// up/down hop steps out to the `beside` lane first so it passes the labels on
-// one side instead of straight through them.
+// Orthogonal (Manhattan) cable route between two panel rects in px space,
+// anchor to anchor. Panels in line with each other give a single straight
+// segment; anything else turns once, in the gap between the two panels, which
+// is the one place a step crosses no label.
 export const routeCablePx = (a: RectMm, b: RectMm, kind: CableKind): CableRoute => {
-  const lane = CABLE_LANE[kind];
+  const from = cableAnchor(a, kind);
+  const to = cableAnchor(b, kind);
   const aC = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
   const bC = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
-  const ay = a.y + a.h * lane.across;
-  const by = b.y + b.h * lane.across;
   let pts: CablePoint[];
   if (Math.abs(bC.x - aC.x) >= Math.abs(bC.y - aC.y)) {
-    if (Math.abs(ay - by) < 0.5) {
-      pts = [{ x: aC.x, y: ay }, { x: bC.x, y: by }];
+    if (Math.abs(from.y - to.y) < 0.5) {
+      pts = [from, { x: to.x, y: from.y }];
     } else {
-      // Panels on different lines: change lane in the gap between the facing
-      // edges, which is the one place a vertical step crosses no label.
       const rightward = bC.x >= aC.x;
       const midX = ((rightward ? a.x + a.w : a.x) + (rightward ? b.x : b.x + b.w)) / 2;
-      pts = [{ x: aC.x, y: ay }, { x: midX, y: ay }, { x: midX, y: by }, { x: bC.x, y: by }];
+      pts = [from, { x: midX, y: from.y }, { x: midX, y: to.y }, to];
     }
+  } else if (Math.abs(from.x - to.x) < 0.5) {
+    pts = [from, { x: from.x, y: to.y }];
   } else {
-    // The vertical leg has to sit inside BOTH panels to stay off the gaps, so
-    // it runs in the shared part of their widths - falling back to each
-    // panel's own margin when they don't overlap at all.
-    const overlapFrom = Math.max(a.x, b.x);
-    const overlapTo = Math.min(a.x + a.w, b.x + b.w);
-    const sideX =
-      overlapTo - overlapFrom > 1
-        ? overlapFrom + (overlapTo - overlapFrom) * lane.beside
-        : (a.x + a.w * lane.beside + b.x + b.w * lane.beside) / 2;
-    pts = [{ x: aC.x, y: ay }, { x: sideX, y: ay }, { x: sideX, y: by }, { x: bC.x, y: by }];
+    const downward = bC.y >= aC.y;
+    const midY = ((downward ? a.y + a.h : a.y) + (downward ? b.y : b.y + b.h)) / 2;
+    pts = [from, { x: from.x, y: midY }, { x: to.x, y: midY }, to];
   }
   pts = pts.filter((p, i) => i === 0 || Math.abs(p.x - pts[i - 1].x) > 0.01 || Math.abs(p.y - pts[i - 1].y) > 0.01);
   return { pts, entry: cableEntryInto(pts, b) };
 };
 
-// The three points of the outline ">" that marks where a power cable enters a
-// panel: it sits just inside the panel's edge, apex forward along the run and
-// both legs trailing back to the edge itself. Nudging it that far in is what
-// keeps the legs out of the panel BEHIND it, whose labels reach close to the
-// shared edge. Always stroked open, never filled - one per panel entered, and
-// none at all for signal (see the cable layers in the workspace and in
-// buildLayoutCanvas).
+// The three points of the outline ">" that marks where a run enters a panel:
+// apex just past the panel's edge, both legs trailing back across it, so the
+// mark straddles the crossing rather than sitting wholly inside either panel -
+// which is what keeps its corners off BOTH panels' labels, each of which
+// reaches close to the shared edge. Always stroked open, never filled - one per
+// panel entered, and one for a "both" run rather than one per service.
 export const cableChevronPoints = (entry: NonNullable<CableRoute["entry"]>, size: number): CablePoint[] => {
   const spread = Math.PI / 4;
   const back = entry.angle + Math.PI;
   const apex = {
-    x: entry.x + size * Math.cos(entry.angle) * 0.7,
-    y: entry.y + size * Math.sin(entry.angle) * 0.7,
+    x: entry.x + size * Math.cos(entry.angle) * 0.35,
+    y: entry.y + size * Math.sin(entry.angle) * 0.35,
   };
   return [
     { x: apex.x + size * Math.cos(back - spread), y: apex.y + size * Math.sin(back - spread) },
@@ -3259,66 +3263,69 @@ export default function App() {
         : "MG9";
   const fileSafePanelType = mg9Count > 0 && mtCount > 0 ? "MIX" : mtCount > 0 ? "MT" : "MG9";
 
-  // Every signal + power hop of the current patch, as routes in the px space a
-  // canvas/SVG renderer is working in. dispRectPx maps a panel to its rect in
-  // that space, so the workspace, the PDF and any other renderer all share one
-  // set of routes and therefore draw identical cabling.
-  const cableRoutesIn = (dispRectPx: (cell: Cell) => RectMm) => {
-    const routes: Array<{ key: string; kind: CableKind; color: string; route: CableRoute }> = [];
-    const addPath = (keyPrefix: string, path: Cell[] | undefined, kind: CableKind, color: string) => {
+  // Every hop of the current patch as one drawable run, in the px space a
+  // canvas/SVG renderer is working in. rectOf maps a panel to its rect in that
+  // space, so the workspace, the PDF and any other renderer share one set of
+  // routes and therefore draw identical cabling.
+  //
+  // Where a signal hop and a power hop join the same two panels the same way
+  // round, the two are emitted as a SINGLE "both" run - one line, one direction
+  // mark - instead of a parallel pair. On a wall patched with "Match Power To
+  // Signal Pattern" that is most of the cabling, and collapsing it is the
+  // single biggest thing keeping a complicated layout readable.
+  const cableRoutesIn = (rectOf: (cell: Cell) => RectMm) => {
+    type Hop = { from: Cell; to: Cell; signal: boolean; power: boolean };
+    const hops = new Map<string, Hop>();
+    const collect = (path: Cell[] | undefined, kind: "signal" | "power") => {
       if (!path || path.length < 2) return;
       for (let idx = 1; idx < path.length; idx += 1) {
-        routes.push({
-          key: `${keyPrefix}-${idx}`,
-          kind,
-          color: cableColorFor(kind, color),
-          route: routeCablePx(dispRectPx(path[idx - 1]), dispRectPx(path[idx]), kind),
-        });
+        const from = path[idx - 1];
+        const to = path[idx];
+        const key = `${from.id}>${to.id}`;
+        const hop = hops.get(key) ?? { from, to, signal: false, power: false };
+        hop[kind] = true;
+        hops.set(key, hop);
       }
     };
-    Object.entries(signalPortStats).forEach(([portId, stat]) => {
-      addPath(`sig-${portId}`, stat.path, "signal", PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length]);
+    Object.values(signalPortStats).forEach((stat) => collect(stat.path, "signal"));
+    powerPorts.forEach((port) => collect(powerPortStats[port.id]?.path, "power"));
+    return [...hops.entries()].map(([key, hop]) => {
+      const kind: CableKind = hop.signal && hop.power ? "both" : hop.signal ? "signal" : "power";
+      return { key, kind, route: routeCablePx(rectOf(hop.from), rectOf(hop.to), kind) };
     });
-    powerPorts.forEach((port) => {
-      addPath(`pow-${port.id}`, powerPortStats[port.id]?.path, "power", POWER_COLOR);
-    });
-    return routes;
   };
 
   // Cable runs, with a pale casing under the colour so they read over any panel
   // fill. Painted IN FRONT of the panel graphics (the routes keep themselves
-  // off the labels) and BEHIND the port-number badges and text.
-  // Signal is a plain line; power carries one outline ">" where it enters each
-  // panel, and nothing anywhere else along the run.
-  const drawCanvasCables = (ctx: CanvasRenderingContext2D, dispRectPx: (cell: Cell) => RectMm) => {
-    const routes = cableRoutesIn(dispRectPx);
+  // off the labels) and BEHIND the port-number badges and text. Every run
+  // carries one outline ">" where it enters each panel, and nothing anywhere
+  // else along it.
+  const drawCanvasCables = (ctx: CanvasRenderingContext2D, rectOf: (cell: Cell) => RectMm) => {
+    const routes = cableRoutesIn(rectOf);
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    const trace = (pts: CablePoint[]) => {
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let k = 1; k < pts.length; k += 1) ctx.lineTo(pts[k].x, pts[k].y);
+    const strokeAll = (pts: CablePoint[], kind: CableKind, scale: number) => {
+      cableStrokes(kind, scale).forEach(({ color, width, dash }) => {
+        ctx.setLineDash(dash ?? []);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let k = 1; k < pts.length; k += 1) ctx.lineTo(pts[k].x, pts[k].y);
+        ctx.stroke();
+      });
+      ctx.setLineDash([]);
     };
-    const strokeTwice = (pts: CablePoint[], color: string, casing: number, core: number) => {
-      ctx.strokeStyle = CABLE_CASING_COLOR;
-      ctx.lineWidth = casing;
-      trace(pts);
-      ctx.stroke();
-      ctx.strokeStyle = color;
-      ctx.lineWidth = core;
-      trace(pts);
-      ctx.stroke();
-    };
-    routes.forEach(({ color, route }) => {
+    routes.forEach(({ kind, route }) => {
       if (route.pts.length < 2) return;
-      strokeTwice(route.pts, color, CABLE_STROKE.casing, CABLE_STROKE.core);
+      strokeAll(route.pts, kind, 1);
     });
     // Every run first, then the entry marks, so a ">" is never buried under the
     // next hop's casing.
-    routes.forEach(({ kind, color, route }) => {
-      if (kind !== "power" || !route.entry) return;
-      strokeTwice(cableChevronPoints(route.entry, CABLE_STROKE.chevron), color, CABLE_STROKE.casing - 1, CABLE_STROKE.core - 0.5);
+    routes.forEach(({ kind, route }) => {
+      if (!route.entry) return;
+      strokeAll(cableChevronPoints(route.entry, CABLE_STROKE.chevron), kind, 1);
     });
     ctx.restore();
   };
@@ -3416,13 +3423,13 @@ export default function App() {
       // the cable lanes the router keeps its runs in (see CABLE_LANE). A full
       // 0.5m panel prints at CELL_SIZE here and keeps the usual 10px text; a
       // narrow LED poster section steps down to whatever still fits it.
-      const fontPx = panelLabelFontPx(r.w, r.h, 10, 4.9, 4);
+      const fontPx = panelLabelFontPx(r.w, r.h, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
       if (fontPx) {
         ctx.fillStyle = "#020617";
         ctx.font = `bold ${fontPx}px Arial`;
         ctx.textAlign = "center";
         const lineStep = Math.round(fontPx * 1.4);
-        let by = r.y + r.h - 4;
+        let by = r.y + r.h - PANEL_LABEL_BOTTOM_PX;
         const variantSymbol = getPanelSymbol(cell);
         if (variantSymbol) {
           ctx.fillText(variantSymbol, cx, by);
@@ -5741,44 +5748,41 @@ const exportJson = () => {
     };
   };
 
-  // Cable hops (one per adjacent panel pair) in display pixels. Built with the
-  // same shared router the PDF uses (see routeCablePx / CABLE_LANE), so the two
-  // renders show identical runs - drawn over the panel graphics, kept off the
-  // panel labels by the route itself, and never crossing each other because
-  // signal and power each have their own lane.
-  type CableHop = { key: string; kind: CableKind; color: string; route: CableRoute };
-  const cableHops: CableHop[] = [];
-  // Cables keep their full weight from 100% zoom up (the size the PDF uses) and
-  // thin out below it, so a zoomed-out wall doesn't disappear under its own
-  // cabling.
-  const cableScale = Math.min(1, Math.max(0.25, mmToPx(MODULE_MM) / CELL_SIZE));
-  const addCableHops = (keyPrefix: string, path: Cell[] | undefined, kind: CableKind, color: string) => {
-    if (!path || path.length < 2) return;
-    for (let idx = 1; idx < path.length; idx += 1) {
-      const a = rectToPx(displayRectOf(path[idx - 1]));
-      const b = rectToPx(displayRectOf(path[idx]));
-      cableHops.push({ key: `${keyPrefix}-${idx}`, kind, color: cableColorFor(kind, color), route: routeCablePx(a, b, kind) });
-    }
-  };
-  Object.entries(signalPortStats).forEach(([portId, stat]) => {
-    addCableHops(`sig-${portId}`, stat.path, "signal", PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length]);
-  });
-  powerPorts.forEach((port) => {
-    addCableHops(`pow-${port.id}`, powerPortStats[port.id]?.path, "power", POWER_COLOR);
-  });
-  // Direction marker for a POWER hop only: a single outline ">" sitting where
-  // the run crosses into the panel it feeds, drawn as an open stroke (casing
-  // underneath, cable colour on top) rather than a filled arrowhead. Signal
-  // runs carry no marker at all, and nothing is repeated along a run.
-  const cablePowerChevron = (hop: CableHop) => {
-    if (hop.kind !== "power" || !hop.route.entry) return null;
-    const points = cableChevronPoints(hop.route.entry, CABLE_STROKE.chevron * cableScale).map((p) => `${p.x},${p.y}`).join(" ");
-    return (
-      <g key={`pc-${hop.key}`}>
-        <polyline points={points} fill="none" stroke={CABLE_CASING_COLOR} strokeWidth={(CABLE_STROKE.casing - 1) * cableScale} strokeLinecap="round" strokeLinejoin="round" />
-        <polyline points={points} fill="none" stroke={hop.color} strokeWidth={(CABLE_STROKE.core - 0.5) * cableScale} strokeLinecap="round" strokeLinejoin="round" />
-      </g>
-    );
+  // Cable hops in display pixels, from the very same builder the PDF uses (see
+  // cableRoutesIn / routeCablePx), so the two renders show identical cabling:
+  // one run per hop, drawn over the panel graphics, kept off the panel labels
+  // by the route itself, and collapsed to a single "both" run wherever signal
+  // and power follow the same hop.
+  const cableScale = Math.min(1, Math.max(0.6, mmToPx(MODULE_MM) / CELL_SIZE));
+  const cableHops = cableRoutesIn((cell) => rectToPx(displayRectOf(cell)));
+
+  // One run, stroked outermost-first from the kind's own recipe.
+  const cableStrokeLayers = (key: string, pts: CablePoint[], kind: CableKind, scale: number) => (
+    pts.length < 2 ? null : (
+    <g key={key}>
+      {cableStrokes(kind, cableScale * scale).map(({ color, width, dash }, i) => (
+        <polyline
+          key={i}
+          points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+          fill="none"
+          stroke={color}
+          strokeWidth={width}
+          strokeDasharray={dash ? dash.join(" ") : undefined}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      ))}
+    </g>
+    )
+  );
+
+  // Direction marker: a single outline ">" sitting where the run crosses into
+  // the panel it feeds, drawn as an open stroke rather than a filled
+  // arrowhead. One per panel entered - and one, not two, where signal and
+  // power share the run.
+  const cableChevron = (hop: { key: string; kind: CableKind; route: CableRoute }) => {
+    if (!hop.route.entry) return null;
+    return cableStrokeLayers(`ch-${hop.key}`, cableChevronPoints(hop.route.entry, CABLE_STROKE.chevron * cableScale), hop.kind, 1);
   };
 
   return (
@@ -6813,35 +6817,16 @@ const exportJson = () => {
                     here is allowed to land on a panel label: routeCablePx keeps every
                     run in the clear lanes above / beside the centred label block, and
                     the port-number badges and label text are drawn back over the top in
-                    the overlay below. Each run is drawn twice - a wider pale casing
-                    underneath, then the cable's own colour on top.
-                    Signal runs are plain lines; power runs carry a single outline ">"
-                    where they enter each panel, and no marker anywhere else. */}
+                    the overlay below.
+
+                    Signal is always blue, power always orange, and a hop both of them
+                    share is ONE blue run with the power orange dashed over it rather
+                    than a parallel pair. Every run carries a single outline ">" where
+                    it enters each panel - one for a shared run, not two - and no marker
+                    anywhere else. */}
                 <svg className="pointer-events-none absolute inset-0 z-[33]" width={svgW} height={svgH}>
-                  {cableHops.map((hop) => {
-                    const pointStr = hop.route.pts.map((p) => `${p.x},${p.y}`).join(" ");
-                    return (
-                      <g key={`line-${hop.key}`}>
-                        <polyline
-                          points={pointStr}
-                          fill="none"
-                          stroke={CABLE_CASING_COLOR}
-                          strokeWidth={CABLE_STROKE.casing * cableScale}
-                          strokeLinejoin="round"
-                          strokeLinecap="round"
-                        />
-                        <polyline
-                          points={pointStr}
-                          fill="none"
-                          stroke={hop.color}
-                          strokeWidth={CABLE_STROKE.core * cableScale}
-                          strokeLinejoin="round"
-                          strokeLinecap="round"
-                        />
-                      </g>
-                    );
-                  })}
-                  {cableHops.map((hop) => cablePowerChevron(hop))}
+                  {cableHops.map((hop) => cableStrokeLayers(`line-${hop.key}`, hop.route.pts, hop.kind, 1))}
+                  {cableHops.map((hop) => cableChevron(hop))}
                 </svg>
 
                 {/* Panel TEXT + port-number badges, lifted out of the panel divs into
@@ -6890,7 +6875,8 @@ const exportJson = () => {
                   // smaller (or, once nothing readable fits, dropped entirely)
                   // on a zoomed-out workspace or a narrow poster section, where
                   // the old fixed size spilled out over the neighbours.
-                  const fontPx = panelLabelFontPx(rect.w, rect.h, 9, 5, 9.5);
+                  // 5.5 = the flex gaps + the 2px border the overlay carries.
+                  const fontPx = panelLabelFontPx(rect.w, rect.h, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5);
                   return (
                     <div
                       key={`labels-${cell.id}`}
@@ -6904,9 +6890,10 @@ const exportJson = () => {
                         border: "2px solid transparent",
                         color: "#020617",
                         fontSize: fontPx,
+                        paddingBottom: PANEL_LABEL_BOTTOM_PX - 2,
                         pointerEvents: "none",
                       }}
-                      className="flex select-none flex-col items-center justify-end gap-px p-0.5 font-semibold leading-tight tracking-tight"
+                      className="flex select-none flex-col items-center justify-end gap-px px-0.5 pt-0.5 font-semibold leading-tight tracking-tight"
                     >
                       {cornerBadges.map((b, i) => (
                         <div key={`cb-${i}`} style={{ ...badgeStyle, left: badgePad + i * (badgeD + badgePad), background: b.color }}>

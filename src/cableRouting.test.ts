@@ -1,12 +1,16 @@
 import { describe, it, expect } from "vitest";
 import {
   CABLE_LANE,
+  PANEL_LABEL_BOTTOM_PX,
+  CABLE_SEPARATION,
   CABLE_STROKE,
+  CABLE_CASING_COLOR,
+  POWER_COLOR,
+  SIGNAL_CABLE_COLOR,
   cableChevronPoints,
-  cableColorFor,
+  cableStrokes,
   panelLabelFontPx,
   routeCablePx,
-  PORT_COLORS,
   type CableKind,
 } from "./App";
 
@@ -15,21 +19,23 @@ import {
 // prints its labels centred and stacked up from the bottom edge, which leaves
 // the strip above the topmost label and the margin either side of the text as
 // the only places a run may cross a panel. These tests pin that down, plus the
-// styling rules the two renderers share: signal is a plain line, power carries
-// exactly one outline ">" per panel it enters.
+// styling rules the two renderers share: one colour per service, one run (not
+// two) where signal and power travel together, and one outline ">" per panel
+// entered.
 
 const panel = (x: number, y: number, size = 78) => ({ x, y, w: size, h: size });
 
 /**
  * Widest label block a panel can print, as a box inside the panel's rect: four
- * centred lines of the widest label there is, sitting 4px off the bottom edge.
+ * centred lines of the widest label there is, at its own distance off the
+ * bottom edge.
  * Deliberately the worst case in both directions - no real panel prints every
  * line at that width - so a route that clears this clears anything.
  */
 const labelBox = (r: { x: number; y: number; w: number; h: number }, fontPx: number) => {
   const textW = 5.9 * fontPx;
   const stackH = 4.9 * fontPx;
-  return { x: r.x + (r.w - textW) / 2, y: r.y + r.h - 4 - stackH, w: textW, h: stackH };
+  return { x: r.x + (r.w - textW) / 2, y: r.y + r.h - PANEL_LABEL_BOTTOM_PX - stackH, w: textW, h: stackH };
 };
 
 /** Does a stroked segment of `width` touch `box`? */
@@ -59,48 +65,57 @@ const routeHitsLabels = (
   fontPx: number,
 ) => {
   const { pts, entry } = routeCablePx(a, b, kind);
+  const widest = Math.max(...cableStrokes(kind).map((s) => s.width));
   const strokes: Array<[{ x: number; y: number }, { x: number; y: number }, number]> = [];
-  for (let i = 1; i < pts.length; i += 1) strokes.push([pts[i - 1], pts[i], CABLE_STROKE.casing]);
-  if (kind === "power" && entry) {
+  for (let i = 1; i < pts.length; i += 1) strokes.push([pts[i - 1], pts[i], widest]);
+  if (entry) {
     const chevron = cableChevronPoints(entry, CABLE_STROKE.chevron);
-    for (let i = 1; i < chevron.length; i += 1) strokes.push([chevron[i - 1], chevron[i], CABLE_STROKE.casing - 1]);
+    for (let i = 1; i < chevron.length; i += 1) strokes.push([chevron[i - 1], chevron[i], widest]);
   }
   return [a, b].some((rect) =>
     strokes.some(([from, to, width]) => segmentHitsBox(from, to, width, labelBox(rect, fontPx))),
   );
 };
 
+const KINDS: CableKind[] = ["signal", "power", "both"];
+
 describe("routeCablePx", () => {
   it("runs a straight line along the lane between panels side by side", () => {
-    const { pts } = routeCablePx(panel(0, 0), panel(78, 0), "signal");
+    const { pts } = routeCablePx(panel(0, 0), panel(78, 0), "both");
+    const laneY = 78 * CABLE_LANE.across;
+    const laneX = 78 * CABLE_LANE.beside;
     expect(pts).toEqual([
-      { x: 39, y: 78 * CABLE_LANE.signal.across },
-      { x: 117, y: 78 * CABLE_LANE.signal.across },
+      { x: laneX, y: laneY },
+      { x: 78 + laneX, y: laneY },
     ]);
   });
 
   it("is visible between touching panels rather than collapsing onto their shared edge", () => {
     // The old edge-to-edge router produced a zero-length hop for a contiguous
     // wall, which is exactly the case every LED wall is made of.
-    for (const kind of ["signal", "power"] as CableKind[]) {
-      const { pts } = routeCablePx(panel(0, 0), panel(78, 0), kind);
-      const length = pts.slice(1).reduce((sum, p, i) => sum + Math.hypot(p.x - pts[i].x, p.y - pts[i].y), 0);
-      expect(length).toBeGreaterThan(70);
+    for (const kind of KINDS) {
+      for (const [dx, dy] of [[78, 0], [0, 78]] as Array<[number, number]>) {
+        const { pts } = routeCablePx(panel(0, 0), panel(dx, dy), kind);
+        const length = pts.slice(1).reduce((sum, p, i) => sum + Math.hypot(p.x - pts[i].x, p.y - pts[i].y), 0);
+        expect(length).toBeGreaterThan(70);
+      }
     }
   });
 
-  it("steps out to the side lane before running up or down", () => {
-    const { pts } = routeCablePx(panel(0, 0), panel(0, 78), "signal");
-    const sideX = 78 * CABLE_LANE.signal.beside;
-    expect(pts).toEqual([
-      { x: 39, y: 78 * CABLE_LANE.signal.across },
-      { x: sideX, y: 78 * CABLE_LANE.signal.across },
-      { x: sideX, y: 78 + 78 * CABLE_LANE.signal.across },
-      { x: 39, y: 78 + 78 * CABLE_LANE.signal.across },
-    ]);
+  it("meets itself exactly where a chain turns a corner", () => {
+    // One anchor per panel, shifted by the same amount in x and y, so the run
+    // arriving at a panel ends on the very point the next run leaves from -
+    // no step, whichever way either of them travels.
+    for (const kind of KINDS) {
+      const corner = panel(78, 0);
+      const arriving = routeCablePx(panel(0, 0), corner, kind).pts;
+      const leaving = routeCablePx(corner, panel(78, 78), kind).pts;
+      const end = arriving[arriving.length - 1];
+      expect(Math.hypot(end.x - leaving[0].x, end.y - leaving[0].y)).toBeLessThan(0.01);
+    }
   });
 
-  it("keeps signal and power apart on every hop direction", () => {
+  it("keeps signal and power apart wherever they do not share the hop", () => {
     const pairs: Array<[ReturnType<typeof panel>, ReturnType<typeof panel>]> = [
       [panel(0, 0), panel(78, 0)],
       [panel(78, 0), panel(0, 0)],
@@ -112,9 +127,7 @@ describe("routeCablePx", () => {
       const power = routeCablePx(a, b, "power").pts;
       for (const s of signal) {
         for (const p of power) {
-          // Same point would mean the two runs meet; they share end x/y only
-          // because both start and finish at a panel's centre line.
-          expect(Math.hypot(s.x - p.x, s.y - p.y)).toBeGreaterThan(CABLE_STROKE.casing / 2);
+          expect(Math.hypot(s.x - p.x, s.y - p.y)).toBeGreaterThanOrEqual(CABLE_STROKE.casing - 0.01);
         }
       }
     }
@@ -122,30 +135,31 @@ describe("routeCablePx", () => {
 
   it("never lays a run or its entry mark over a panel's labels", () => {
     const offsets: Array<[number, number]> = [
-      [78, 0], [-78, 0], [0, 78], [0, -78], [156, 0], [0, 156], [156, 78],
+      [78, 0], [-78, 0], [0, 78], [0, -78], [156, 0], [0, 156], [156, 78], [-156, -78],
     ];
-    for (const kind of ["signal", "power"] as CableKind[]) {
+    for (const kind of KINDS) {
       for (const [dx, dy] of offsets) {
         const a = panel(200, 200);
         const b = panel(200 + dx, 200 + dy);
-        const fontPx = panelLabelFontPx(a.w, a.h, 10, 4.9, 4);
+        const fontPx = panelLabelFontPx(a.w, a.h, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
         expect({ kind, dx, dy, hit: routeHitsLabels(a, b, kind, fontPx) }).toEqual({ kind, dx, dy, hit: false });
       }
     }
   });
 
-  it("marks where a power run enters the panel it feeds, pointing the way it travels", () => {
-    const right = routeCablePx(panel(0, 0), panel(78, 0), "power").entry;
-    expect(right).toEqual({ x: 78, y: 78 * CABLE_LANE.power.across, angle: 0 });
+  it("marks where a run enters the panel it feeds, pointing the way it travels", () => {
+    const laneY = 78 * CABLE_LANE.across;
+    const right = routeCablePx(panel(0, 0), panel(78, 0), "both").entry;
+    expect(right).toEqual({ x: 78, y: laneY, angle: 0 });
 
-    const left = routeCablePx(panel(78, 0), panel(0, 0), "power").entry;
-    expect(left).toEqual({ x: 78, y: 78 * CABLE_LANE.power.across, angle: Math.PI });
+    const left = routeCablePx(panel(78, 0), panel(0, 0), "both").entry;
+    expect(left).toEqual({ x: 78, y: laneY, angle: Math.PI });
 
-    const down = routeCablePx(panel(0, 0), panel(0, 78), "power").entry;
+    const down = routeCablePx(panel(0, 0), panel(0, 78), "both").entry;
     expect(down?.y).toBe(78);
     expect(down?.angle).toBeCloseTo(Math.PI / 2);
 
-    const up = routeCablePx(panel(0, 78), panel(0, 0), "power").entry;
+    const up = routeCablePx(panel(0, 78), panel(0, 0), "both").entry;
     expect(up?.y).toBe(78);
     expect(up?.angle).toBeCloseTo(-Math.PI / 2);
   });
@@ -157,14 +171,39 @@ describe("routeCablePx", () => {
   });
 });
 
+describe("cableStrokes", () => {
+  it("draws signal blue and power orange, whatever port they belong to", () => {
+    expect(cableStrokes("signal").map((s) => s.color)).toEqual([CABLE_CASING_COLOR, SIGNAL_CABLE_COLOR]);
+    expect(cableStrokes("power").map((s) => s.color)).toEqual([CABLE_CASING_COLOR, POWER_COLOR]);
+  });
+
+  it("draws a shared hop as one cable carrying both, not two side by side", () => {
+    const both = cableStrokes("both");
+    expect(both.map((s) => s.color)).toEqual([CABLE_CASING_COLOR, SIGNAL_CABLE_COLOR, POWER_COLOR]);
+    // The power pass is dashed, so the single run reads as blue-and-orange
+    // rather than hiding the signal underneath it.
+    expect(both[1].dash).toBeUndefined();
+    expect(both[2].dash?.length).toBe(2);
+    // ...and it is no wider than a run of one service on its own.
+    expect(Math.max(...both.map((s) => s.width))).toBe(Math.max(...cableStrokes("signal").map((s) => s.width)));
+  });
+
+  it("scales every pass together", () => {
+    const half = cableStrokes("both", 0.5);
+    expect(half.map((s) => s.width)).toEqual(cableStrokes("both", 1).map((s) => s.width / 2));
+    expect(half[2].dash).toEqual([3, 3]);
+  });
+});
+
 describe("cableChevronPoints", () => {
-  it("is an open '>' pointing the way the run travels, just inside the panel it enters", () => {
+  it("is an open '>' pointing the way the run travels, straddling the edge it crosses", () => {
     const [back1, apex, back2] = cableChevronPoints({ x: 100, y: 50, angle: 0 }, 10);
-    // Apex ahead of the crossing point, legs back at the panel's own edge.
+    // Apex just past the crossing point, legs just short of it, so the mark
+    // sits ON the edge rather than wholly inside either panel.
     expect(apex.x).toBeGreaterThan(100);
-    expect(back1.x).toBeLessThan(apex.x);
-    expect(back2.x).toBeLessThan(apex.x);
-    expect(Math.min(back1.x, back2.x)).toBeGreaterThan(99);
+    expect(back1.x).toBeLessThan(100);
+    expect(back2.x).toBeLessThan(100);
+    expect(Math.min(back1.x, back2.x)).toBeGreaterThan(100 - 10 / 2);
     // One leg either side of the run.
     expect(Math.sign(back1.y - apex.y)).toBe(-Math.sign(back2.y - apex.y));
     // Three points, so it can only ever be stroked open - never filled into a
@@ -173,34 +212,27 @@ describe("cableChevronPoints", () => {
   });
 });
 
-describe("cableColorFor", () => {
-  it("darkens a signal run so it reads over panels filled with its own port colour", () => {
-    expect(cableColorFor("signal", "#48d7d2")).toBe("#287674");
-    expect(cableColorFor("signal", PORT_COLORS[0])).not.toBe(PORT_COLORS[0]);
-  });
-
-  it("leaves power alone - its colour never matches a panel fill", () => {
-    expect(cableColorFor("power", "#f97316")).toBe("#f97316");
-  });
-});
-
 describe("panelLabelFontPx", () => {
   it("keeps the sizes both renderers have always used on a full panel", () => {
-    expect(panelLabelFontPx(78, 78, 9, 5, 9.5)).toBe(9); // workspace at 100% zoom
-    expect(panelLabelFontPx(78, 78, 10, 4.9, 4)).toBe(10); // PDF
+    expect(panelLabelFontPx(78, 78, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5)).toBe(9); // workspace at 100% zoom
+    expect(panelLabelFontPx(78, 78, 10, 4.9, PANEL_LABEL_BOTTOM_PX)).toBe(10); // PDF
   });
 
   it("never grows past the renderer's own size on a big panel", () => {
-    expect(panelLabelFontPx(234, 234, 9, 5, 9.5)).toBe(9);
+    expect(panelLabelFontPx(234, 234, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5)).toBe(9);
   });
 
   it("steps down on a panel too narrow for the text, like a poster section", () => {
-    const poster = panelLabelFontPx(49.9, 74.9, 10, 4.9, 4);
+    const poster = panelLabelFontPx(49.9, 74.9, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
     expect(poster).toBeGreaterThan(0);
     expect(poster).toBeLessThan(10);
   });
 
   it("gives up rather than spill text over a panel that is too small for any of it", () => {
-    expect(panelLabelFontPx(39, 39, 9, 5, 9.5)).toBe(0);
+    expect(panelLabelFontPx(39, 39, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5)).toBe(0);
+  });
+
+  it("leaves room for the separation between an unshared signal and power run", () => {
+    expect(CABLE_SEPARATION * 2).toBeGreaterThanOrEqual(CABLE_STROKE.casing);
   });
 });

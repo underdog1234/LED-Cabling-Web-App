@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.43.0`
+Version `0.44.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -13,7 +13,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Select a **NovaStar processor model** (`VX1000 Pro` / `VX2000 Pro`), see its live pixel/port capacity vs. current usage, assign a video input per sub-screen or one input for the whole canvas, and generate a real, importable `.uprj` processor configuration file - validated against the selected processor's port count, per-port and total pixel limits, and canvas size, with a summary of what will be exported and any blocking errors or warnings before download
 - Import projects from the Creative Layout Tool
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected. The first panel of each signal chain shows its port number in a blue circle (top-left) and the first panel of each power chain shows its port number in an orange circle (top-right), in both the Panel Layout and the PDF Report. With **Do backup signal loop** enabled, the chain's last panel also shows the backup port number (the second half of the available signal ports, e.g. port 11 backs up port 1 on a 20-port setup) - the number of signal ports itself follows the selected NovaStar processor (10 for VX1000 Pro, 20 for VX2000 Pro, 20 if none is selected), and the backup half is hatched and unselectable in the Signal Patching panel
-- See every signal and power run drawn over the panels, routed around the panel text so no label is ever covered: signal is a plain line, power carries a single outline `>` where it enters each panel. Identical on screen and in the PDF
+- See every signal and power run drawn over the panels, routed around the panel text so no label is ever covered. **Signal is always blue, power always orange**, and a hop both of them share is drawn as **one cable, with one arrow**, rather than a parallel pair. Every run carries a single outline `>` where it enters each panel. Identical on screen and in the PDF
 - Hover any panel to read its **X / Y position** from the top-left corner of the layout, in mm and in content pixels
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
@@ -23,6 +23,17 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.44.0
+
+**Cabling is far easier to follow on a complicated layout**
+
+- **Signal is always blue and power always orange**, whatever port they belong to. The port is already named by the panel fill and by the numbered badge on the chain's first panel, so one colour per service is worth more than twelve colours per port once a wall gets busy
+- **Where signal and power run between the same two panels, they are now drawn as ONE cable, with ONE arrow** - a blue run with the power orange dashed over it - instead of two lines side by side. On a wall patched with **Match Power To Signal Pattern** that is almost all of the cabling (about nine out of ten hops on the 141-panel test layout), so the drawing has roughly half as many lines on it
+- Where the two genuinely do part company they stay separate, side by side, exactly as before
+- **Signal runs now carry direction arrows too** - the same single outline `>` where the run enters each panel that power already had. One per panel entered, one for a shared run, and never repeated along a run
+- **Runs no longer zigzag.** Each panel now has one anchor point where the two clear bands of the panel meet, so a hop is a straight line between anchors and a chain that turns a corner meets itself exactly, instead of stepping out to a side lane and back on every vertical hop
+- Cable lines are a little finer, and thin down further as you zoom out, so a wall no longer disappears under its own cabling at **Fit to View**
 
 ## Recent Changes In v0.43.0
 
