@@ -25,7 +25,16 @@ import {
   applyPanelFrame,
   tracePanelShapePath,
 } from "../App";
-import { activeBBox, bandPanels, bandPanelsByColumn, type RectMm } from "../model/panels";
+import {
+  activeBBox,
+  gridRefLabel,
+  mirrorGridRef,
+  panelFramePoint,
+  panelGridRefs,
+  panelShapeLabelPoint,
+  panelShapeNeedsInsetLabel,
+  type RectMm,
+} from "../model/panels";
 
 export type TestPatternProject = {
   projectName: string;
@@ -92,7 +101,7 @@ export type TestPatternLayout = {
   tileHeightPx: number;
   /** Independently-animating surfaces (one per sub-screen, or a single whole-wall entry). Every active panel appears in exactly one. */
   surfaces: TestPatternSurface[];
-  rowLabel: (cell: Cell) => number;
+  rowLabel: (cell: Cell) => string;
   colLabel: (cell: Cell) => string;
 };
 
@@ -237,16 +246,12 @@ export function getContentPixelHeight(panels: Cell[], H: number): number {
 export const computeTestPatternLayout = (project: TestPatternProject): TestPatternLayout => {
   const activePanels = project.panels.filter((cell) => isPanelHead(cell));
   const wallBBox = activeBBox(activePanels.map(cellRect));
-  const panelBands = bandPanels(activePanels, cellRect) as Cell[][];
-  const bandIndexById = new Map<string, number>();
-  panelBands.forEach((band, index) => band.forEach((cell) => bandIndexById.set(cell.id, index)));
-  // Column bands, back-view left->right (see bandPanelsByColumn's own
-  // comment for why this replaced dividing raw x-position by the fixed
-  // 500mm MODULE_MM - that silently counted each 1000mm-wide MT panel as 2
-  // columns instead of 1).
-  const columnBands = bandPanelsByColumn(activePanels, cellRect) as Cell[][];
-  const columnIndexById = new Map<string, number>();
-  columnBands.forEach((band, index) => band.forEach((cell) => columnIndexById.set(cell.id, index)));
+  // Row/column references come off the wall's own module grid, so a panel
+  // sitting half a module out reads as the two rows it really straddles
+  // rather than inventing a row of its own (see panelGridRefs). This
+  // replaced banding panels into rows and columns by proximity, which gave
+  // such a panel a row of its own and shifted every number after it.
+  const gridRefs = panelGridRefs(activePanels, cellRect);
 
   // Each panel's TRUE native-resolution pixel rect (back view, unmirrored):
   // its own pixW x pixH from PANEL_TYPES (e.g. MT is 256x64, NOT a
@@ -365,8 +370,12 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     contentPixelH,
     panelPixelRects,
     totalPanels: activePanels.length,
-    activeColsCount: columnBands.length,
-    activeRowsCount: panelBands.length,
+    // The rows and columns of the wall's own module grid, the same ones the
+    // panel labels count off - NOT the band counts, which split a panel set
+    // half a module out into a band of its own and so report a stepped wall
+    // as taller and wider than anyone reading the labels would call it.
+    activeColsCount: gridRefs.cols,
+    activeRowsCount: gridRefs.rows,
     wallWidthM: wallBBox.w / 1000,
     wallHeightM: wallBBox.h / 1000,
     projectName: (project.projectName || "").trim(),
@@ -374,17 +383,12 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     tileWidthPx,
     tileHeightPx,
     surfaces,
-    rowLabel: (cell) => (bandIndexById.get(cell.id) ?? 0) + 1,
+    rowLabel: (cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.rows),
     // Column numbers must read from the FRONT (the pattern is always
     // rendered mirrored - see dispRectPx below), not the panel's raw
     // back-view column - otherwise the printed number doesn't match the
-    // column the audience actually sees it in. columnIndexById is ordered
-    // back-view left->right (0-based), so the back-view RIGHTMOST band
-    // (highest index) is the FRONT-view leftmost, i.e. column 1.
-    colLabel: (cell) => {
-      const backIndex = columnIndexById.get(cell.id) ?? 0;
-      return String(columnBands.length - backIndex);
-    },
+    // column the audience actually sees it in.
+    colLabel: (cell) => gridRefLabel(mirrorGridRef(gridRefs.refs.get(cell.id)?.cols, gridRefs.cols)),
   };
 };
 
@@ -815,22 +819,58 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     }
     ctx.restore();
 
-    // Location label: top-left corner, two lines (row then column), always
-    // axis-aligned/white/upright regardless of the panel's own rotation. Each
-    // line is a vector direction-arrow icon followed by the row/column number.
+    // Location label: two lines (row then column), always axis-aligned, white
+    // and upright regardless of the panel's own rotation. Each line is a
+    // vector direction-arrow icon followed by the row/column number.
+    //
+    // A rectangular panel keeps it in the top-left corner, where it has
+    // always been. A TRIANGLE or QUARTER CIRCLE does not: that corner is the
+    // thin tip of the shape, or outside it altogether, so the label sat half
+    // off the panel and was cut away with it. Those are anchored on the
+    // shape's own centre of area instead, mapped through the panel's rotation
+    // and the front-view mirror so it follows the shape whichever way round
+    // the panel is, with the block centred on it - which keeps the whole
+    // label on the lit part of the panel at every rotation.
+    const shaped = panelShapeNeedsInsetLabel(shape);
     const pad = Math.max(3, Math.round(Math.min(r.w, r.h) * 0.06));
-    const fontPx = Math.max(6, Math.floor(Math.min(r.w, r.h) * 0.08));
-    const lineH = Math.round(fontPx * 1.15);
-    const iconSize = fontPx;
-    const textX = r.x + pad + iconSize + Math.max(2, Math.round(fontPx * 0.25));
+    const rowText = layout.rowLabel(cell);
+    const colText = layout.colLabel(cell);
     ctx.fillStyle = "#ffffff";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    ctx.font = `bold ${fontPx}px Arial`;
-    drawDirectionArrow(ctx, r.x + pad, r.y + pad, iconSize, "down");
-    ctx.fillText(`${layout.rowLabel(cell)}`, textX, r.y + pad);
-    drawDirectionArrow(ctx, r.x + pad, r.y + pad + lineH, iconSize, "right");
-    ctx.fillText(`${layout.colLabel(cell)}`, textX, r.y + pad + lineH);
+    let fontPx = Math.max(6, Math.floor(Math.min(r.w, r.h) * 0.08));
+    const blockWidth = () => {
+      ctx.font = `bold ${fontPx}px Arial`;
+      const gap = Math.max(2, Math.round(fontPx * 0.25));
+      return fontPx + gap + Math.max(ctx.measureText(rowText).width, ctx.measureText(colText).width);
+    };
+    let width = blockWidth();
+    if (shaped) {
+      // Only about half the width of a shaped panel is solid where the label
+      // sits, so a long reference ("12 & 13") is shrunk to fit rather than
+      // hung over the edge.
+      const budget = Math.min(r.w, r.h) * 0.46;
+      if (width > budget) {
+        fontPx = Math.max(6, Math.floor((fontPx * budget) / width));
+        width = blockWidth();
+      }
+    }
+    const lineH = Math.round(fontPx * 1.15);
+    const iconSize = fontPx;
+    const gap = Math.max(2, Math.round(fontPx * 0.25));
+    let blockX = r.x + pad;
+    let blockY = r.y + pad;
+    if (shaped) {
+      const local = panelShapeLabelPoint(shape, r.w, r.h);
+      const anchor = panelFramePoint(r, rotation, true, local.x, local.y);
+      blockX = anchor.x - width / 2;
+      blockY = anchor.y - lineH;
+    }
+    const textX = blockX + iconSize + gap;
+    drawDirectionArrow(ctx, blockX, blockY, iconSize, "down");
+    ctx.fillText(rowText, textX, blockY);
+    drawDirectionArrow(ctx, blockX, blockY + lineH, iconSize, "right");
+    ctx.fillText(colText, textX, blockY + lineH);
   });
   });
 

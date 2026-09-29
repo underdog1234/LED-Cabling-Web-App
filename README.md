@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.47.0`
+Version `0.48.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -15,6 +15,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected. The first panel of each signal chain shows its port number in a blue circle (top-left) and the first panel of each power chain shows its port number in an orange circle (top-right), in both the Panel Layout and the PDF Report. With **Do backup signal loop** enabled, the chain's last panel also shows the backup port number (the second half of the available signal ports, e.g. port 11 backs up port 1 on a 20-port setup) - the number of signal ports itself follows the selected NovaStar processor (10 for VX1000 Pro, 20 for VX2000 Pro, 20 if none is selected), and the backup half is hatched and unselectable in the Signal Patching panel
 - See every signal and power run drawn over the panels, routed around the panel text so no label is ever covered. **Signal is always blue, power always orange**, and a hop both of them share is drawn as **one cable, with one arrow**, rather than a parallel pair. Every run carries a single outline `>` where it enters each panel. Identical on screen and in the PDF
 - Hover any panel to read its **X / Y position** from the top-left corner of the layout, in mm and in content pixels
+- Every panel carries its **row and column reference**, counted off the wall's own module grid - so a panel set half a module out reads as `row 5 & 6` instead of throwing the numbering of everything after it
 - Flip the panel layout between `Back View` and `Front View`
 - The PDF report carries an **Output Canvas page** - the full canvas resolution, every screen drawn to scale where it sits on it, and the same numbers as a table - plus a **key** on both Panel Layout views explaining every mark on the drawing
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
@@ -27,6 +28,23 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.48.0
+
+**Row and column numbers a stepped wall can actually use**
+
+- Row and column references are now read off the **wall's own module grid** rather than by grouping panels that happen to line up. A panel dropped half a module out used to be given a row of its own, so a three-high wall counted as five rows and **every number after that panel was wrong**
+- A panel that straddles two rows now says so: **`row 5 & 6`**, the way a crew would say it on site. A panel spanning more than two reads as a range (`3-5`), and every panel that does sit on the grid keeps the number it always had
+- The grid's cell size follows what the wall is mostly built from, so a wall of 1m-wide `MT` panels still numbers them 1, 2, 3 - not 1&2, 3&4
+- The same numbers now appear everywhere they are read: on the panel in the workspace, in the PNG and moving test patterns, on the PDF layout pages, and in the signal/power chain columns (`R1 C1 -> R3 C1`)
+- The reported wall size follows them too - **"Panels: 141 active across 8 rows x 37 columns"** - so the header and the panel labels can no longer disagree, and it matches the Active support span beside it
+
+**Panel text stays on the panel**
+
+- On a **triangle** or **quarter circle**, one corner of the panel's rectangle is empty. The label was drawn there regardless, so in the PNG exports it fell outside the shape - cut off with it, or sitting over the panel next door
+- Shaped panels now place their text **inside the silhouette**, on a point that turns with the panel, so it lands on the lit area at every rotation and in both front and back views
+- In the PDF, the text still starts at the **foot of the panel**, where the cable router already leaves it room; it only moves inward - shrinking to fit first - when the foot of that shape has nothing to sit on, such as a triangle standing on its point
+- Rectangular and corner panels are untouched
 
 ## Recent Changes In v0.47.0
 

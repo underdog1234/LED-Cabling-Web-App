@@ -87,7 +87,7 @@ describe("computeTestPatternLayout column/row numbering reads from the front", (
     // mirror, the panel with the LARGEST back-view x (rightmost when
     // standing behind the wall becomes leftmost from the front).
     const topLeft = grid.reduce((best, c) => (c.y === 0 && c.x > best.x ? c : best), grid.find((c) => c.y === 0)!);
-    expect(layout.rowLabel(topLeft)).toBe(1);
+    expect(layout.rowLabel(topLeft)).toBe("1");
     expect(layout.colLabel(topLeft)).toBe("1");
 
     // Rendered top-right (back-view leftmost, x=0) must read column 4 (the
@@ -97,7 +97,7 @@ describe("computeTestPatternLayout column/row numbering reads from the front", (
 
     // Bottom row (largest y) must still read the highest row number.
     const bottomLeft = grid.reduce((best, c) => (c.y > best.y ? c : c.y === best.y && c.x > best.x ? c : best), grid[0]);
-    expect(layout.rowLabel(bottomLeft)).toBe(3);
+    expect(layout.rowLabel(bottomLeft)).toBe("3");
   });
 
   // Regression coverage for a real bug: column numbers were computed by

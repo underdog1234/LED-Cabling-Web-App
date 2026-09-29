@@ -11,6 +11,14 @@ import {
   bandPanels,
   bandPanelsByColumn,
   computeAnchorSnapDelta,
+  gridRefLabel,
+  panelFramePoint,
+  panelGridRefs,
+  panelLabelAnchor,
+  panelLabelBlockFits,
+  panelLabelBlockFitsAt,
+  panelShapeLabelPoint,
+  panelShapeNeedsInsetLabel,
   connectedGroupsByGeom,
   findOverlaps,
   joinedGroupIdsByGeom,
@@ -61,7 +69,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.47.0";
+const APP_VERSION = "0.48.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -2552,30 +2560,23 @@ export default function App() {
       return [{ id: screen.id, name: screen.name, color: normalizeSubScreenColor(screen.color, index), bbox }];
     });
   }, [subScreens, activePanels]);
-  // Visual row bands (top->bottom, left->right) drive snake order, pixel maths,
-  // the PNG test pattern, and row labels for non-uniform layouts.
+  // Visual row bands (top->bottom, left->right) drive snake order and pixel
+  // maths. They are NOT what the row/column labels count - see gridRefs.
   const panelBands = useMemo(() => bandPanels(activePanels, cellRect) as Cell[][], [activePanels]);
-  const bandIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    panelBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
-    return map;
-  }, [panelBands]);
-  // Visual column bands (left->right, top->bottom) for panelColLabel - see
-  // bandPanelsByColumn's own comment for why this replaced dividing raw
-  // x-position by the fixed 500mm MODULE_MM (silently counted each
-  // 1000mm-wide MT panel as 2 columns instead of 1).
-  const columnBands = useMemo(() => bandPanelsByColumn(activePanels, cellRect) as Cell[][], [activePanels]);
-  const columnIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    columnBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
-    return map;
-  }, [columnBands]);
   // The panel reference shown on the panel itself in the workspace, the PNG
   // test pattern and the PDF layout pages ("row 3, column 5"), as one short
   // string. Exports that need to name a specific panel use THIS - never the
   // internal cell id, which means nothing to anyone reading a report.
-  const panelRefLabel = (cell: Cell) =>
-    `R${(bandIndexById.get(cell.id) ?? 0) + 1} C${(columnIndexById.get(cell.id) ?? 0) + 1}`;
+  // Where each panel stands on the wall's own module grid. Kept apart from
+  // the bands above: those pack panels together for the processor's cabinet
+  // topology and must stay that way, while these are the reference numbers a
+  // person reads off the drawing - and on a wall with panels half a module
+  // out, the two are not the same thing (see panelGridRefs).
+  const gridRefs = useMemo(() => panelGridRefs(activePanels, cellRect), [activePanels]);
+  const panelRefLabel = (cell: Cell) => {
+    const ref = gridRefs.refs.get(cell.id);
+    return `R${gridRefLabel(ref?.rows)} C${gridRefLabel(ref?.cols)}`;
+  };
   const panelRefLabelById = (id: string | null | undefined) => {
     const cell = id ? findCellById(grid, id) : null;
     return cell ? panelRefLabel(cell) : "-";
@@ -2697,7 +2698,16 @@ export default function App() {
     });
     return occupied.size;
   }, [activePanels, wallBBox]);
-  const activeRowsCount = panelBands.length;
+  const activeRowsCount = useMemo(() => {
+    const occupied = new Set<number>();
+    activePanels.forEach((cell) => {
+      const r = cellRect(cell);
+      const first = Math.floor((r.y - wallBBox.y) / MODULE_MM);
+      const last = Math.ceil((r.y + r.h - wallBBox.y) / MODULE_MM) - 1;
+      for (let i = first; i <= last; i += 1) occupied.add(i);
+    });
+    return occupied.size;
+  }, [activePanels, wallBBox]);
   const activeWallWidthM = wallBBox.w / 1000;
   const activeWallHeightM = wallBBox.h / 1000;
   // Per-type totals: each panel contributes its own weight and power draw.
@@ -3607,27 +3617,66 @@ export default function App() {
       // the cable lanes the router keeps its runs in (see CABLE_LANE). A full
       // 0.5m panel prints at CELL_SIZE here and keeps the usual 10px text; a
       // narrow LED poster section steps down to whatever still fits it.
-      const fontPx = panelLabelFontPx(r.w, r.h, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
+      let fontPx = panelLabelFontPx(r.w, r.h, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
       if (fontPx) {
+        // Bottom line first - the stack is built upward from the foot of the
+        // panel, so the symbol sits at the bottom and the reference on top.
+        const variantSymbol = getPanelSymbol(cell);
+        const lines: string[] = [];
+        if (variantSymbol) lines.push(variantSymbol);
+        if (cell.assignedPowerPort) lines.push(`⚡ Plug ${cell.assignedPowerPort}`);
+        if (cell.assignedPort) lines.push(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`);
+        lines.push(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`);
+        // Gap ABOVE each line, walking up the stack; the symbol sits a touch
+        // closer to the line above it than the info lines are to each other.
+        const gapAbove = (index: number) => Math.round(fontPx * (index === 0 && variantSymbol ? 1.3 : 1.4));
+        const stackHeight = () => lines.reduce((total, _line, i) => (i === 0 ? total : total + gapAbove(i - 1)), 0) + fontPx;
+
+        // A triangle or quarter circle leaves one corner of its rect empty, so
+        // a stack hung off the bottom edge runs off the lit area and reads as
+        // if it belonged to the panel next door. Those centre the stack on a
+        // point inside the silhouette instead, shrinking the text until the
+        // whole block fits there (see panelLabelBlockFits).
+        const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
+        const rotation = cell.rotation ?? 0;
+        const footY = r.y + r.h - PANEL_LABEL_BOTTOM_PX;
+        ctx.textAlign = "center";
+        const widest = () => {
+          ctx.font = `bold ${fontPx}px Arial`;
+          return lines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
+        };
+        // The foot of the panel stays the first choice even on a shaped one:
+        // it is where the cable router leaves room for the text (see
+        // PANEL_LABEL_BOTTOM_PX), so moving the block off it only to dodge
+        // the silhouette would walk it straight into a cable run. So try the
+        // foot as it is, then the foot with smaller text, and only give the
+        // foot up when even the smallest text will not fit on the lit part
+        // there - a triangle standing on its point has nothing to sit on.
+        const fitsAtFoot = () =>
+          panelLabelBlockFitsAt(r, shape, rotation, flipped, cx, footY - stackHeight() / 2, widest() / 2, stackHeight() / 2);
+        let inset = false;
+        if (panelShapeNeedsInsetLabel(shape) && !fitsAtFoot()) {
+          const fullFontPx = fontPx;
+          while (fontPx > PANEL_LABEL_MIN_PX && !fitsAtFoot()) fontPx -= 1;
+          if (!fitsAtFoot()) {
+            inset = true;
+            fontPx = fullFontPx;
+            while (fontPx > PANEL_LABEL_MIN_PX
+              && !panelLabelBlockFits(r, shape, rotation, flipped, widest() / 2, stackHeight() / 2)) {
+              fontPx -= 1;
+            }
+          }
+        }
         ctx.fillStyle = "#020617";
         ctx.font = `bold ${fontPx}px Arial`;
         ctx.textAlign = "center";
-        const lineStep = Math.round(fontPx * 1.4);
-        let by = r.y + r.h - PANEL_LABEL_BOTTOM_PX;
-        const variantSymbol = getPanelSymbol(cell);
-        if (variantSymbol) {
-          drawOutlinedText(ctx, variantSymbol, cx, by, fontPx);
-          by -= Math.round(fontPx * 1.3);
-        }
-        if (cell.assignedPowerPort) {
-          drawOutlinedText(ctx, `⚡ Plug ${cell.assignedPowerPort}`, cx, by, fontPx);
-          by -= lineStep;
-        }
-        if (cell.assignedPort) {
-          drawOutlinedText(ctx, `🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, by, fontPx);
-          by -= lineStep;
-        }
-        drawOutlinedText(ctx, `↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, by, fontPx);
+        const anchor = inset ? panelLabelAnchor(r, shape, rotation, flipped) : null;
+        const anchorX = anchor ? anchor.x : cx;
+        let by = anchor ? anchor.y + stackHeight() / 2 : footY;
+        lines.forEach((line, index) => {
+          drawOutlinedText(ctx, line, anchorX, by, fontPx);
+          by -= gapAbove(index);
+        });
       }
 
       // Port-number badges last of all, so a run that crosses the top-left
@@ -3955,17 +4004,45 @@ const exportJson = () => {
         // clean per-panel pixel map, not a patching diagram.
         drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#ffffff", 1, { hatchStep: 24, mirrorX: true });
 
-        const cx = r.x + r.w / 2;
+        // Panel reference, and the shape symbol below it (△/◜/Corner - no
+        // rotate icon, no signal/power port info). Both centred on the panel,
+        // EXCEPT on a triangle or quarter circle: there the middle of the rect
+        // is off the lit area, so the text was cut away with the shape. Those
+        // centre on a point inside the silhouette instead, turned with the
+        // panel, and shrink to the room the shape leaves (see
+        // panelShapeLabelPoint).
+        const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
+        const shaped = panelShapeNeedsInsetLabel(shape);
+        const refText = `↓ ${layout.rowLabel(cell)} → ${layout.colLabel(cell)}`;
+        const variantSymbol = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].symbol;
+        let refFontPx = Math.max(12, Math.floor(r.h * 0.085));
+        const refWidth = () => {
+          ctx.font = `bold ${refFontPx}px Arial`;
+          return ctx.measureText(refText).width;
+        };
+        let width = refWidth();
+        if (shaped) {
+          const budget = Math.min(r.w, r.h) * 0.52;
+          if (width > budget) {
+            refFontPx = Math.max(9, Math.floor((refFontPx * budget) / width));
+            width = refWidth();
+          }
+        }
+        const local = panelShapeLabelPoint(shape, r.w, r.h);
+        const anchor = shaped
+          ? panelFramePoint(r, cell.rotation ?? 0, true, local.x, local.y)
+          : { x: r.x + r.w / 2, y: r.y + r.h * 0.4 };
+        const symbolFontPx = Math.max(shaped ? 10 : 14, Math.floor(r.h * (shaped ? 0.1 : 0.12)));
         ctx.fillStyle = "#020617";
         ctx.textAlign = "center";
-        ctx.font = `bold ${Math.max(12, Math.floor(r.h * 0.085))}px Arial`;
-        ctx.fillText(`↓ ${layout.rowLabel(cell)} → ${layout.colLabel(cell)}`, cx, r.y + r.h * 0.4);
-        // Shape symbol only (△/◜/Corner) - no rotate icon, no signal/power port info.
-        const variantSymbol = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].symbol;
+        ctx.textBaseline = shaped ? "middle" : "alphabetic";
+        ctx.font = `bold ${refFontPx}px Arial`;
+        ctx.fillText(refText, anchor.x, shaped ? anchor.y - refFontPx * 0.6 : anchor.y);
         if (variantSymbol) {
-          ctx.font = `bold ${Math.max(14, Math.floor(r.h * 0.12))}px Arial`;
-          ctx.fillText(variantSymbol, cx, r.y + r.h - 8);
+          ctx.font = `bold ${symbolFontPx}px Arial`;
+          ctx.fillText(variantSymbol, anchor.x, shaped ? anchor.y + symbolFontPx * 0.7 : r.y + r.h - 8);
         }
+        ctx.textBaseline = "alphabetic";
       });
 
       // No signal/power cable runs or entry marks in the PNG: it is a clean
@@ -4537,7 +4614,7 @@ const exportJson = () => {
       pdf.text(`Project name: ${safeProjectName}`, 10, 20);
       pdf.text(`Panel type: ${panelTypeSummary}`, 10, 26);
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
-      pdf.text(`Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`, 10, 38);
+      pdf.text(`Panels: ${totalPanels} active across ${gridRefs.rows} row${gridRefs.rows === 1 ? "" : "s"} x ${gridRefs.cols} column${gridRefs.cols === 1 ? "" : "s"}`, 10, 38);
 
       pdf.text(`${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
@@ -5110,7 +5187,7 @@ const exportJson = () => {
     drawInfoBox("Wall", [
       `Panel type: ${panelTypeSummary}`,
       `Power distro: ${distro.label}`,
-      `Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`,
+      `Panels: ${totalPanels} active across ${gridRefs.rows} row${gridRefs.rows === 1 ? "" : "s"} x ${gridRefs.cols} column${gridRefs.cols === 1 ? "" : "s"}`,
       `${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`,
       ...wallResolutionSummaryLines,
     ], 10, 24, 66, 48);
@@ -6183,10 +6260,10 @@ const exportJson = () => {
   const svgH = Math.max(1, Math.round(mmToPx(workspaceSizeMm.h)));
   // Human-friendly row/column labels for a panel - back-view, unmirrored
   // (this workspace's own Front/Back toggle doesn't flip these reference
-  // numbers - see columnBands/bandPanelsByColumn for why this is banded by
-  // actual panel adjacency rather than raw position / a fixed module size).
-  const panelRowLabel = (cell: Cell) => (bandIndexById.get(cell.id) ?? 0) + 1;
-  const panelColLabel = (cell: Cell) => String((columnIndexById.get(cell.id) ?? 0) + 1);
+  // numbers). A panel that straddles two rows reads as both of them
+  // ("3 & 4") rather than being given a row of its own - see panelGridRefs.
+  const panelRowLabel = (cell: Cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.rows);
+  const panelColLabel = (cell: Cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.cols);
   // Where a panel sits measured from the TOP-LEFT CORNER OF THE WHOLE LAYOUT:
   // its offset in mm, and the same offset in content pixels (each panel type
   // has its own pitch, so the pixel figure uses that panel's own mm->px ratio -
@@ -6578,7 +6655,7 @@ const exportJson = () => {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
-                  <div>Panels: {totalPanels} active across {panelBands.length} row band{panelBands.length === 1 ? "" : "s"}</div>
+                  <div>Panels: {totalPanels} active across {gridRefs.rows} row{gridRefs.rows === 1 ? "" : "s"} × {gridRefs.cols} column{gridRefs.cols === 1 ? "" : "s"}</div>
                   <div>{wallSizeLabel}: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
                   {isMtOnlyWall ? (
                     <>
