@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.46.0`
+Version `0.47.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -16,6 +16,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - See every signal and power run drawn over the panels, routed around the panel text so no label is ever covered. **Signal is always blue, power always orange**, and a hop both of them share is drawn as **one cable, with one arrow**, rather than a parallel pair. Every run carries a single outline `>` where it enters each panel. Identical on screen and in the PDF
 - Hover any panel to read its **X / Y position** from the top-left corner of the layout, in mm and in content pixels
 - Flip the panel layout between `Back View` and `Front View`
+- The PDF report carries an **Output Canvas page** - the full canvas resolution, every screen drawn to scale where it sits on it, and the same numbers as a table - plus a **key** on both Panel Layout views explaining every mark on the drawing
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
 - Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
 - **Connectors are counted from the edges panels actually share** - one row per connector, per shared edge, with exposed edges adding nothing. Shape panels, corner panels and flat-laid corner panels each pull their own part, and a rotated panel's connectors move with its edges
@@ -26,6 +27,28 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.47.0
+
+**Fixed: the PDF could fail outright**
+
+- The 32A distro adaptor added in v0.46.0 carries a **Greek phi** in its name (`3Φ`). jsPDF's built-in fonts only cover WinAnsi, so that one character made the line print as `3 2 A  3 |  P D L ...` - spaced-out nonsense - and pushed jsPDF onto a wide-encoding path that can fail the whole export
+- Every string in the report now passes through one guard on its way into the document: `3Φ` prints as `3Ph`, arrows and dashes become their ASCII equivalents, and anything left that the font cannot set is dropped rather than corrupting the line it is in. **Nothing had to be remembered at each of the hundred places the report writes text**
+- When a PDF does fail, the message now **names the error** instead of saying "check console" - so the one person who can report the fault has something to report
+
+**Output Canvas in the PDF**
+
+- A new **Output Canvas** page: the **full canvas resolution**, the canvas drawn as a frame with **every screen to scale where it has been placed on it**, and the same figures as a table - canvas X, canvas Y, resolution, right/bottom edge and panel count per screen
+- Each screen is outlined in its own identity colour, the same colour it carries in the workspace
+- Drawn as **outlines on white, no solid fills** - it is a page to print, and a page of solid dark is a page of ink
+- Anything that will not map is called out underneath: a screen hanging off the canvas, a negative position, or two screens sharing pixels
+- Ticked by default in **Generate PDF**, and untickable like every other section
+
+**A key on the Panel Layout pages**
+
+- Both the Back View and Front View pages now carry a **key** in the top-right corner, where the header already left the page empty - so the drawing keeps its full size
+- It covers the signal line, the power line, a run carrying both, the `>` direction mark, the centre line, the signal and power chain-start badges, and how to read `1 > 2`, `P1 (3)` and the `LU/LD/RU/RD` shape codes
+- Drawn from the same colours and the same chevron the layout itself uses, so the key cannot drift from what it is explaining
 
 ## Recent Changes In v0.46.0
 

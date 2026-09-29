@@ -29,7 +29,7 @@ import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
 import SubScreenPanel from "./subScreens/SubScreenPanel";
 import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
-import { finalCanvasPositionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
+import { finalCanvasPositionOf, resolutionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
 import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
 import { isMultiScreenLikely, requestScreenDetails, openWindowOnScreen } from "./testPattern/screenPlacement";
@@ -61,7 +61,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.46.0";
+const APP_VERSION = "0.47.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -207,7 +207,7 @@ const DEPLOYMENT_TYPES = {
   FLOOR: "Floor",
 } as const;
 
-const STOCK_CATALOG = {
+export const STOCK_CATALOG = {
   prodCase: { code: "12317", name: "LED Prod Case", stock: 1 },
   signalJoiner: { code: "12280", name: "SEETRONIC SE8FF-05 F/M - F/M Joiner", stock: 10 },
   signalJoinerCable: { code: "12312", name: "SEETRONIC F/M - F/M Cable", stock: 11 },
@@ -1602,6 +1602,40 @@ const drawPanelShape = (
 // Kept apart from drawPanelShape so the caller can paint the cable runs in
 // between the two: cables go over the panel graphics, the numbered badges go
 // back over the cables, and neither ends up unreadable.
+// jsPDF's built-in fonts are WinAnsi only. Hand one a character outside that -
+// the Greek phi in "3\u03a6", an arrow, an emoji someone typed into a screen
+// name - and jsPDF silently switches to a wide encoding: the line comes out as
+// spaced-out nonsense, and on some strings it throws outright and takes the
+// whole export with it.
+//
+// Every string in the report comes either from the stock catalogue or from
+// something the user typed, so this is applied at the ONE boundary they all
+// cross (see the pdf.text wrapper in generatePdf) rather than being remembered
+// at each of the hundred call sites.
+const PDF_TEXT_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/[\u03a6\u03c6]/g, "Ph"], // 3\u03a6 -> 3Ph, the usual way to write three-phase
+  [/[\u00d7\u2715\u2716]/g, "x"],
+  [/[\u2013\u2014]/g, "-"],
+  [/[\u2018\u2019]/g, "'"],
+  [/[\u201c\u201d]/g, '"'],
+  [/\u2192/g, "->"],
+  [/\u2190/g, "<-"],
+  [/\u2193/g, "v"],
+  [/\u2191/g, "^"],
+  [/\u2265/g, ">="],
+  [/\u2264/g, "<="],
+  [/\u2026/g, "..."],
+];
+export const pdfSafeText = (value: string): string => {
+  let out = value;
+  PDF_TEXT_REPLACEMENTS.forEach(([from, to]) => {
+    out = out.replace(from, to);
+  });
+  // Whatever is left outside WinAnsi would only render as noise, so it goes
+  // rather than corrupting the line it is sitting in.
+  return out.replace(/[^\u0020-\u00ff]/g, "").replace(/ {2,}/g, " ").trim();
+};
+
 // Draw text with a thin white casing behind it, so a label stays readable
 // wherever it lands - over a panel fill, over a cable run, over the gap
 // between them. The outline is STROKED FIRST and the fill goes over the top,
@@ -4338,6 +4372,7 @@ const exportJson = () => {
     }
     sections.push({ key: "ports", label: "Signal & Power Ports In Use", hint: "Per-port panel counts and first-to-last panel of each chain" });
     if (subScreens.length > 0) sections.push({ key: "subScreens", label: "Sub-Screens summary" });
+    sections.push({ key: "outputCanvas", label: "Output Canvas", hint: "Canvas resolution and where each screen sits on it" });
     sections.push(
       { key: "layoutBack", label: "Panel Layout - Back View" },
       { key: "layoutFront", label: "Panel Layout - Front View" },
@@ -4350,6 +4385,15 @@ const exportJson = () => {
     const wants = (key: string) => sections.has(key);
     const jsPDF = (await import("jspdf")).default;
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape", compress: true });
+    // Scrub anything the built-in fonts cannot set, once, where every string
+    // enters the document - see pdfSafeText.
+    {
+      const rawText = pdf.text.bind(pdf);
+      const rawSplit = pdf.splitTextToSize.bind(pdf);
+      const scrub = (value: unknown): never => (Array.isArray(value) ? value.map((v) => pdfSafeText(String(v))) : pdfSafeText(String(value ?? ""))) as never;
+      pdf.text = ((value: unknown, ...rest: unknown[]) => rawText(scrub(value), ...(rest as [number, number]))) as typeof pdf.text;
+      pdf.splitTextToSize = ((value: unknown, ...rest: unknown[]) => rawSplit(scrub(value), ...(rest as [number]))) as typeof pdf.splitTextToSize;
+    }
     const printedAt = new Date().toLocaleString();
     const usedSignalPorts = signalPorts.filter((port) => signalPortStats[port.id].panels > 0);
     const usedPowerPorts = powerPorts.filter((port) => powerPortStats[port.id].panels > 0);
@@ -4388,6 +4432,98 @@ const exportJson = () => {
       });
     };
 
+    /**
+     * Key for the Panel Layout pages: what every mark on the drawing means,
+     * in the top-right corner where the header leaves the page empty, so the
+     * drawing itself keeps its full size.
+     *
+     * Drawn as vector swatches with the same colours and the same shapes the
+     * layout canvas uses, so the key cannot drift from what it is explaining.
+     */
+    const drawLayoutKey = (x: number, y: number) => {
+      const [sigR, sigG, sigB] = rgbOf(SIGNAL_CABLE_COLOR);
+      const [powR, powG, powB] = rgbOf(POWER_COLOR);
+      const rowH = 4.3;
+      const swatchW = 7;
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(9);
+      pdf.text("Key", x, y);
+
+      const label = (col: number, row: number, text: string) => {
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(7);
+        pdf.setTextColor(15, 23, 42);
+        pdf.text(text, x + col * 54 + swatchW + 2, y + 4 + row * rowH + 1);
+      };
+      const cableSwatch = (col: number, row: number, kind: CableKind) => {
+        const sx = x + col * 54;
+        const sy = y + 4 + row * rowH;
+        cableStrokes(kind).forEach(({ color, width, dash }) => {
+          if (color === CABLE_CASING_COLOR) return; // the casing is white - invisible on paper
+          const [r, g, b2] = rgbOf(color);
+          pdf.setDrawColor(r, g, b2);
+          pdf.setLineWidth(width * 0.28);
+          if (dash) pdf.setLineDashPattern([1.6, 1.6], 0);
+          pdf.line(sx, sy, sx + swatchW, sy);
+          pdf.setLineDashPattern([], 0);
+        });
+      };
+      const badgeSwatch = (col: number, row: number, hex: string, text: string) => {
+        const [r, g, b2] = rgbOf(hex);
+        const sx = x + col * 54 + swatchW / 2;
+        const sy = y + 4 + row * rowH;
+        pdf.setFillColor(r, g, b2);
+        pdf.circle(sx, sy, 1.7, "F");
+        pdf.setTextColor(255, 255, 255);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(5);
+        pdf.text(text, sx, sy + 0.8, { align: "center" });
+        pdf.setTextColor(15, 23, 42);
+      };
+
+      cableSwatch(0, 0, "signal");
+      label(0, 0, "Signal cable");
+      cableSwatch(0, 1, "power");
+      label(0, 1, "Power cable");
+      cableSwatch(0, 2, "both");
+      label(0, 2, "Signal + power, one run");
+
+      // The ">" entry mark, drawn with the same chevron the layout uses.
+      {
+        const sx = x + 0 * 54;
+        const sy = y + 4 + 3 * rowH;
+        const pts = cableChevronPoints({ x: sx + swatchW - 2, y: sy, angle: 0 }, 2.6);
+        pdf.setDrawColor(powR, powG, powB);
+        pdf.setLineWidth(0.7);
+        pdf.lines(
+          pts.slice(1).map((pt, i) => [pt.x - pts[i].x, pt.y - pts[i].y]),
+          pts[0].x,
+          pts[0].y,
+        );
+        label(0, 3, "Direction, into the panel");
+      }
+
+      pdf.setDrawColor(234, 179, 8);
+      pdf.setLineWidth(0.5);
+      pdf.setLineDashPattern([1.2, 1.2], 0);
+      pdf.line(x + 3.5, y + 4 + 4 * rowH - 1.6, x + 3.5, y + 4 + 4 * rowH + 1.6);
+      pdf.setLineDashPattern([], 0);
+      label(0, 4, "Centre of the wall");
+
+      badgeSwatch(1, 0, SIGNAL_START_COLOR, "1");
+      label(1, 0, "Signal chain start (port)");
+      badgeSwatch(1, 1, POWER_START_COLOR, "1");
+      label(1, 1, "Power chain start (plug)");
+      label(1, 2, "1 > 2 = row > column");
+      label(1, 3, "P1 (3) = port 1, 3rd panel");
+      label(1, 4, "LU/LD/RU/RD = shape corner");
+
+      pdf.setTextColor(15, 23, 42);
+      pdf.setDrawColor(0, 0, 0);
+      pdf.setLineWidth(0.2);
+    };
+
     const drawLayoutPage = (canvas: HTMLCanvasElement, viewLabel: string) => {
       pdf.addPage("a4", "landscape");
       const pageWidth = pdf.internal.pageSize.getWidth();
@@ -4408,6 +4544,8 @@ const exportJson = () => {
       pdf.text(wallResolutionSummaryLines[0], 105, 32);
       pdf.text(wallResolutionSummaryLines[1], 105, 38);
       pdf.text(wallResolutionSummaryLines[2], 105, 44);
+
+      drawLayoutKey(180, 16);
 
       const usableWidth = pageWidth - 20;
       const usableHeight = pageHeight - 58;
@@ -4616,6 +4754,170 @@ const exportJson = () => {
         y += 6;
       }
       return subScreens.length;
+    };
+
+    // Colour helper: jsPDF wants channels, the app stores hex.
+    const rgbOf = (hex: string): [number, number, number] => {
+      const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+      if (!m) return [15, 23, 42];
+      const v = Number.parseInt(m[1], 16);
+      return [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
+    };
+
+    // Every screen that sits on the output canvas, in the same terms the
+    // Output Canvas panel uses on screen: its position on the canvas, its own
+    // pixel resolution, and its identity colour. With no sub-screens the whole
+    // layout is the single entry, exactly as the panel shows it.
+    const outputCanvasEntries = subScreens.length
+      ? subScreens.map((screen, index) => ({
+          name: screen.name,
+          x: screen.canvasX,
+          y: screen.canvasY,
+          resolution: subScreenResolutionOf(grid, screen.id),
+          color: normalizeSubScreenColor(screen.color, index),
+          panels: subScreenPanelCount(grid, screen.id),
+        }))
+      : [{
+          name: "Whole Layout",
+          x: wholeLayoutCanvasX,
+          y: wholeLayoutCanvasY,
+          resolution: resolutionOf(activePanels),
+          color: normalizeSubScreenColor(null, 0),
+          panels: activePanels.length,
+        }];
+
+    /**
+     * The output canvas, drawn the way the app's own Output Canvas view draws
+     * it: the full canvas as one frame with every screen sitting where it has
+     * been placed on it, to scale.
+     *
+     * Deliberately vector, unfilled and light: this page is a reference a
+     * technician prints, and a page of solid dark fill is a page of ink. The
+     * canvas is a thin grey frame, each screen a thin outline in its own
+     * identity colour, and everything else is text.
+     */
+    const drawOutputCanvasPage = () => {
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(`${safeProjectName} - Output Canvas`, 10, 12);
+
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(11);
+      pdf.text(`Canvas resolution: ${formatNumber(outputCanvasW)} x ${formatNumber(outputCanvasH)} px`, 10, 20);
+      pdf.setFontSize(9);
+      pdf.text(
+        `${outputCanvasEntries.length} screen${outputCanvasEntries.length === 1 ? "" : "s"} placed on the canvas. Positions are the top-left pixel of each screen.`,
+        10,
+        26,
+      );
+
+      // Canvas frame, scaled to fit the page's own drawing area.
+      const frameMaxW = 277;
+      const frameMaxH = 96;
+      const canvasW = Math.max(outputCanvasW, 1);
+      const canvasH = Math.max(outputCanvasH, 1);
+      const scale = Math.min(frameMaxW / canvasW, frameMaxH / canvasH);
+      const frameW = Math.max(1, canvasW * scale);
+      const frameH = Math.max(1, canvasH * scale);
+      const frameX = 10 + (frameMaxW - frameW) / 2;
+      const frameY = 32;
+
+      pdf.setDrawColor(100, 116, 139);
+      pdf.setLineWidth(0.4);
+      pdf.rect(frameX, frameY, frameW, frameH);
+      pdf.setFontSize(7);
+      pdf.setTextColor(100, 116, 139);
+      pdf.text("0, 0", frameX, frameY - 1.5);
+      pdf.text(`${formatNumber(outputCanvasW)}, ${formatNumber(outputCanvasH)}`, frameX + frameW, frameY + frameH + 3.5, { align: "right" });
+      pdf.setTextColor(15, 23, 42);
+
+      outputCanvasEntries.forEach((entry) => {
+        if (entry.resolution.w <= 0 || entry.resolution.h <= 0) return;
+        const [r, g, bch] = rgbOf(entry.color);
+        const x = frameX + entry.x * scale;
+        const y = frameY + entry.y * scale;
+        const w = Math.max(0.6, entry.resolution.w * scale);
+        const h = Math.max(0.6, entry.resolution.h * scale);
+        pdf.setDrawColor(r, g, bch);
+        pdf.setLineWidth(0.7);
+        pdf.rect(x, y, w, h);
+        // Name inside the box when it fits, tucked above it when it does not.
+        pdf.setFontSize(7);
+        pdf.setTextColor(r, g, bch);
+        const label = pdf.splitTextToSize(entry.name, Math.max(w - 2, 12))[0];
+        if (h >= 8) {
+          pdf.text(label, x + 1.5, y + 4);
+          pdf.setTextColor(71, 85, 105);
+          pdf.text(`${formatNumber(entry.resolution.w)} x ${formatNumber(entry.resolution.h)}`, x + 1.5, y + 7.5);
+        } else {
+          pdf.text(label, x, Math.max(y - 1, frameY - 1));
+        }
+        pdf.setTextColor(15, 23, 42);
+      });
+
+      // The same numbers as a table, because a drawing to scale is not
+      // something you can read a pixel position off.
+      let y = frameY + frameH + 12;
+      pdf.setFillColor(226, 232, 240);
+      pdf.rect(10, y - 5, 277, 7, "F");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(8);
+      pdf.text("Screen", 12, y);
+      pdf.text("Canvas X", 110, y);
+      pdf.text("Canvas Y", 140, y);
+      pdf.text("Resolution", 170, y);
+      pdf.text("Right, Bottom", 215, y);
+      pdf.text("Panels", 285, y, { align: "right" });
+      y += 6;
+      pdf.setFont("helvetica", "normal");
+      outputCanvasEntries.forEach((entry) => {
+        if (y > 196) return;
+        const [r, g, bch] = rgbOf(entry.color);
+        pdf.setFillColor(r, g, bch);
+        pdf.rect(12, y - 2.6, 3, 3, "F");
+        pdf.text(pdf.splitTextToSize(entry.name, 88)[0], 17, y);
+        pdf.text(formatNumber(entry.x), 110, y);
+        pdf.text(formatNumber(entry.y), 140, y);
+        pdf.text(`${formatNumber(entry.resolution.w)} x ${formatNumber(entry.resolution.h)}`, 170, y);
+        pdf.text(`${formatNumber(entry.x + entry.resolution.w)}, ${formatNumber(entry.y + entry.resolution.h)}`, 215, y);
+        pdf.text(formatNumber(entry.panels), 285, y, { align: "right" });
+        y += 6;
+      });
+
+      // Anything that will not map: a screen hanging off the canvas, or two
+      // sharing pixels. Worth a line on the page a technician is holding.
+      const problems: string[] = [];
+      outputCanvasEntries.forEach((entry, i) => {
+        if (entry.x < 0 || entry.y < 0) problems.push(`${entry.name}: negative canvas position (X ${entry.x}, Y ${entry.y}).`);
+        if (entry.x + entry.resolution.w > outputCanvasW || entry.y + entry.resolution.h > outputCanvasH) {
+          problems.push(`${entry.name}: extends beyond the ${outputCanvasW} x ${outputCanvasH} canvas.`);
+        }
+        outputCanvasEntries.slice(i + 1).forEach((other) => {
+          const overlap =
+            entry.x < other.x + other.resolution.w && other.x < entry.x + entry.resolution.w &&
+            entry.y < other.y + other.resolution.h && other.y < entry.y + entry.resolution.h;
+          if (overlap && entry.resolution.w > 0 && other.resolution.w > 0) {
+            problems.push(`${entry.name} and ${other.name} overlap on the canvas.`);
+          }
+        });
+      });
+      if (problems.length) {
+        y += 4;
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(9);
+        pdf.setTextColor(180, 83, 9);
+        pdf.text("Check before mapping", 10, y);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(8);
+        y += 5;
+        problems.slice(0, 6).forEach((line) => {
+          if (y > 204) return;
+          pdf.text(`- ${line}`, 12, y);
+          y += 4.5;
+        });
+        pdf.setTextColor(15, 23, 42);
+      }
     };
 
     const drawSubScreensSummaryPage = () => {
@@ -4878,13 +5180,17 @@ const exportJson = () => {
     if (wants("sparePanels")) drawSparePanelsPage();
     if (wants("ports")) drawPortsInUsePage();
     if (wants("subScreens") && subScreens.length > 0) drawSubScreensSummaryPage();
+    if (wants("outputCanvas")) drawOutputCanvasPage();
     if (wants("layoutBack")) drawLayoutPage(buildLayoutCanvas(false, "Back View"), "Back View");
     if (wants("layoutFront")) drawLayoutPage(buildLayoutCanvas(true, "Front View"), "Front View");
     addPdfFooters();
     pdf.save(`${fileSafeProjectName}-${fileSafePanelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
-    alert("PDF failed - check console");
+    // Say WHAT failed. "Check console" on its own left the one person who
+    // could report the fault with nothing to report.
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    alert(`PDF failed - ${detail}\n\nThe browser console has the full details.`);
   }
 };
 
