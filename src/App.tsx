@@ -47,11 +47,13 @@ import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, t
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
 import { applyStockOverrides, baseCodeOf, buildStockComparison, loadStockOverrides, saveStockOverrides, type StockComparisonRow, type StockOverrides } from "./rentman/stockOverrides";
 import {
+  addedStockCodes,
   applyStockEdits,
   calculatedTotalOf,
   normalizeStockEdits,
   removedStockRows,
   stockEditCount,
+  withStockAdded,
   withStockQty,
   withStockRemoved,
   withStockRowReset,
@@ -80,7 +82,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.49.1";
+const APP_VERSION = "0.50.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -246,10 +248,10 @@ export const STOCK_CATALOG = {
   danceFloorFeet: { code: "12276", name: "YES TECH Modular Frame Feet for Dance Floor Mode", stock: 576 },
   // These three carried 12274 / 12275 / 12272 until a Rentman stock check came
   // back with someone else's name against each of them: those codes are the MT
-  // Corner Connecting Bracket, its Bolt, and the Patch F/M - F/M Signal Cable.
-  // The codes below are the confirmed ones. Their shelf quantities are the
-  // catalogue's own again - the figures that check returned belonged to the
-  // three items above, not to these.
+  // Corner Connecting Bracket, its Bolt, and the Patch F/M - F/M Signal Cable
+  // (all three now in this catalogue, below). The codes here are the confirmed
+  // ones. Their shelf quantities are the catalogue's own again - the figures
+  // that check returned belonged to the three items above, not to these.
   floorReinforcementBar: { code: "12251", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 384 },
   floorTaperPin: { code: "12252", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 1536 },
   temperedGlass: { code: "12250", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 384 },
@@ -268,18 +270,28 @@ export const STOCK_CATALOG = {
   // rules pulling one code would have ordered the wrong part for half of them.
   cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 160 },
   // Shelf quantities below came from a Rentman stock check (see the stock
-  // figures note in README). mg9VerticalConnector and distro32Adaptor were
-  // not in that return, so they stay at 0 and read as a full shortfall until
-  // a stock check or an override fills them in - honest about what is not
-  // known, rather than a guess that quietly under-orders.
+  // figures note in README). mg9VerticalConnector was not in that return, so
+  // it stays at 0 and reads as a full shortfall until a stock check or an
+  // override fills it in - honest about what is not known, rather than a
+  // guess that quietly under-orders.
   connector180: { code: "12476", name: "YES TECH MG9 180 Connector", stock: 80 },
   horizontalConnector: { code: "12623", name: "YES TECH MG9 Horizontal Connector", stock: 1170 },
   mg9VerticalConnector: { code: "12480", name: "YES TECH MG9 Vertical Connector", stock: 0 },
-  distro32Adaptor: { code: "6650", name: "32A 3\u03a6 PDL - 32A 3\u03a6 Ceeform Power Adaptor", stock: 0 },
+  distro32Adaptor: { code: "6650", name: "32A 3\u03a6 PDL - 32A 3\u03a6 Ceeform Power Adaptor", stock: 10 },
   // Ballast for the temporary fencing around a ground-supported wall.
   // `code` is Rentman's equipment CODE (12357), not its internal record id
   // (28512) - every lookup in this app goes through the code, so the id would
   // silently resolve to nothing.
+  // The three items whose codes this catalogue used to have on its own floor
+  // parts and shaped panels. Nothing here works out a requirement for them -
+  // the deployment-hardware formulas cover MG9 only, and the signal count
+  // already has its own joiner and joiner cable - so they never appear on a
+  // stock list by themselves. They are here so they can be ADDED to one by
+  // hand (see "Add an item" under Stock Calculations), and so a Rentman stock
+  // check knows the codes.
+  patchSignalCable: { code: "12272", name: "YES TECH Patch F/M - F/M Signal Cable", stock: 14 },
+  mtCornerBracket: { code: "12274", name: "YES TECH MT Corner Connecting Bracket", stock: 100 },
+  mtCornerBracketBolt: { code: "12275", name: "YES TECH MT Corner Connecting Bracket Bolt", stock: 400 },
   tempFencingWeight: { code: "12357", name: "Temporary Fencing Weight", stock: 51 },
   // Stocked and ordered as COMPLETE posters, never as the eight sections the
   // grid holds - so this row's quantity is poster count, not section count.
@@ -373,6 +385,8 @@ export type StockRow = {
   calculated?: number;
   /** True when this row's quantity was typed in by hand rather than calculated. */
   edited?: boolean;
+  /** True when the row itself is on the list by hand - nothing calculated a requirement for it. */
+  manual?: boolean;
 };
 
 // A panel in the free workspace. x/y are the TOP-LEFT corner in workspace
@@ -1146,6 +1160,13 @@ const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
 // spare or packaging rounding folded in - `rounded` (required +
 // spareRounded) is the real order/pull quantity, so `net` (shortfall) is
 // checked against THAT, not the bare required count.
+// The catalogue entry behind a stock code, for rows that are on a project's
+// list by hand alone - the name and shelf quantity are read here each time the
+// list is built, so they follow the catalogue rather than a stale copy saved
+// into the project file.
+const stockCatalogLookup = (code: string): { name: string; stock: number } | null =>
+  Object.values(STOCK_CATALOG).find((item) => item.code === code) ?? null;
+
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
   required: number,
@@ -2214,6 +2235,9 @@ export default function App() {
   // Manual changes to this project's stock list - a typed-over quantity or a
   // row taken off it. Project state, saved with the project (see stockEdits).
   const [stockEdits, setStockEdits] = useState<StockEdits>({});
+  // The "Add an item" picker's own state - which catalogue item, how many.
+  const [stockAddCode, setStockAddCode] = useState("");
+  const [stockAddQty, setStockAddQty] = useState("1");
   const [stockChecking, setStockChecking] = useState(false);
   const [stockCheckError, setStockCheckError] = useState<string | null>(null);
   const [lastStockCheckedAt, setLastStockCheckedAt] = useState<Date | null>(null);
@@ -3409,7 +3433,10 @@ export default function App() {
     () => applyStockOverrides(stockRows.filter((row) => (row.rounded ?? row.required) > 0), stockOverrides),
     [stockRows, stockOverrides],
   );
-  const visibleStockRows = useMemo(() => applyStockEdits(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
+  const visibleStockRows = useMemo(
+    () => applyStockEdits(calculatedStockRows, stockEdits, stockCatalogLookup),
+    [calculatedStockRows, stockEdits],
+  );
   const stockRowsRemoved = useMemo(() => removedStockRows(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
   const stockEditsApplied = useMemo(() => stockEditCount(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
   // Edits are keyed by stock code and are deliberately NOT pruned when their
@@ -3422,6 +3449,17 @@ export default function App() {
     setStockEdits((edits) => withStockRemoved(edits, code, removed));
   const resetStockRow = (code: string) => setStockEdits((edits) => withStockRowReset(edits, code));
   const resetAllStockEdits = () => setStockEdits({});
+  const addStockRow = (code: string, qty: number) => setStockEdits((edits) => withStockAdded(edits, code, qty));
+  // Catalogue items that could be added: everything this app knows a code for
+  // that the list is not already carrying. Deployment hardware and the spare
+  // parts the formulas never ask for both live here, which is the point - it
+  // is how an item nothing calculates gets onto a pull sheet at all.
+  const addableStockItems = useMemo(() => {
+    const onList = new Set(visibleStockRows.map((row) => baseCodeOf(row.code)));
+    return Object.values(STOCK_CATALOG)
+      .filter((item) => !onList.has(item.code))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [visibleStockRows]);
   // visibleStockRows joined to whatever Rentman data has been pulled, and the
   // one place the availability sum lives:
   //
@@ -3472,8 +3510,14 @@ export default function App() {
       const code = baseCodeOf(row.code);
       if (!seen.has(code)) seen.set(code, row.name);
     });
+    // Plus anything put on the list by hand: no calculation produced a row for
+    // it, but it is still going on the truck, so its stock is worth checking.
+    addedStockCodes(stockEdits).forEach((code) => {
+      const item = stockCatalogLookup(code);
+      if (item && !seen.has(code)) seen.set(code, item.name);
+    });
     return Array.from(seen, ([code, name]) => ({ code, name }));
-  }, [stockRows]);
+  }, [stockRows, stockEdits]);
 
   const checkRentmanStock = async () => {
     if (!rentmanEligibleItems.length) return;
@@ -4870,11 +4914,17 @@ const exportJson = () => {
     // finish - the front page when it is short enough, its own page when it
     // is not.
     function drawStockEditNotes(afterY: number) {
-      const edited = visibleStockRows.filter((row) => row.edited);
+      const edited = visibleStockRows.filter((row) => row.edited && !row.manual);
+      const added = visibleStockRows.filter((row) => row.manual);
       const notes = [
         edited.length
           ? `* Quantity set by hand, not calculated: ${edited
               .map((row) => `${row.code} ${formatNumber(row.rounded ?? row.required)} (tool: ${formatNumber(row.calculated ?? 0)})`)
+              .join(", ")}`
+          : null,
+        added.length
+          ? `* Put on this list by hand - nothing on this wall asks for it: ${added
+              .map((row) => `${row.code} ${row.name} x ${formatNumber(row.rounded ?? 0)}`)
               .join(", ")}`
           : null,
         stockRowsRemoved.length
@@ -8226,7 +8276,14 @@ const exportJson = () => {
                       <Fragment key={`${row.code}-${row.name}`}>
                         <tr className={`border-t border-slate-700 ${short ? "bg-red-500/10" : low ? "bg-amber-500/10" : ""}`}>
                           <td className={`px-3 py-2 whitespace-nowrap ${short ? "text-red-200" : ""}`}>{row.code}</td>
-                          <td className="px-3 py-2">{row.name}</td>
+                          <td className="px-3 py-2">
+                            {row.name}
+                            {row.manual ? (
+                              <span className="ml-2 rounded-full border border-sky-400/60 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
+                                added by hand
+                              </span>
+                            ) : null}
+                          </td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.spare ?? 0)}</td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.spareRounded ?? row.spare ?? 0)}</td>
@@ -8235,7 +8292,7 @@ const exportJson = () => {
                               nobody has to take the new one on trust. */}
                           <td className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${row.edited ? "text-amber-200" : ""}`}>
                             {formatNumber(entry.totalRequired)}
-                            {row.edited ? (
+                            {row.edited && !row.manual ? (
                               <div className="text-[10px] font-normal text-amber-300/80">
                                 edited - tool says {formatNumber(row.calculated ?? 0)}
                               </div>
@@ -8305,7 +8362,7 @@ const exportJson = () => {
                                   setStockQty(row.code, raw === "" ? null : Number(raw), row.calculated ?? calculatedTotalOf(row));
                                 }}
                               />
-                              {row.edited ? (
+                              {row.edited && !row.manual ? (
                                 <button
                                   type="button"
                                   onClick={() => resetStockRow(row.code)}
@@ -8319,7 +8376,7 @@ const exportJson = () => {
                               <button
                                 type="button"
                                 onClick={() => setStockRowRemoved(row.code, true)}
-                                title="Take this item off the stock list for this project"
+                                title={row.manual ? "Take this item back off the stock list" : "Take this item off the stock list for this project"}
                                 aria-label={`Remove ${row.name} from the stock list`}
                                 className="rounded p-1 text-slate-300 hover:bg-red-500/20 hover:text-red-200"
                               >
@@ -8375,6 +8432,54 @@ const exportJson = () => {
                 </tbody>
               </table>
             </div>
+            {/* Items the tool works out no requirement for - deployment parts
+                for a wall it does not model, a connector somebody knows the job
+                needs - put on the list by hand. Everything the catalogue holds
+                a code for is offered; what is already on the list is not. */}
+            {addableStockItems.length ? (
+              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 no-print">
+                <label className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Add an item</div>
+                  <select
+                    className="w-[28rem] max-w-full rounded-lg border border-slate-500 bg-white p-2 text-sm text-black"
+                    value={stockAddCode}
+                    onChange={(e) => setStockAddCode(e.target.value)}
+                  >
+                    <option value="">Choose an item from the catalogue...</option>
+                    {addableStockItems.map((item) => (
+                      <option key={item.code} value={item.code}>{item.code} - {item.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Qty</div>
+                  <Input
+                    type="number"
+                    min={0}
+                    className="w-24 text-right"
+                    value={stockAddQty}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setStockAddQty(e.target.value)}
+                  />
+                </label>
+                <Button
+                  intent="primary"
+                  size="sm"
+                  disabled={!stockAddCode}
+                  onClick={() => {
+                    if (!stockAddCode) return;
+                    addStockRow(stockAddCode, Number(stockAddQty) || 0);
+                    setStockAddCode("");
+                    setStockAddQty("1");
+                  }}
+                >
+                  Add to list
+                </Button>
+                <div className="text-xs text-slate-400">
+                  Nothing here is calculated from the layout - an added row is yours, and says so on the list.
+                </div>
+              </div>
+            ) : null}
+
             {/* Rows taken off the list. They are gone from the table and from
                 every export, but not hidden from the person who took them off:
                 each one says what it was and goes back with one click. */}
@@ -8408,7 +8513,7 @@ const exportJson = () => {
             {stockEditsApplied ? (
               <div className="text-xs text-amber-300/90">
                 {stockEditsApplied} row{stockEditsApplied === 1 ? "" : "s"} on this list {stockEditsApplied === 1 ? "is" : "are"} set by hand
-                rather than calculated - the CSV, the PDF and the shortfall list all use the edited figures.
+                rather than calculated - the CSV, the PDF and the shortfall list all use the edited figures, and the PDF says which rows they are.
               </div>
             ) : null}
             {rentmanChecked ? (

@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import type { StockRow } from "./App";
 import {
+  addedStockCodes,
   applyStockEdits,
   calculatedTotalOf,
   normalizeStockEdits,
   removedStockRows,
   stockEditCount,
+  withStockAdded,
   withStockQty,
   withStockRemoved,
   withStockRowReset,
@@ -116,5 +118,66 @@ describe("normalizeStockEdits", () => {
     expect(normalizeStockEdits({ a: { qty: "4" }, b: { removed: "yes" }, c: null, d: { qty: NaN } })).toEqual({});
     expect(normalizeStockEdits(undefined)).toEqual({});
     expect(normalizeStockEdits("nonsense")).toEqual({});
+  });
+});
+
+// An item the layout asks for nothing of can still be needed on the truck, so
+// the catalogue's own entry can be put on the list by hand. It has to be
+// unmistakable on the list, and it has to stay the catalogue's item rather
+// than a copy that goes stale.
+
+const catalog = (code: string) =>
+  code === "12274" ? { name: "MT Corner Connecting Bracket", stock: 100 } : null;
+
+describe("adding an item by hand", () => {
+  it("puts a catalogue item on the list, marked as nobody's calculation", () => {
+    const edits = withStockAdded({}, "12274", 8);
+    const out = applyStockEdits(rows, edits, catalog);
+    expect(out).toHaveLength(rows.length + 1);
+    expect(out[out.length - 1]).toMatchObject({
+      code: "12274",
+      name: "MT Corner Connecting Bracket",
+      required: 0,
+      spare: 0,
+      rounded: 8,
+      stock: 100,
+      net: 92,
+      edited: true,
+      manual: true,
+    });
+  });
+
+  it("does nothing without a catalogue to look the code up in", () => {
+    expect(applyStockEdits(rows, withStockAdded({}, "12274", 8))).toEqual(rows);
+    expect(applyStockEdits(rows, withStockAdded({}, "99999", 8), catalog)).toEqual(rows);
+  });
+
+  it("never doubles a row the tool already worked out", () => {
+    const edits = withStockAdded({}, "12254", 8);
+    const out = applyStockEdits(rows, edits, (code) => (code === "12254" ? { name: "PowerCON", stock: 93 } : null));
+    expect(out.filter((r) => r.code === "12254")).toHaveLength(1);
+  });
+
+  it("keeps an added row at zero when its box is cleared, instead of vanishing", () => {
+    let edits = withStockAdded({}, "12274", 8);
+    edits = withStockQty(edits, "12274", null, 0);
+    expect(applyStockEdits(rows, edits, catalog).at(-1)).toMatchObject({ code: "12274", rounded: 0, manual: true });
+  });
+
+  it("takes an added row away outright - there is nothing underneath to put back", () => {
+    const edits = withStockRemoved(withStockAdded({}, "12274", 8), "12274", true);
+    expect(edits).toEqual({});
+    expect(applyStockEdits(rows, edits, catalog)).toEqual(rows);
+  });
+
+  it("counts an added row as an edit, and lists its code for the stock check", () => {
+    const edits = withStockAdded({}, "12274", 8);
+    expect(stockEditCount(rows, edits)).toBe(1);
+    expect(addedStockCodes(edits)).toEqual(["12274"]);
+  });
+
+  it("survives a trip through a project file", () => {
+    expect(normalizeStockEdits({ "12274": { added: true, qty: 8 } })).toEqual({ "12274": { qty: 8, added: true } });
+    expect(normalizeStockEdits({ "12274": { added: "yes" } })).toEqual({});
   });
 });

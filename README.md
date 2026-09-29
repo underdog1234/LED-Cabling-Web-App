@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.49.1`
+Version `0.50.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -26,9 +26,30 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
-- **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
+- **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.50.0
+
+**Items can be added to the stock list, not just edited**
+
+- A new **Add an item** control under the Stock Calculations table puts any item in the catalogue on this project's list, with whatever quantity you type
+- Added rows are marked **added by hand** on the list and carry a `*` in the PDF, which prints `Put on this list by hand - nothing on this wall asks for it` underneath with the item and quantity - the same treatment an edited quantity gets
+- They go into the CSV, the shortfall list and the Rentman stock check like any other row, and are saved with the project
+- Only the item's **code** is stored, so its name and shelf quantity are read from the catalogue each time the list is built rather than frozen into the project file
+- An item already on the list is not offered, so the same code can never appear twice
+
+**Three items added to the catalogue**
+
+| Code | Item | Stock |
+| --- | --- | --- |
+| `12272` | YES TECH Patch F/M - F/M Signal Cable | 14 |
+| `12274` | YES TECH MT Corner Connecting Bracket | 100 |
+| `12275` | YES TECH MT Corner Connecting Bracket Bolt | 400 |
+
+- These are the items whose codes this catalogue had against its own floor parts until v0.49.1. **Nothing works out a requirement for them** - the deployment-hardware formulas cover MG9 only, and the signal count has its own joiner and joiner cable - so they never appear on a list by themselves. They are in the catalogue so they can be added to one by hand, and so a stock check knows the codes
+- **32A 3Ph PDL Power Adaptor (`6650`) stock is now 10**, so a project needing one no longer reads as a shortfall
 
 ## Recent Changes In v0.49.1
 
