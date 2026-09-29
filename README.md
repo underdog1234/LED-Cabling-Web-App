@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.45.0`
+Version `0.46.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -18,12 +18,45 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Flip the panel layout between `Back View` and `Front View`
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
 - Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
+- **Connectors are counted from the edges panels actually share** - one row per connector, per shared edge, with exposed edges adding nothing. Shape panels, corner panels and flat-laid corner panels each pull their own part, and a rotated panel's connectors move with its edges
+- An **MG9 Corner panel can be laid in flat**: the same part off the same shelf, drawn without the corner hatch, needing the flat connector instead of the corner one
 - Shaped panels (`MG12` triangle, `MG13` quarter circle) print the orientation code of the part they actually are - `LU` / `LD` / `RU` / `RD`, read from the front - so the drawing names the same stock line Stock Calculations counts
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.46.0
+
+**Connectors are now worked out from the layout**
+
+- Connector quantities come from the **edges panels actually share**, found from panel positions, so free-form layouts and rotated panels are handled the same as a plain grid. Each shared edge is counted **once**, not once per panel, and an exposed edge - one with nothing on the other side - adds nothing
+- A **horizontal edge** is a horizontal line, so one panel sits on top of the other; a **vertical edge** is a vertical line, so they sit side by side. It is read off the panels' real rotated positions, so **turning a panel turns the edges it joins along** and its connectors change with it
+- Horizontal edges, 3 per edge: corner-to-corner **both flat** takes the *150 Connector*, corner-to-corner **otherwise** the *MG9 Corner Connector*, shape-to-MG9 the *150 Connector*, shape-to-shape the *180 Connector*
+- Vertical edges, 2 per edge: shape-to-MG9 takes the *Horizontal Connector*, shape-to-shape the *150 Connector*
+- Everything not in those rules keeps the behaviour it had: corner-to-plain-MG9 is still 3 × *150 Connector*, and two plain MG9 panels still need nothing
+- Several rules share one stock item, so each item gets **one row** with the rules that asked for it spelled out in its method text - two rows on one code would have read as a duplicate requirement
+
+> **Two codes, not one.** The brief gave both the *150 Connector* and the *MG9 Corner Connector* code **12260**. The catalogue has them as separate items - 12260 for the 150 Connector and **12258** for the MG9 Corner Connector, each with its own shelf quantity - so they are kept apart. Pulling one code for both rules would have ordered the wrong part for half of them.
+
+**MG9 Corner panels can be used flat**
+
+- **MG9 LED Corner Panel (flat)** is a new choice wherever the panel variant is set. It is the **same physical part** - same stock line, same shelf, same spare - laid in flat instead of folded round a corner
+- Drawn without the corner hatch, so which panels are actually turning a corner reads at a glance
+- A corner-to-corner join counts as **flat only when both panels are set flat**; one panel still folded means the corner part is what fits
+
+**Accessories that come with the equipment**
+
+- A **32A distro** brings **1 × 32A 3Φ PDL - 32A 3Φ Ceeform Power Adaptor** (`6650`) per distro
+- A **Modular Frame Bottom Beam 1m** brings **4 × MG9 Vertical Connector** (`12480`) per beam
+- Both move with the equipment they hang off, and both appear in the stock totals and the CSV export like any other line
+
+> Three of the new items - the *180 Connector* (12476), the *Horizontal Connector* (12623), the *MG9 Vertical Connector* (12480) and the *distro adaptor* (6650) - have no shelf quantity in this catalogue yet, so they start at **0** and read as a full shortfall until Rentman fills them in or an override is set.
+
+**PDF labels are easier to read**
+
+- Panel labels, metre markings and the view heading in the PDF's Panel Layout pages now carry a **thin white casing behind the text**. The fill colour is unchanged and the outline is stroked underneath it, so characters stay sharp - it just lifts them off the panel fill and the cabling crossing it
 
 ## Recent Changes In v0.45.0
 

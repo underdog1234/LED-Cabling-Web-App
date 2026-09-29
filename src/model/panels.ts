@@ -179,7 +179,7 @@ export type PanelAnchorSpec = {
 // edge uses the same pattern so flush edges (rect-rect, rect-to-shaped-leg) share
 // exact anchor positions and join cleanly.
 const EDGE_ANCHORS = [-0.8, -0.4, 0, 0.4, 0.8];
-const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
+export const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
 
 // Local (centre-relative, unrotated) anchor points for a panel shape. Base
 // orientations match the layout tool: triangle right-angle bottom-left (legs =
@@ -275,6 +275,46 @@ export const panelsAnchorJoined = (a: PanelAnchorSpec, b: PanelAnchorSpec): bool
     if (shared >= 2) return true;
   }
   return false;
+};
+
+/**
+ * Orientation of the LINE two joined panels meet along, in world space, or
+ * null when they do not meet at all.
+ *
+ * "horizontal" means the shared edge is a horizontal line, so one panel sits
+ * on top of the other; "vertical" means a vertical line, so they sit side by
+ * side. Taken from the panels' rotated world anchors rather than their
+ * unrotated footprints, so turning a panel turns the edges it joins along -
+ * and therefore the connectors that edge needs (see model/connectors.ts).
+ *
+ * A panel spun to something other than a quarter turn meets its neighbour on a
+ * slope; that is classified by whichever way the edge leans furthest, which is
+ * the connector a builder would reach for.
+ */
+export const sharedEdgeOrientation = (a: PanelAnchorSpec, b: PanelAnchorSpec): "horizontal" | "vertical" | null => {
+  const bw = panelWorldAnchors(b);
+  const shared = panelWorldAnchors(a).filter((pa) =>
+    bw.some((pb) => Math.abs(pa.x - pb.x) <= ANCHOR_JOIN_TOL && Math.abs(pa.y - pb.y) <= ANCHOR_JOIN_TOL),
+  );
+  if (shared.length < 2) return null;
+  // Every shared anchor lies on the one edge, so the two furthest apart span it.
+  let spanX = 0;
+  let spanY = 0;
+  let span = 0;
+  for (let i = 0; i < shared.length; i += 1) {
+    for (let j = i + 1; j < shared.length; j += 1) {
+      const dx = Math.abs(shared[i].x - shared[j].x);
+      const dy = Math.abs(shared[i].y - shared[j].y);
+      const d = Math.hypot(dx, dy);
+      if (d > span) {
+        span = d;
+        spanX = dx;
+        spanY = dy;
+      }
+    }
+  }
+  if (span <= ANCHOR_JOIN_TOL) return null;
+  return spanX >= spanY ? "horizontal" : "vertical";
 };
 
 /** Connected components over the anchor-join relation; id -> group index. */

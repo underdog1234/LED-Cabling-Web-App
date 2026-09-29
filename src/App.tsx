@@ -16,8 +16,15 @@ import {
   joinedGroupIdsByGeom,
   panelsAnchorJoined,
   rectsJoined,
+  sharedEdgeOrientation,
   MODULE_MM,
 } from "./model/panels";
+import {
+  CONNECTOR_NAMES,
+  connectorForEdge,
+  type ConnectorKey,
+  type ConnectorPanelClass,
+} from "./model/connectors";
 import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
 import SubScreenPanel from "./subScreens/SubScreenPanel";
 import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
@@ -54,7 +61,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.45.0";
+const APP_VERSION = "0.46.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -219,8 +226,22 @@ const STOCK_CATALOG = {
   mg12Triangle: { code: "12398", name: "Triangle Panel", stock: 20 },
   mg13Curved: { code: "12399", name: "1/4 Curved Panel", stock: 20 },
   mg9Corner: { code: "12225", name: "YES TECH MG9 P2.9 500mm x 500mm LED Corner Panel", stock: 80 },
+  // The "150 Connector" of the connector rules (see model/connectors.ts) -
+  // one stock item, whichever rule asks for it.
   cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 240 },
+  // The "MG9 Corner Connector". The connector brief gave this 12260 as well,
+  // the same code as the 150 Connector above; the catalogue has it as its own
+  // item on 12258, with its own shelf quantity, so that is what is used. Two
+  // rules pulling one code would have ordered the wrong part for half of them.
   cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 160 },
+  // Shelf quantities for the three items below are not in this catalogue yet,
+  // so they start at 0 and read as a full shortfall until Rentman fills them
+  // in (or someone sets an override) - honest about what is not known, rather
+  // than a guess that quietly under-orders.
+  connector180: { code: "12476", name: "YES TECH MG9 180 Connector", stock: 0 },
+  horizontalConnector: { code: "12623", name: "YES TECH MG9 Horizontal Connector", stock: 0 },
+  mg9VerticalConnector: { code: "12480", name: "YES TECH MG9 Vertical Connector", stock: 0 },
+  distro32Adaptor: { code: "6650", name: "32A 3\u03a6 PDL - 32A 3\u03a6 Ceeform Power Adaptor", stock: 0 },
   // Ballast for the temporary fencing around a ground-supported wall.
   // `code` is Rentman's equipment CODE (12357), not its internal record id
   // (28512) - every lookup in this app goes through the code, so the id would
@@ -239,6 +260,12 @@ export const PANEL_VARIANTS = {
   TRIANGLE: { id: "TRIANGLE", label: "MG12 Triangle Panel", symbol: "△", stockItem: STOCK_CATALOG.mg12Triangle, shape: "triangle" },
   CURVED: { id: "CURVED", label: "MG13 1/4 Curved Panel", symbol: "◜", stockItem: STOCK_CATALOG.mg13Curved, shape: "curve" },
   CORNER: { id: "CORNER", label: "MG9 LED Corner Panel", symbol: "Corner", stockItem: STOCK_CATALOG.mg9Corner, shape: "corner" },
+  // The same physical part as CORNER - same stock item, same shelf, same spare
+  // bucket - laid in flat instead of folded round a corner. Only the join it
+  // makes with its neighbour differs, and that is what decides the connector
+  // (see model/connectors.ts). Drawn without the corner hatch so which panels
+  // are actually turning a corner is readable at a glance.
+  CORNER_FLAT: { id: "CORNER_FLAT", label: "MG9 LED Corner Panel (flat)", symbol: "Corner flat", stockItem: STOCK_CATALOG.mg9Corner, shape: "rect" },
 } as const;
 
 // Shaped panels (MG12 triangle / MG13 quarter circle) are physical one-way
@@ -606,7 +633,7 @@ export const spareBucketOfCell = (cell: Cell): SpareBucketKey => {
   const variant = cell.panelVariant ?? "STANDARD";
   if (variant === "TRIANGLE") return "MG9_TRIANGLE";
   if (variant === "CURVED") return "MG9_CURVED";
-  if (variant === "CORNER") return "MG9_CORNER";
+  if (variant === "CORNER" || variant === "CORNER_FLAT") return "MG9_CORNER";
   return "MG9_STANDARD";
 };
 const SPARE_BUCKET_RATIO: Record<SpareBucketKey, number> = {
@@ -1575,6 +1602,28 @@ const drawPanelShape = (
 // Kept apart from drawPanelShape so the caller can paint the cable runs in
 // between the two: cables go over the panel graphics, the numbered badges go
 // back over the cables, and neither ends up unreadable.
+// Draw text with a thin white casing behind it, so a label stays readable
+// wherever it lands - over a panel fill, over a cable run, over the gap
+// between them. The outline is STROKED FIRST and the fill goes over the top,
+// so the character shapes stay sharp instead of being eaten into from the
+// outside, and it is deliberately light (about a sixth of the font size,
+// capped) - enough to lift the text off what is behind it without small print
+// closing up.
+//
+// The caller sets font, colour and alignment as usual; only the casing is
+// added here.
+const drawOutlinedText = (ctx: CanvasRenderingContext2D, text: string, x: number, y: number, fontPx: number) => {
+  const casing = Math.min(2.5, Math.max(1, fontPx / 6));
+  ctx.save();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = casing;
+  ctx.lineJoin = "round";
+  ctx.miterLimit = 2;
+  ctx.strokeText(text, x, y);
+  ctx.restore();
+  ctx.fillText(text, x, y);
+};
+
 const drawPanelBadges = (
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -2900,27 +2949,45 @@ export default function App() {
   const powerCableSpare = Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
   const distroRequired = Math.max(1, Math.ceil(powerPortsUsed / distro.portCount));
 
-  const cornerJoinStats = useMemo(() => {
-    // Corner-panel joins = flush shared edges with neighbours (position-based,
-    // works for free layouts too). Corner-to-corner pairs counted once.
-    let cornerToFlat = 0;
-    let cornerToCorner = 0;
-    const corners = activeCells.filter((cell) => cell.panelVariant === "CORNER");
-    corners.forEach((cell) => {
-      const geom = cellGeom(cell);
-      activeCells.forEach((other) => {
-        if (other.id === cell.id) return;
-        if (!panelsAnchorJoined(geom, cellGeom(other))) return;
-        if (other.panelVariant === "CORNER") {
-          if (other.id > cell.id) cornerToCorner += 1;
-        } else {
-          cornerToFlat += 1;
-        }
-      });
-    });
-
-    return { cornerToFlat, cornerToCorner };
-  }, [activeCells, grid]);
+  // Connectors, worked out from the edges panels actually share in this
+  // layout - flush joins found from panel positions, so free-form layouts and
+  // rotated panels are handled the same as a plain grid.
+  //
+  // Every pair is visited once (j starts after i), so a SHARED edge is counted
+  // once rather than once per panel, and an exposed edge - one with nothing on
+  // the other side of it - is never counted at all. Which connector, and how
+  // many, is model/connectors.ts; this only finds the edges and adds them up.
+  //
+  // MG9-family panels only: MT and poster panels are a different build system
+  // and none of these rules is written for them.
+  const connectorNeeds = useMemo(() => {
+    const classOf = (cell: Cell): ConnectorPanelClass | null => {
+      if (cellPanelType(cell) !== "MG9") return null;
+      const variant = cell.panelVariant ?? "STANDARD";
+      if (variant === "TRIANGLE" || variant === "CURVED") return "shape";
+      if (variant === "CORNER") return "corner";
+      if (variant === "CORNER_FLAT") return "cornerFlat";
+      return "mg9";
+    };
+    const tally = new Map<ConnectorKey, { qty: number; rules: Map<string, { edges: number; per: number }> }>();
+    const cells = activeCells.filter((cell) => classOf(cell) !== null);
+    const geoms = cells.map(cellGeom);
+    for (let i = 0; i < cells.length; i += 1) {
+      for (let j = i + 1; j < cells.length; j += 1) {
+        const edge = sharedEdgeOrientation(geoms[i], geoms[j]);
+        if (!edge) continue;
+        const need = connectorForEdge(classOf(cells[i])!, classOf(cells[j])!, edge);
+        if (!need) continue;
+        const entry = tally.get(need.connector) ?? { qty: 0, rules: new Map() };
+        entry.qty += need.qty;
+        const rule = entry.rules.get(need.rule) ?? { edges: 0, per: need.qty };
+        rule.edges += 1;
+        entry.rules.set(need.rule, rule);
+        tally.set(need.connector, entry);
+      }
+    }
+    return tally;
+  }, [activeCells]);
 
   const deploymentWarning = useMemo(() => {
     if ((deploymentType === DEPLOYMENT_TYPES.GROUND || deploymentType === DEPLOYMENT_TYPES.FLOOR) && mtCount > 0) {
@@ -2999,9 +3066,12 @@ export default function App() {
       });
 
       // Corner panels are orientation-free; keep the original single line.
+      // A corner panel laid in flat is the same physical part off the same
+      // shelf, so it belongs on this line too - only the connector it needs
+      // differs (see model/connectors.ts).
       {
         const item = PANEL_VARIANTS.CORNER.stockItem;
-        const count = panelVariantCounts.CORNER;
+        const count = panelVariantCounts.CORNER + panelVariantCounts.CORNER_FLAT;
         if (item && count > 0) {
           const { spare, spareRounded, total } = spareForBucket(count, "MG9_CORNER");
           rowsOut.push(
@@ -3042,6 +3112,10 @@ export default function App() {
         mt.spareRounded,
         mt.total,
       );
+    }
+
+    if (powerDistro === "32A") {
+      rowsOut.push(makeStockRow(STOCK_CATALOG.distro32Adaptor, distroRequired, `1 per 32A distro across ${distroRequired} distro${distroRequired === 1 ? "" : "s"}`));
     }
 
     rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
@@ -3099,16 +3173,24 @@ export default function App() {
       }
     }
 
-    if (mg9Count > 0) {
-      const flatConnectorRequired = cornerJoinStats.cornerToFlat * 3;
-      const cornerConnectorRequired = cornerJoinStats.cornerToCorner * 3;
-      if (flatConnectorRequired > 0) {
-        rowsOut.push(makeStockRow(STOCK_CATALOG.cornerFlatConnector, flatConnectorRequired, `3 per corner-to-flat join across ${cornerJoinStats.cornerToFlat} joins`));
-      }
-      if (cornerConnectorRequired > 0) {
-        rowsOut.push(makeStockRow(STOCK_CATALOG.cornerCornerConnector, cornerConnectorRequired, `3 per corner-to-corner join across ${cornerJoinStats.cornerToCorner} joins`));
-      }
-    }
+    // Panel-to-panel connectors, one row per stock item however many rules
+    // asked for it - several do share an item, and two rows on one code would
+    // read as a duplicate requirement and break the Rentman stock comparison.
+    // The method text names the connector each rule wanted, so a flat join and
+    // a corner join can still be told apart on the pull sheet.
+    ([
+      ["connector150", STOCK_CATALOG.cornerFlatConnector],
+      ["cornerConnector", STOCK_CATALOG.cornerCornerConnector],
+      ["connector180", STOCK_CATALOG.connector180],
+      ["horizontalConnector", STOCK_CATALOG.horizontalConnector],
+    ] as Array<[ConnectorKey, { code: string; name: string; stock: number }]>).forEach(([key, item]) => {
+      const entry = connectorNeeds.get(key);
+      if (!entry || entry.qty <= 0) return;
+      const detail = [...entry.rules.entries()]
+        .map(([rule, { edges, per }]) => `${edges} ${rule}${edges === 1 ? "" : "s"} at ${per} each`)
+        .join(", ");
+      rowsOut.push(makeStockRow(item, entry.qty, `${CONNECTOR_NAMES[key]}: ${detail}`));
+    });
 
     if (mg9Count > 0 && includeReinforcementPlate) {
       pushBaseRow("12264", "MG9 Reinforcement Plate", Math.ceil(mg9Count * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor (MG9 panels)");
@@ -3141,6 +3223,7 @@ export default function App() {
       const horizontalScrewCount = horizontalFramePieces * 4;
       rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrame950, modularFrameCount, `${verticalFrames} vertical + ${backBraces} back brace + ${horizontalFramePieces} horizontal`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.bottomBeam1m, widthUnits, `${widthUnits} full 1m bottom beams`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.mg9VerticalConnector, widthUnits * 4, `4 per 1m bottom beam across ${widthUnits} beam${widthUnits === 1 ? "" : "s"}`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameScrew, verticalScrewCount + horizontalScrewCount, `${verticalScrewCount} vertical/back brace + ${horizontalScrewCount} horizontal screws`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameUCoupler, verticalFrames * 2, `2 per vertical frame across ${verticalFrames} frames`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.connectingJoint, verticalJoinCount * 2, `2 per vertical join across ${verticalJoinCount} joins`));
@@ -3158,7 +3241,7 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, connectorNeeds, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
 
   // The on-screen table, PDF table and CSV export all list order/pull
   // quantities, not raw internal line items - a row whose real order
@@ -3429,7 +3512,7 @@ export default function App() {
     ctx.fillStyle = "#0f172a";
     ctx.font = "bold 18px Arial";
     ctx.textAlign = "left";
-    ctx.fillText(viewLabel, 16, 24);
+    drawOutlinedText(ctx, viewLabel, 16, 24, 18);
 
     ctx.save();
     ctx.translate(margin, margin + 20);
@@ -3453,7 +3536,7 @@ export default function App() {
       ctx.moveTo(x, -4);
       ctx.lineTo(x, m % 1 === 0 ? -12 : -8);
       ctx.stroke();
-      if (m % 1 === 0) ctx.fillText(`${m}m`, x, -16);
+      if (m % 1 === 0) drawOutlinedText(ctx, `${m}m`, x, -16, 11);
     }
     ctx.textAlign = "right";
     // Height ruler reads bottom-up (0m at the wall's base), matching the live
@@ -3465,7 +3548,7 @@ export default function App() {
       ctx.moveTo(-4, y);
       ctx.lineTo(m % 1 === 0 ? -12 : -8, y);
       ctx.stroke();
-      if (m % 1 === 0) ctx.fillText(`${maxHeightM - m}m`, -16, y + 4);
+      if (m % 1 === 0) drawOutlinedText(ctx, `${maxHeightM - m}m`, -16, y + 4, 11);
     }
 
     // Panel graphics first: fill, outline and the chain-start rings.
@@ -3499,18 +3582,18 @@ export default function App() {
         let by = r.y + r.h - PANEL_LABEL_BOTTOM_PX;
         const variantSymbol = getPanelSymbol(cell);
         if (variantSymbol) {
-          ctx.fillText(variantSymbol, cx, by);
+          drawOutlinedText(ctx, variantSymbol, cx, by, fontPx);
           by -= Math.round(fontPx * 1.3);
         }
         if (cell.assignedPowerPort) {
-          ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, by);
+          drawOutlinedText(ctx, `⚡ Plug ${cell.assignedPowerPort}`, cx, by, fontPx);
           by -= lineStep;
         }
         if (cell.assignedPort) {
-          ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, by);
+          drawOutlinedText(ctx, `🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, by, fontPx);
           by -= lineStep;
         }
-        ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, by);
+        drawOutlinedText(ctx, `↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, by, fontPx);
       }
 
       // Port-number badges last of all, so a run that crosses the top-left
