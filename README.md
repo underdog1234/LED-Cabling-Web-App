@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.51.0`
+Version `0.52.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -19,6 +19,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Flip the panel layout between `Back View` and `Front View`
 - Both PDF Panel Layout pages draw each **sub-screen's boundary and name**, and **Generate PDF** can limit those pages to the sub-screens you pick - the page is then rebuilt around just those panels and says on its face that it shows part of the wall
 - The PDF report carries an **Output Canvas page** - the full canvas resolution, every screen drawn to scale where it sits on it, and the same numbers as a table - plus a **key** on both Panel Layout views explaining every mark on the drawing
+- A PDF **Weight breakdown** page: panels by type, every rigging and cable allowance with the arithmetic behind it, what is left out of the total, and a per-sub-screen panel weight
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
 - Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
 - **Connectors are counted from the edges panels actually share** - one row per connector, per shared edge, with exposed edges adding nothing. Shape panels, corner panels and flat-laid corner panels each pull their own part, and a rotated panel's connectors move with its edges
@@ -30,6 +31,20 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.52.0
+
+**Fixed: the height ruler started in the wrong place**
+
+- The metre marks up the side of the wall were laid out from the **top** and merely relabelled, so on a wall that is not a whole number of metres high - three 0.5m panels being the plain case - **`0m` landed between two panels instead of on the ground**
+- The ruler is now measured **up from the bottom of the wall**: `0m` is the bottom edge, always, and the whole-metre grid lines move with it so the numbers sit on the lines they belong to
+- Fixed in the Panel Layout and in the PDF's layout pages alike
+
+**A weight breakdown page in the PDF**
+
+- New **Weight breakdown** section in Generate PDF: panels type by type (count x each = weight), then every rigging and cable allowance with the sum that produced it - `12 x 1.9kg (MG9) + 0 x 5.9kg (MT)`, `3 outlets in use x 3kg` - and the grand total
+- Allowances that are switched **off** are listed too, greyed, with "No" in the "In the total" column. An allowance nobody can see is one nobody can question
+- With sub-screens, a per-screen panel-weight table follows. Panels only: the rigging allowances are worked out across the whole wall, and splitting them per screen would be inventing a number
 
 ## Recent Changes In v0.51.0
 

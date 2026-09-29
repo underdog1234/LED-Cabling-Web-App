@@ -82,7 +82,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.51.0";
+const APP_VERSION = "0.52.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -3798,16 +3798,18 @@ export default function App() {
       if (m % 1 === 0) drawOutlinedText(ctx, `${m}m`, x, rulerTextY, 11);
     }
     ctx.textAlign = "right";
-    // Height ruler reads bottom-up (0m at the wall's base), matching the live
-    // workspace - only the printed label flips, not the tick positions.
-    const maxHeightM = Math.floor(layoutBBox.h / 1000);
+    // Height ruler reads bottom-up: 0m IS the bottom of the wall, and the ticks
+    // are measured up from there - not laid out from the top and relabelled,
+    // which put 0m between two panels on any wall that is not a whole number
+    // of metres high (three 0.5m panels, for instance).
+    const wallBottomPx = layoutBBox.h * px;
     for (let m = 0; m * 1000 <= layoutBBox.h + 1; m += 0.5) {
-      const y = m * 1000 * px;
+      const y = wallBottomPx - m * 1000 * px;
       ctx.beginPath();
       ctx.moveTo(-4, y);
       ctx.lineTo(m % 1 === 0 ? rulerTextX + 4 : -8, y);
       ctx.stroke();
-      if (m % 1 === 0) drawOutlinedText(ctx, `${maxHeightM - m}m`, rulerTextX, y + 4, 11);
+      if (m % 1 === 0) drawOutlinedText(ctx, `${m}m`, rulerTextX, y + 4, 11);
     }
 
     // Panel graphics first: fill, outline and the chain-start rings.
@@ -4711,6 +4713,7 @@ const exportJson = () => {
       sections.push({ key: "sparePanels", label: "Spare Panels by Surface", hint: "Panel counts broken down per sub-screen and panel type" });
     }
     sections.push({ key: "ports", label: "Signal & Power Ports In Use", hint: "Per-port panel counts and first-to-last panel of each chain" });
+    sections.push({ key: "weights", label: "Weight breakdown", hint: "Every weight behind the total - panels by type, each rigging and cable allowance, and what is left out" });
     if (subScreens.length > 0) sections.push({ key: "subScreens", label: "Sub-Screens summary" });
     sections.push({ key: "outputCanvas", label: "Output Canvas", hint: "Canvas resolution and where each screen sits on it" });
     sections.push(
@@ -5354,6 +5357,185 @@ const exportJson = () => {
       }
     };
 
+    /**
+     * Every weight that makes up the total, and where each one comes from.
+     *
+     * The summary page has only ever printed one number, which is no use to
+     * whoever has to sign off a rigging plot: this page shows the panels type
+     * by type, each rigging and cable allowance with the sum that produced it,
+     * and the allowances that are switched OFF as well - an allowance nobody
+     * can see is one nobody can question.
+     */
+    const drawWeightsPage = () => {
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      pdf.text(`${safeProjectName} - Weight Breakdown`, 10, 12);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      pdf.setTextColor(71, 85, 105);
+      pdf.text("Every figure below is this project's own layout and patching - no allowance is carried in that is not listed here.", 10, 18);
+      pdf.setTextColor(15, 23, 42);
+
+      let y = 30;
+      const sectionHeading = (text: string) => {
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(11);
+        pdf.text(text, 10, y);
+        y += 6;
+      };
+      const tableHead = (cols: Array<{ text: string; x: number; align?: "right" }>) => {
+        pdf.setFillColor(226, 232, 240);
+        pdf.rect(10, y - 5, 274, 7, "F");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(8);
+        cols.forEach((col) => pdf.text(col.text, col.x, y, col.align ? { align: col.align } : undefined));
+        y += 6;
+        pdf.setFont("helvetica", "normal");
+      };
+      const row = (cells: Array<{ text: string; x: number; align?: "right" }>, bold = false, muted = false) => {
+        pdf.setFont("helvetica", bold ? "bold" : "normal");
+        pdf.setFontSize(8);
+        if (muted) pdf.setTextColor(100, 116, 139);
+        cells.forEach((cell) => pdf.text(cell.text, cell.x, y, cell.align ? { align: cell.align } : undefined));
+        if (muted) pdf.setTextColor(15, 23, 42);
+        y += 6;
+      };
+      const kg = (value: number) => `${value.toFixed(1)} kg`;
+
+      // --- Panels, by type -------------------------------------------------
+      sectionHeading("Panels");
+      tableHead([
+        { text: "Panel type", x: 12 },
+        { text: "Panels", x: 80, align: "right" },
+        { text: "Each", x: 120, align: "right" },
+        { text: "Weight", x: 165, align: "right" },
+      ]);
+      (Object.keys(PANEL_TYPES) as PanelTypeKey[]).forEach((key) => {
+        const count = panelTypeCounts[key];
+        if (!count) return;
+        const spec = PANEL_TYPES[key];
+        row([
+          { text: key === "POSTER" ? `${spec.name} (per section)` : spec.name, x: 12 },
+          { text: formatNumber(count), x: 80, align: "right" },
+          { text: kg(spec.weight), x: 120, align: "right" },
+          { text: kg(count * spec.weight), x: 165, align: "right" },
+        ]);
+      });
+      if (panelTypeCounts.POSTER > 0) {
+        row([{ text: "LED poster sections are carried at 0 kg by instruction, not by omission.", x: 12 }], false, true);
+      }
+      row([
+        { text: "Panels subtotal", x: 12 },
+        { text: formatNumber(totalPanels), x: 80, align: "right" },
+        { text: "", x: 120 },
+        { text: kg(panelOnlyWeight), x: 165, align: "right" },
+      ], true);
+      y += 4;
+
+      // --- Rigging and cables ---------------------------------------------
+      sectionHeading("Rigging and cables");
+      pdf.setFontSize(8);
+      pdf.setTextColor(100, 116, 139);
+      pdf.text(
+        `Top-row panels (what the rigging hangs from): ${topRowBars.mg9} MG9, ${topRowBars.mt} MT${topRowBars.poster ? `, ${topRowBars.poster} poster sections` : ""}.`,
+        10,
+        y,
+      );
+      pdf.setTextColor(15, 23, 42);
+      y += 6;
+      tableHead([
+        { text: "Item", x: 12 },
+        { text: "How it is worked out", x: 80 },
+        { text: "In the total", x: 180, align: "right" },
+        { text: "Weight", x: 215, align: "right" },
+      ]);
+      const allowance = (name: string, method: string, weight: number, included: boolean) => {
+        row([
+          { text: name, x: 12 },
+          // Clipped to its column: a long method running under the next
+          // column is how "No" ends up printed through a sentence.
+          { text: pdf.splitTextToSize(method, 95)[0], x: 80 },
+          { text: included ? "Yes" : "No", x: 180, align: "right" },
+          { text: kg(weight), x: 215, align: "right" },
+        ], false, !included);
+      };
+      allowance(
+        "Fly bar",
+        `${topRowBars.mg9} x ${PANEL_TYPES.MG9.defaults.flyBarWeight}kg (MG9) + ${topRowBars.mt} x ${PANEL_TYPES.MT.defaults.flyBarWeight}kg (MT)`,
+        flyBarWeight,
+        includeFlyBar,
+      );
+      allowance(
+        "Sling and shackle",
+        `${topRowBars.mg9 + topRowBars.mt} top-row panels x ${PANEL_TYPES.MG9.defaults.slingWeight}kg`,
+        slingWeight,
+        includeSling,
+      );
+      allowance(
+        "Power cables",
+        `${powerPortsUsed} outlet${powerPortsUsed === 1 ? "" : "s"} in use x 3kg`,
+        powerCableWeight,
+        includePowerCable,
+      );
+      allowance(
+        "Signal cables",
+        `${effectiveSignalPortsUsed} run${effectiveSignalPortsUsed === 1 ? "" : "s"} x 1kg${backupSignalLoop ? " (backup loop doubles them)" : ""}`,
+        signalCableWeight,
+        includeSignalCable,
+      );
+      allowance("Custom weight", "Entered by hand in Wall Summary", Number(customWeight || 0), includeCustomWeight);
+      row([
+        { text: "Rigging and cables subtotal", x: 12 },
+        { text: "Only the items marked Yes", x: 80 },
+        { text: "", x: 180 },
+        { text: kg(additionalWeight), x: 215, align: "right" },
+      ], true);
+      y += 4;
+
+      // --- Total ------------------------------------------------------------
+      pdf.setFillColor(224, 242, 254);
+      pdf.rect(10, y - 5, 274, 8, "F");
+      row([
+        { text: "TOTAL WEIGHT", x: 12 },
+        { text: `${kg(panelOnlyWeight)} of panels + ${kg(additionalWeight)} of rigging and cables`, x: 80 },
+        { text: "", x: 180 },
+        { text: kg(totalWeight), x: 215, align: "right" },
+      ], true);
+      y += 4;
+
+      // --- Per sub-screen ----------------------------------------------------
+      // Panels only: the rigging allowances above are worked out across the
+      // whole wall, and splitting them per screen would be inventing a number.
+      if (subScreens.length > 0 && y < 170) {
+        sectionHeading("Panel weight per sub-screen");
+        tableHead([
+          { text: "Sub-screen", x: 12 },
+          { text: "Panels", x: 120, align: "right" },
+          { text: "Panel weight", x: 165, align: "right" },
+        ]);
+        const weightOf = (cells: Cell[]) => cells.reduce((sum, cell) => sum + PANEL_TYPES[cellPanelType(cell)].weight, 0);
+        subScreens.forEach((screen) => {
+          if (y > 190) return;
+          const cells = activePanels.filter((cell) => cell.subScreenId === screen.id);
+          if (!cells.length) return;
+          row([
+            { text: pdf.splitTextToSize(screen.name, 100)[0], x: 12 },
+            { text: formatNumber(cells.length), x: 120, align: "right" },
+            { text: kg(weightOf(cells)), x: 165, align: "right" },
+          ]);
+        });
+        const loose = activePanels.filter((cell) => !cell.subScreenId);
+        if (loose.length && y <= 190) {
+          row([
+            { text: "Panels in no sub-screen", x: 12 },
+            { text: formatNumber(loose.length), x: 120, align: "right" },
+            { text: kg(weightOf(loose)), x: 165, align: "right" },
+          ]);
+        }
+      }
+    };
+
     const drawSubScreensSummaryPage = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
@@ -5619,6 +5801,7 @@ const exportJson = () => {
     if (wants("rentmanDetail")) drawRentmanDetailPage();
     if (wants("sparePanels")) drawSparePanelsPage();
     if (wants("ports")) drawPortsInUsePage();
+    if (wants("weights")) drawWeightsPage();
     if (wants("subScreens") && subScreens.length > 0) drawSubScreensSummaryPage();
     if (wants("outputCanvas")) drawOutputCanvasPage();
     // The Panel Layout pages cover the ticked sub-screens. All of them ticked
@@ -7519,10 +7702,16 @@ const exportJson = () => {
                         />,
                       );
                     }
-                    const kyStart = Math.floor((workspaceOrigin.y - wallBBox.y) / MODULE_MM);
-                    const kyEnd = Math.ceil((workspaceOrigin.y + workspaceSizeMm.h - wallBBox.y) / MODULE_MM);
+                    // Measured UP FROM THE WALL'S BOTTOM, not down from its top:
+                    // heights are read off the floor, and a wall an odd number of
+                    // half-modules high (three 0.5m panels, say) would otherwise put
+                    // its whole-metre lines - and the numbers beside them - half a
+                    // panel off the ground.
+                    const wallBottom = wallBBox.y + wallBBox.h;
+                    const kyStart = Math.floor((wallBottom - workspaceOrigin.y - workspaceSizeMm.h) / MODULE_MM);
+                    const kyEnd = Math.ceil((wallBottom - workspaceOrigin.y) / MODULE_MM);
                     for (let k = kyStart; k <= kyEnd; k += 1) {
-                      const y = mmToPx(wallBBox.y + k * MODULE_MM - workspaceOrigin.y);
+                      const y = mmToPx(wallBottom - k * MODULE_MM - workspaceOrigin.y);
                       const major = k % 2 === 0;
                       lines.push(
                         <line
@@ -7557,19 +7746,22 @@ const exportJson = () => {
                       {m}m
                     </text>
                   ))}
-                  {/* Height ruler reads bottom-up (0m at the wall's base, increasing
-                      upward) to match how a physical wall is measured/built - the line
-                      positions themselves are unchanged, only the printed label. */}
+                  {/* Height ruler reads bottom-up: 0m IS the bottom of the wall,
+                      counting upward, the way a wall is measured on site. It used to
+                      be laid out from the top and merely relabelled, so on a wall
+                      that is not a whole number of metres high - three 0.5m panels
+                      being the plain case - 0m landed between two panels instead of
+                      on the ground. */}
                   {Array.from({ length: Math.floor(wallBBox.h / 1000) + 1 }).map((_, m) => (
                     <text
                       key={`ry-${m}`}
                       x={4}
-                      y={mmToPx(wallBBox.y + m * 1000 - workspaceOrigin.y) + 3}
+                      y={mmToPx(wallBBox.y + wallBBox.h - m * 1000 - workspaceOrigin.y) + 3}
                       fill="#94a3b8"
                       fontSize="10"
                       textAnchor="start"
                     >
-                      {Math.floor(wallBBox.h / 1000) - m}m
+                      {m}m
                     </text>
                   ))}
                 </svg>
