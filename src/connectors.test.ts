@@ -33,7 +33,7 @@ describe("connectorForEdge", () => {
     expect(connectorForEdge("shape", "mg9", "horizontal")).toMatchObject({ connector: "connector150", qty: 3 });
     expect(connectorForEdge("shape", "shape", "horizontal")).toMatchObject({ connector: "connector180", qty: 3 });
     expect(connectorForEdge("shape", "mg9", "vertical")).toMatchObject({ connector: "horizontalConnector", qty: 2 });
-    expect(connectorForEdge("shape", "shape", "vertical")).toMatchObject({ connector: "connector150", qty: 2 });
+    expect(connectorForEdge("shape", "shape", "vertical")).toMatchObject({ connector: "connector180", qty: 2 });
   });
 
   it("lets a shape panel's rule win over the corner rules", () => {
@@ -98,10 +98,11 @@ describe("sharedEdgeOrientation", () => {
     expect(sharedEdgeOrientation(tri(0, 0, 0), tri(0, 500, 180))).toBe("horizontal");
     expect(connectorForEdge("shape", "shape", sharedEdgeOrientation(tri(0, 0, 0), tri(0, 500, 180))!))
       .toMatchObject({ connector: "connector180", qty: 3 });
-    // Legs meeting side by side is the vertical-edge case.
+    // Legs meeting side by side is the vertical-edge case - the same 180
+    // Connector as stacked, only two of them rather than three.
     expect(sharedEdgeOrientation(tri(0, 0, 0), tri(-500, 0, 180))).toBe("vertical");
     expect(connectorForEdge("shape", "shape", sharedEdgeOrientation(tri(0, 0, 0), tri(-500, 0, 180))!))
-      .toMatchObject({ connector: "connector150", qty: 2 });
+      .toMatchObject({ connector: "connector180", qty: 2 });
   });
 
   it("turns the edge with the panel", () => {
@@ -113,5 +114,92 @@ describe("sharedEdgeOrientation", () => {
     expect(sharedEdgeOrientation(wide(0, 0, 90), wide(500, 0, 90))).toBe("vertical");
     // ...and lying flat, a neighbour above it shares a horizontal one.
     expect(sharedEdgeOrientation(wide(0, 0, 0), wide(0, 500, 0))).toBe("horizontal");
+  });
+});
+
+// The whole decision table in one place, as a person would read it off a
+// pull sheet. Every pair of panel kinds, both edge orientations: 20 rows, and
+// nothing outside them. If a rule changes, this is the row that has to be
+// edited to say so - and the table in the README has to be edited with it.
+describe("the connector table, whole", () => {
+  const label: Record<ConnectorPanelClass, string> = {
+    mg9: "Plain MG9",
+    corner: "MG9 Corner (folded)",
+    cornerFlat: "MG9 Corner (laid flat)",
+    shape: "MG12 triangle / MG13 curve",
+  };
+
+  it("decides these 20 joins and no others", () => {
+    const rows: string[] = [];
+    for (let i = 0; i < CLASSES.length; i += 1) {
+      for (let j = i; j < CLASSES.length; j += 1) {
+        for (const edge of EDGES) {
+          const need = connectorForEdge(CLASSES[i], CLASSES[j], edge);
+          rows.push(
+            `${label[CLASSES[i]]} + ${label[CLASSES[j]]} | ${edge} | ${need ? `${CONNECTOR_NAMES[need.connector]} x${need.qty}` : "none"}`,
+          );
+        }
+      }
+    }
+    expect(rows).toEqual([
+      "Plain MG9 + Plain MG9 | horizontal | none",
+      "Plain MG9 + Plain MG9 | vertical | none",
+      "Plain MG9 + MG9 Corner (folded) | horizontal | 150 Connector x3",
+      "Plain MG9 + MG9 Corner (folded) | vertical | 150 Connector x3",
+      "Plain MG9 + MG9 Corner (laid flat) | horizontal | 150 Connector x3",
+      "Plain MG9 + MG9 Corner (laid flat) | vertical | 150 Connector x3",
+      "Plain MG9 + MG12 triangle / MG13 curve | horizontal | 150 Connector x3",
+      "Plain MG9 + MG12 triangle / MG13 curve | vertical | Horizontal Connector x2",
+      "MG9 Corner (folded) + MG9 Corner (folded) | horizontal | MG9 Corner Connector x3",
+      "MG9 Corner (folded) + MG9 Corner (folded) | vertical | MG9 Corner Connector x3",
+      "MG9 Corner (folded) + MG9 Corner (laid flat) | horizontal | MG9 Corner Connector x3",
+      "MG9 Corner (folded) + MG9 Corner (laid flat) | vertical | MG9 Corner Connector x3",
+      "MG9 Corner (folded) + MG12 triangle / MG13 curve | horizontal | 150 Connector x3",
+      "MG9 Corner (folded) + MG12 triangle / MG13 curve | vertical | Horizontal Connector x2",
+      "MG9 Corner (laid flat) + MG9 Corner (laid flat) | horizontal | 150 Connector x3",
+      "MG9 Corner (laid flat) + MG9 Corner (laid flat) | vertical | 150 Connector x3",
+      "MG9 Corner (laid flat) + MG12 triangle / MG13 curve | horizontal | 150 Connector x3",
+      "MG9 Corner (laid flat) + MG12 triangle / MG13 curve | vertical | Horizontal Connector x2",
+      "MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | horizontal | 180 Connector x3",
+      "MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | vertical | 180 Connector x2",
+    ]);
+  });
+});
+
+// What the edge finder does NOT see. These are not bugs being pinned in
+// place - they are the boundaries of the model, written down so a change to
+// it shows up here rather than in somebody's connector count on site.
+describe("joins that produce no connector at all", () => {
+  const at = (cx: number, cy: number, rotation = 0, shape: PanelAnchorSpec["shape"] = "rect", halfW = 250, halfH = 250): PanelAnchorSpec =>
+    ({ cx, cy, halfW, halfH, rotation, shape });
+
+  it("sees a flush join, and an offset of a whole anchor spacing", () => {
+    expect(sharedEdgeOrientation(at(0, 0), at(500, 0))).toBe("vertical");
+    expect(sharedEdgeOrientation(at(0, 0), at(0, 500))).toBe("horizontal");
+    // Anchors sit every 100mm along a 500mm edge, so these still line up.
+    expect(sharedEdgeOrientation(at(0, 0), at(100, 500))).toBe("horizontal");
+    expect(sharedEdgeOrientation(at(0, 0), at(200, 500))).toBe("horizontal");
+  });
+
+  it("does NOT see a brick bond - a neighbour offset half a panel", () => {
+    // 250mm falls between the anchors on both edges, so nothing coincides and
+    // the pair reads as unjoined. A brick-bonded wall therefore counts no
+    // connectors along its staggered joins.
+    expect(sharedEdgeOrientation(at(0, 0), at(250, 500))).toBeNull();
+    expect(sharedEdgeOrientation(at(0, 0), at(500, 250))).toBeNull();
+  });
+
+  it("does NOT see an MT panel meeting an MG9 one", () => {
+    // Their anchor spacings differ (MT is 1m wide), so even before the MG9-only
+    // filter in App.tsx, no anchor of one lands on an anchor of the other.
+    expect(sharedEdgeOrientation(at(0, 0, 0, "rect", 500, 250), at(-250, 500))).toBeNull();
+  });
+
+  it("does NOT see panels turned to an odd angle", () => {
+    expect(sharedEdgeOrientation(at(0, 0, 45), at(707, 0, 45))).toBeNull();
+  });
+
+  it("does NOT join a triangle along its hypotenuse", () => {
+    expect(sharedEdgeOrientation(at(0, 0, 0, "triangle"), at(500, 0, 0, "triangle"))).toBeNull();
   });
 });

@@ -26,7 +26,11 @@
 //
 // Vertical edges, 2 per shared edge:
 //   shape      <-> MG9                         -> Horizontal Connector
-//   shape      <-> shape                       -> 150 Connector
+//   shape      <-> shape                       -> 180 Connector
+//
+// SHAPE TO SHAPE IS ALWAYS THE 180 CONNECTOR, whichever way the edge runs.
+// The vertical case took the 150 Connector until v0.53.0; two shaped panels
+// meeting leg to leg need the 180 either way round.
 //
 // Anything else keeps the rule it had before these were added:
 //   MG9 Corner <-> plain MG9, either way round -> 3 x 150 Connector
@@ -86,7 +90,7 @@ export const connectorForEdge = (
         : { connector: "connector150", qty: 3, rule: "shape-to-MG9 horizontal edge" };
     }
     return bothShape
-      ? { connector: "connector150", qty: 2, rule: "shape-to-shape vertical edge" }
+      ? { connector: "connector180", qty: 2, rule: "shape-to-shape vertical edge" }
       : { connector: "horizontalConnector", qty: 2, rule: "shape-to-MG9 vertical edge" };
   }
 

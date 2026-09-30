@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.52.1`
+Version `0.53.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -31,6 +31,74 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Connector Rules
+
+Connectors are counted from the edges panels **actually share**, found from their
+real rotated positions. Each shared edge is counted **once**, never once per
+panel, and an edge with nothing on the other side adds nothing.
+
+A **horizontal edge** is a horizontal line, so one panel sits on top of the
+other; a **vertical edge** is a vertical line, so they sit side by side.
+
+| Panels joined | Edge | Connector | Per edge |
+| --- | --- | --- | --- |
+| Plain MG9 + Plain MG9 | Stacked (horizontal edge) | **none** | - |
+| Plain MG9 + Plain MG9 | Side by side (vertical edge) | **none** | - |
+| Plain MG9 + MG9 Corner (folded) | Stacked (horizontal edge) | 150 Connector | 3 |
+| Plain MG9 + MG9 Corner (folded) | Side by side (vertical edge) | 150 Connector | 3 |
+| Plain MG9 + MG9 Corner (laid flat) | Stacked (horizontal edge) | 150 Connector | 3 |
+| Plain MG9 + MG9 Corner (laid flat) | Side by side (vertical edge) | 150 Connector | 3 |
+| Plain MG9 + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 150 Connector | 3 |
+| Plain MG9 + MG12 triangle / MG13 curve | Side by side (vertical edge) | Horizontal Connector | 2 |
+| MG9 Corner (folded) + MG9 Corner (folded) | Stacked (horizontal edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG9 Corner (folded) | Side by side (vertical edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG9 Corner (laid flat) | Stacked (horizontal edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG9 Corner (laid flat) | Side by side (vertical edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 150 Connector | 3 |
+| MG9 Corner (folded) + MG12 triangle / MG13 curve | Side by side (vertical edge) | Horizontal Connector | 2 |
+| MG9 Corner (laid flat) + MG9 Corner (laid flat) | Stacked (horizontal edge) | 150 Connector | 3 |
+| MG9 Corner (laid flat) + MG9 Corner (laid flat) | Side by side (vertical edge) | 150 Connector | 3 |
+| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 150 Connector | 3 |
+| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Side by side (vertical edge) | Horizontal Connector | 2 |
+| MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 180 Connector | 3 |
+| MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | Side by side (vertical edge) | 180 Connector | 2 |
+
+The order of the pair never changes the answer, and an MG9 Corner panel counts
+as a plain MG9 when the other side of the edge is a shaped panel.
+
+### What this does not count
+
+These are the edges of the model rather than rules, and each one is pinned as a
+test in `src/connectors.test.ts`:
+
+- **Only MG9 panels are considered.** MT panels and LED poster sections are
+  skipped entirely, so an MT wall asks for no connectors at all - including the
+  MT Corner Connecting Bracket and its Bolt, which are in the stock catalogue
+  but are never counted from a layout
+- **A brick bond is not seen as a join.** Anchors sit every 100mm along a 500mm
+  edge, so a neighbour offset 100mm or 200mm still lines up - but one offset
+  **half a panel (250mm)** lines up with nothing, and the pair reads as
+  unjoined. A staggered wall therefore counts no connectors along its
+  staggered joins
+- **An MT panel meeting an MG9 one is not seen as a join** either, their anchor
+  spacings being different
+- **Panels turned to an odd angle** (45 degrees, say) are not seen as joined
+- **A triangle never joins along its hypotenuse**, nor a quarter circle along
+  its arc - correctly, since there is nothing there to bolt to
+- **MG9 Vertical Connector (12480)** is never chosen by a join rule; it comes
+  only from the Modular Frame Bottom Beam allowance, 4 per 1m beam
+
+## Recent Changes In v0.53.0
+
+**Shape to shape is always the 180 Connector**
+
+- Two shaped panels (MG12 triangle, MG13 quarter circle) meeting leg to leg now take the **180 Connector whichever way the edge runs**. Stacked was already 3 x 180; side by side took the *150 Connector* and now takes **2 x 180**
+
+**The whole connector table, written down**
+
+- Every pair of panel kinds and both edge orientations - 20 rows - are listed under [Connector Rules](#connector-rules) below, and pinned row by row in `src/connectors.test.ts`, so the table and the code cannot drift apart
+- The **limits of the model** are pinned there too, as tests: what the edge finder does not see is now recorded rather than assumed (see the list under the table)
 
 ## Recent Changes In v0.52.1
 
