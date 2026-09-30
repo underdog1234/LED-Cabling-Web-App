@@ -82,7 +82,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.52.0";
+const APP_VERSION = "0.52.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -92,9 +92,21 @@ const APP_VERSION = "0.52.0";
 // canvas resolution with the wall's mm dimensions (as a flat multiplier
 // does) makes huge walls render at far more pixels - and file size - than
 // that fixed print area could ever show, with zero visible quality gain.
-const PDF_LAYOUT_IMAGE_DPI = 300;
+//
+// 600, not the 300 it was, because these pages get printed ENLARGED. The
+// report is A4, and a layout blown up to A3 is 1.41x bigger on paper from
+// the same pixels - 300 DPI became 212, and the panel text, which is only
+// about a millimetre tall to begin with, went to pieces. At 600 the same
+// A3 print lands at 424 DPI, and A2 still has 300 to work with.
+const PDF_LAYOUT_IMAGE_DPI = 600;
 const PDF_LAYOUT_USABLE_WIDTH_MM = 277; // matches drawLayoutPage's usableWidth (pageWidth - 20)
 const PDF_LAYOUT_USABLE_HEIGHT_MM = 152; // matches drawLayoutPage's usableHeight (pageHeight - 58)
+// Ceiling on one layout image, whatever the DPI above asks for. The print
+// area is fixed, so at 600 DPI the largest canvas this can ever produce is
+// about 6,500 x 3,600 (23MP) and this never bites; it is here so that
+// raising the DPI again cannot quietly hand the browser a canvas too big to
+// allocate, which fails by returning a BLANK image rather than by throwing.
+const PDF_LAYOUT_MAX_IMAGE_PIXELS = 40e6;
 
 export const PANEL_TYPES = {
   MG9: {
@@ -3744,7 +3756,11 @@ export default function App() {
       printHeightMm = PDF_LAYOUT_USABLE_HEIGHT_MM;
       printWidthMm = printHeightMm * contentRatio;
     }
-    const scale = (PDF_LAYOUT_IMAGE_DPI / 25.4) * (printWidthMm / contentW);
+    const targetScale = (PDF_LAYOUT_IMAGE_DPI / 25.4) * (printWidthMm / contentW);
+    const scale = Math.min(
+      targetScale,
+      Math.sqrt(PDF_LAYOUT_MAX_IMAGE_PIXELS / (contentW * contentH)),
+    );
 
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(contentW * scale));

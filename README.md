@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.52.0`
+Version `0.52.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -31,6 +31,15 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.52.1
+
+**Panel Layout pages print sharply at A3**
+
+- The layout drawing is a picture, and it was rendered at **300 DPI for the A4 page it sits on**. Print that A4 page enlarged onto A3 and the same pixels are stretched 1.41x - 212 DPI - and the panel text, which is only about a millimetre tall to begin with, went to pieces
+- It now renders at **600 DPI**, so an A3 print lands at 424 DPI and even A2 still has 300 to work with
+- The cost is the file: a 141-panel wall goes from about 0.9MB to 2.0MB, and the report takes roughly ten seconds longer to build. Everything else in the PDF is vector and was always sharp at any size
+- A ceiling on the image size guards the canvas: the print area is fixed, so at 600 DPI nothing can exceed about 23 megapixels, and a future DPI rise cannot quietly hand the browser a canvas too big to allocate - which fails by returning a blank image rather than by raising an error
 
 ## Recent Changes In v0.52.0
 
