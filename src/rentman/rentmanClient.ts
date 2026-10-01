@@ -18,9 +18,19 @@ export type EquipmentAvailabilityProject = {
 
 export type EquipmentAvailability = {
   totalStock: number;
-  /** Sum of quantity required across every project overlapping the requested range. */
+  /**
+   * Every overlapping booking added together. NOT what is unavailable: two
+   * jobs of 100 on different days of the range are 100 out, never 200. The app
+   * works the real figure out from `projects` itself (see availabilityPeak),
+   * so this stays only to be shown beside it.
+   */
   totalRequired: number;
-  /** totalStock - totalRequired. Deliberately NOT clamped at 0 - negative means overbooked. */
+  /** The most out on any ONE day of the range. Absent from older deployments of the proxy - the app computes its own either way. */
+  peakRequired?: number;
+  /** First and last day the peak holds, YYYY-MM-DD. Absent from older deployments. */
+  peakStart?: string | null;
+  peakEnd?: string | null;
+  /** totalStock - peakRequired. Deliberately NOT clamped at 0 - negative means overbooked. */
   remaining: number;
   projects: EquipmentAvailabilityProject[];
 };

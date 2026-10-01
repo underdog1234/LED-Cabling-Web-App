@@ -133,6 +133,63 @@ type AvailabilityProject = {
   planPeriodEnd: string;
 };
 
+// How much of an item is really unavailable over a date range: the most that
+// is out on any ONE day of it, not the sum of every booking that touches it.
+// Two jobs of 100 on different days inside the range are 100 unavailable, not
+// 200 - the first lot is back on the shelf before the second goes out.
+//
+// The app works this out for itself from the bookings below, so it is right
+// whichever version of this Worker is deployed; this copy keeps the API's own
+// numbers honest for anything else reading it. The tested original, with the
+// cases it was written against, is led-cabling-web/src/rentman/availabilityPeak.ts.
+const DAY_MS = 86_400_000;
+const dayNumber = (value: string | null | undefined): number | null => {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? Math.floor(ms / DAY_MS) : null;
+};
+
+function peakRequiredFor(bookings: AvailabilityProject[], from: string, to: string) {
+  const windowStart = dayNumber(from);
+  const windowEnd = dayNumber(to);
+  if (windowStart === null || windowEnd === null || windowEnd < windowStart) {
+    return { peak: 0, peakStart: null as string | null, peakEnd: null as string | null };
+  }
+  const deltas = new Map<number, number>();
+  for (const booking of bookings) {
+    const start = dayNumber(booking.planPeriodStart);
+    const end = dayNumber(booking.planPeriodEnd);
+    const quantity = Number(booking.quantity) || 0;
+    if (start === null || end === null || quantity <= 0) continue;
+    const first = Math.max(start, windowStart);
+    const last = Math.min(Math.max(end, start), windowEnd);
+    if (last < first) continue;
+    deltas.set(first, (deltas.get(first) ?? 0) + quantity);
+    deltas.set(last + 1, (deltas.get(last + 1) ?? 0) - quantity);
+  }
+  const boundaries = [...deltas.keys()].sort((a, b) => a - b);
+  let running = 0;
+  let peak = 0;
+  let peakStartDay: number | null = null;
+  let peakEndDay: number | null = null;
+  for (let i = 0; i < boundaries.length; i += 1) {
+    running += deltas.get(boundaries[i]) ?? 0;
+    if (running <= 0) continue;
+    const dayFrom = boundaries[i];
+    const dayTo = i + 1 < boundaries.length ? boundaries[i + 1] - 1 : windowEnd;
+    if (dayTo < windowStart || dayFrom > windowEnd) continue;
+    if (running > peak) {
+      peak = running;
+      peakStartDay = Math.max(dayFrom, windowStart);
+      peakEndDay = Math.min(dayTo, windowEnd);
+    } else if (running === peak && peakEndDay !== null && dayFrom === peakEndDay + 1) {
+      peakEndDay = Math.min(dayTo, windowEnd);
+    }
+  }
+  const iso = (day: number | null) => (day === null ? null : new Date(day * DAY_MS).toISOString().slice(0, 10));
+  return { peak, peakStart: iso(peakStartDay), peakEnd: iso(peakEndDay) };
+}
+
 async function handleEquipmentAvailability(env: Env, url: URL): Promise<Response> {
   const codes = parseListParam(url, "codes");
   const from = url.searchParams.get("from");
@@ -179,7 +236,18 @@ async function handleEquipmentAvailability(env: Env, url: URL): Promise<Response
     }
   }
 
-  const result: Record<string, { totalStock: number; totalRequired: number; remaining: number; projects: AvailabilityProject[] } | null> = {};
+  const result: Record<
+    string,
+    {
+      totalStock: number;
+      totalRequired: number;
+      peakRequired: number;
+      peakStart: string | null;
+      peakEnd: string | null;
+      remaining: number;
+      projects: AvailabilityProject[];
+    } | null
+  > = {};
   codes.forEach((code) => {
     const eq = byCode[code];
     if (!eq) {
@@ -187,10 +255,22 @@ async function handleEquipmentAvailability(env: Env, url: URL): Promise<Response
       return;
     }
     const projects = byEquipmentId[eq.id] || [];
+    // Every booking added together. NOT what is unavailable - bookings on
+    // different days do not take the same kit twice - and kept only so a
+    // caller can show the two figures side by side. Use peakRequired.
     const totalRequired = projects.reduce((sum, p) => sum + p.quantity, 0);
+    const { peak, peakStart, peakEnd } = peakRequiredFor(projects, from, to);
     // Deliberately not clamped at 0 - a negative "remaining" IS the shortage
     // this feature exists to surface.
-    result[code] = { totalStock: eq.currentQuantity, totalRequired, remaining: eq.currentQuantity - totalRequired, projects };
+    result[code] = {
+      totalStock: eq.currentQuantity,
+      totalRequired,
+      peakRequired: peak,
+      peakStart,
+      peakEnd,
+      remaining: eq.currentQuantity - peak,
+      projects,
+    };
   });
   return json(result, env);
 }

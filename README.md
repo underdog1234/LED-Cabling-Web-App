@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.55.0`
+Version `0.56.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -29,7 +29,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
-- Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
+- Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
 
 ## Recent Changes In v0.55.0
@@ -72,6 +72,37 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.56.0
+
+**Fixed: availability was adding up jobs that never clash**
+
+The Rentman availability check asked "what is booked in this window" and added
+it all together. Two jobs of 100 panels, one on the 4th and one on the 8th,
+came back as **200 unavailable** - though the first lot is on the shelf again
+days before the second goes out. On a busy month that reported shortages that
+did not exist.
+
+- It now asks the question that matters: **the most of an item out on any ONE
+  day of your range**. Two jobs of 100 on different days are 100 unavailable;
+  two that share a day are 200
+- The column is **Out on the day**, and opening it names the peak day, the
+  bookings that make it up, and - when the two differ - says what the old sum
+  would have been and why it is not the answer: *"260 is booked across the
+  whole range, but these jobs do not all run together - only 160 is ever out on
+  one day"*
+- The PDF's Other Projects & Repairs page says the same, marking the bookings
+  in the peak with a `*`
+- **Days, not hours.** Two jobs sharing a day are competing for the same panels
+  even when one derigs in the morning and the other rigs in the afternoon, and
+  a planner wants that flagged rather than smoothed away by a clock
+- A booking only counts for the days it **shares with your range** - a
+  month-long sub-rental running either side of your job takes up your days, not
+  its own
+- The app works this out from the bookings the proxy already returns, so it is
+  right **without redeploying the Worker**. The Worker has been fixed too - it
+  now returns `peakRequired` alongside the old sum, and its `remaining` uses
+  the peak - but nothing waits on that going live
 
 ## Connector Rules
 

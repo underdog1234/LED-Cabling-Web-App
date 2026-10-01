@@ -47,6 +47,7 @@ import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./n
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
 import { applyStockOverrides, baseCodeOf, buildStockComparison, loadStockOverrides, saveStockOverrides, type StockComparisonRow, type StockOverrides } from "./rentman/stockOverrides";
+import { peakUsage } from "./rentman/availabilityPeak";
 import {
   addedStockCodes,
   applyStockEdits,
@@ -83,7 +84,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.55.0";
+const APP_VERSION = "0.56.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -3646,18 +3647,26 @@ export default function App() {
   // visibleStockRows joined to whatever Rentman data has been pulled, and the
   // one place the availability sum lives:
   //
-  //   Available Stock = Rentman Stock - Other Projects - Broken/Repair
+  //   Available Stock = Rentman Stock - peak out on other jobs - Broken/Repair
   //
   // then compared against this project's own TOTAL Required. `otherProjects`
   // and `broken` stay null until their check has actually been run, which is
   // what hides those columns rather than showing a misleading 0.
+  //
+  // `otherProjects` is the PEAK of the other bookings, not their sum: two jobs
+  // of 100 on different days in this window are 100 unavailable, not 200, and
+  // adding them up reported shortages that did not exist (see peakUsage). The
+  // peak is worked out here from the bookings the proxy returns, so it is
+  // right whichever version of the Worker is deployed.
   const stockTableRows = useMemo(() => {
     const LOW_MARGIN = 0.1;
+    const range = availabilityCheckedRange;
     return visibleStockRows.map((row) => {
       const base = baseCodeOf(row.code);
       const availability = availabilityByCode ? availabilityByCode[base] ?? null : null;
       const repairs = repairsByCode ? repairsByCode[base] ?? null : null;
-      const otherProjects = availabilityByCode ? availability?.totalRequired ?? 0 : null;
+      const usage = availability && range ? peakUsage(availability.projects, range.from, range.to) : null;
+      const otherProjects = availabilityByCode ? usage?.peak ?? 0 : null;
       const broken = repairsByCode ? repairs?.quantity ?? 0 : null;
       const totalRequired = row.rounded ?? row.required;
       const available = row.stock - (otherProjects ?? 0) - (broken ?? 0);
@@ -3674,10 +3683,11 @@ export default function App() {
         shortBy: headroom < 0 ? -headroom : 0,
         result,
         projects: availability?.projects ?? [],
+        usage,
         repairItems: repairs?.items ?? [],
       };
     });
-  }, [visibleStockRows, availabilityByCode, repairsByCode]);
+  }, [visibleStockRows, availabilityByCode, repairsByCode, availabilityCheckedRange]);
   const rentmanChecked = availabilityByCode !== null || repairsByCode !== null;
   const rentmanProxyConfigured = isRentmanProxyConfigured();
   const stockOverridesApplied = Object.keys(stockOverrides).length > 0;
@@ -5183,7 +5193,7 @@ const exportJson = () => {
         pdf.text(STOCK_COUNT_LABELS.total, stockCols.rounded, y, { align: "right" });
         pdf.text(rentmanChecked ? "Rentman Stock" : "Stock", stockCols.stock, y, { align: "right" });
         if (rentmanChecked) {
-          if (availabilityByCode) pdf.text("Other Projects", stockCols.other, y, { align: "right" });
+          if (availabilityByCode) pdf.text("Out on the day", stockCols.other, y, { align: "right" });
           if (repairsByCode) pdf.text("Broken / Repair", stockCols.broken, y, { align: "right" });
           pdf.text("Available", stockCols.available, y, { align: "right" });
         }
@@ -5294,7 +5304,7 @@ const exportJson = () => {
       pdf.setTextColor(15, 23, 42);
     }
 
-    // Every project and repair job behind the Other Projects / Broken columns
+    // Every project and repair job behind the Out on the day / Broken columns
     // above, so the printed report stands on its own without needing the
     // expandable cells in the app.
     const drawRentmanDetailPage = () => {
@@ -5309,15 +5319,17 @@ const exportJson = () => {
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(9);
         pdf.setTextColor(100, 116, 139);
-        pdf.text(
+        // Wrapped rather than run off the edge of the page: this line is what
+        // explains why the figures are not the sum of the jobs under them.
+        const intro = pdf.splitTextToSize(
           availabilityCheckedRange
-            ? `Other projects overlapping ${availabilityCheckedRange.from} to ${availabilityCheckedRange.to}. Broken / repair is current, not date-ranged.`
+            ? `Jobs overlapping ${availabilityCheckedRange.from} to ${availabilityCheckedRange.to}. The figure against each item is the most of it out on any ONE day of that range, not the sum of these jobs; * marks the ones making up that peak. Broken / repair is current, not date-ranged.`
             : "Broken / repair is current, not date-ranged.",
-          10,
-          18,
-        );
+          274,
+        ) as string[];
+        intro.forEach((line, index) => pdf.text(line, 10, 18 + index * 4.5));
         pdf.setTextColor(15, 23, 42);
-        y = 26;
+        y = 20 + intro.length * 4.5 + 2;
       };
       const ensureRoom = (linesNeeded: number) => {
         if (y === 0 || y + linesNeeded * 5 > 195) startPage(y !== 0);
@@ -5331,14 +5343,34 @@ const exportJson = () => {
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(8);
         if (entry.projects.length) {
-          pdf.text(`Other Projects: ${formatNumber(entry.otherProjects ?? 0)}`, 14, y);
+          const usage = entry.usage;
+          const peakWhen = usage?.peakStart
+            ? ` - peak ${usage.peakStart === usage.peakEnd ? formatDateLabel(usage.peakStart) : `${formatDateLabel(usage.peakStart)} to ${formatDateLabel(usage.peakEnd)}`}`
+            : "";
+          pdf.text(`${formatNumber(entry.otherProjects ?? 0)} out on other jobs at once${peakWhen}`, 14, y);
           y += 4.5;
-          entry.projects.forEach((project) => {
+          // Said in full on the page: the sum of these bookings is not what is
+          // unavailable, and a reader comparing the two numbers deserves to
+          // know why they differ rather than assuming one of them is wrong.
+          if (usage?.overstated) {
+            pdf.setTextColor(100, 116, 139);
             pdf.text(
-              `#${project.projectNumber} - ${project.projectName} - ${project.status ?? "No status"} - ${formatNumber(project.quantity)} - ${formatDateLabel(project.planPeriodStart)} to ${formatDateLabel(project.planPeriodEnd)}`,
+              `${formatNumber(usage.total)} is booked across the whole range, but these jobs do not all run together.`,
               18,
               y,
             );
+            pdf.setTextColor(15, 23, 42);
+            y += 4.5;
+          }
+          entry.projects.forEach((project) => {
+            const inPeak = usage?.peakBookings.includes(project) ?? false;
+            if (!inPeak) pdf.setTextColor(100, 116, 139);
+            pdf.text(
+              `${inPeak ? "*" : " "} #${project.projectNumber} - ${project.projectName} - ${project.status ?? "No status"} - ${formatNumber(project.quantity)} - ${formatDateLabel(project.planPeriodStart)} to ${formatDateLabel(project.planPeriodEnd)}`,
+              18,
+              y,
+            );
+            if (!inPeak) pdf.setTextColor(15, 23, 42);
             y += 4.5;
           });
         }
@@ -8830,7 +8862,11 @@ const exportJson = () => {
                     <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.spareRounded}</th>
                     <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.total}</th>
                     <th className="px-3 py-2 text-right">{stockOverridesApplied ? "Rentman Stock" : "Stock"}</th>
-                    {availabilityByCode ? <th className="px-3 py-2 text-right">Other Projects</th> : null}
+                    {availabilityByCode ? (
+                      <th className="px-3 py-2 text-right" title="The most of this item out on other jobs on any ONE day of your range - not the sum of every job that touches it">
+                        Out on the day
+                      </th>
+                    ) : null}
                     {repairsByCode ? <th className="px-3 py-2 text-right">Broken / Repair</th> : null}
                     {rentmanChecked ? <th className="px-3 py-2 text-right">Available Stock</th> : null}
                     <th className="px-3 py-2 text-right">{rentmanChecked ? "Result" : "Net"}</th>
@@ -8965,18 +9001,39 @@ const exportJson = () => {
                         {openKind === "projects" ? (
                           <tr className="border-t border-slate-800 bg-slate-950/60">
                             <td colSpan={detailColSpan} className="px-3 py-2">
+                              {/* The peak and the day it falls on, then every
+                                  booking that touches the range with the ones
+                                  making up that peak marked - so the figure can
+                                  be argued with rather than taken on trust. */}
                               <div className="mb-1 text-xs font-semibold text-slate-300">
-                                Other Projects: {formatNumber(entry.otherProjects ?? 0)}
+                                {formatNumber(entry.otherProjects ?? 0)} out on other jobs at once
+                                {entry.usage?.peakStart ? (
+                                  <span className="font-normal text-slate-400">
+                                    {" "}- peak {entry.usage.peakStart === entry.usage.peakEnd
+                                      ? formatDateLabel(entry.usage.peakStart)
+                                      : `${formatDateLabel(entry.usage.peakStart)} to ${formatDateLabel(entry.usage.peakEnd)}`}
+                                  </span>
+                                ) : null}
                               </div>
+                              {entry.usage?.overstated ? (
+                                <div className="mb-1 text-[11px] text-slate-400">
+                                  {formatNumber(entry.usage.total)} is booked across the whole range, but these jobs do not all run
+                                  together - only {formatNumber(entry.usage.peak)} is ever out on one day.
+                                </div>
+                              ) : null}
                               <ul className="space-y-0.5 text-xs text-slate-300">
-                                {entry.projects.map((project, index) => (
-                                  <li key={index}>
-                                    #{project.projectNumber} - {project.projectName} -{" "}
-                                    <span className="font-semibold">{project.status ?? "No status"}</span> -{" "}
-                                    {formatNumber(project.quantity)} - {formatDateLabel(project.planPeriodStart)} to{" "}
-                                    {formatDateLabel(project.planPeriodEnd)}
-                                  </li>
-                                ))}
+                                {entry.projects.map((project, index) => {
+                                  const inPeak = entry.usage?.peakBookings.includes(project) ?? false;
+                                  return (
+                                    <li key={index} className={inPeak ? "" : "text-slate-500"}>
+                                      #{project.projectNumber} - {project.projectName} -{" "}
+                                      <span className="font-semibold">{project.status ?? "No status"}</span> -{" "}
+                                      {formatNumber(project.quantity)} - {formatDateLabel(project.planPeriodStart)} to{" "}
+                                      {formatDateLabel(project.planPeriodEnd)}
+                                      {inPeak ? <span className="ml-1 text-amber-300">- in the peak</span> : null}
+                                    </li>
+                                  );
+                                })}
                               </ul>
                             </td>
                           </tr>
@@ -9095,7 +9152,8 @@ const exportJson = () => {
             ) : null}
             {rentmanChecked ? (
               <div className="text-xs text-slate-400">
-                Available Stock = Rentman Stock - Other Projects - Broken / Repair, compared against this project&apos;s{" "}
+                Available Stock = Rentman Stock - what is out on other jobs on the worst single day of your range - Broken / Repair,
+                compared against this project&apos;s{" "}
                 {STOCK_COUNT_LABELS.total}. <span className="font-semibold text-emerald-300">OK</span> = comfortably covered,{" "}
                 <span className="font-semibold text-amber-300">LOW</span> = covered by under 10%,{" "}
                 <span className="font-semibold text-red-300">SHORT</span> = not enough.
