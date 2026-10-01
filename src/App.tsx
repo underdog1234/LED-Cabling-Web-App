@@ -39,7 +39,8 @@ import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
 import { finalCanvasPositionOf, resolutionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
-import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
+import { type TestPatternLayout, type TestPatternProject, LOOP_SECONDS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
+import { MP4_PROFILE, MP4_RECORD_MARGIN_SECONDS, h264LevelFor, keyframeIntervalFor } from "./testPattern/mp4Encode";
 import { isMultiScreenLikely, requestScreenDetails, openWindowOnScreen } from "./testPattern/screenPlacement";
 import ScreenPickerModal from "./testPattern/ScreenPickerModal";
 import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./novastar/processorModels";
@@ -82,7 +83,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.54.0";
+const APP_VERSION = "0.55.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1974,17 +1975,54 @@ function GridSizeConfirmModal({ onConfirm, onCancel }: { onConfirm: () => void; 
   );
 }
 
+/**
+ * Format and delivery settings for the recorded Moving Test Pattern.
+ *
+ * The MP4 is a file that goes on a media server, so the settings it will be
+ * written with are listed here rather than left to be discovered in a player:
+ * the two that are worth changing per show - frame rate and bitrate - are
+ * fields, and the rest are stated as what they are. The H.264 level shown is
+ * the one this wall will actually get, which is not always the 4.2 asked for
+ * (see h264LevelFor).
+ */
 function DownloadFormatModal({
   format,
   onFormatChange,
+  fps,
+  onFpsChange,
+  targetMbps,
+  onTargetMbpsChange,
+  maxMbps,
+  onMaxMbpsChange,
+  encodedWidth,
+  encodedHeight,
   onDownload,
   onCancel,
 }: {
   format: "webm" | "mp4";
   onFormatChange: (format: "webm" | "mp4") => void;
+  fps: number;
+  onFpsChange: (fps: number) => void;
+  targetMbps: number;
+  onTargetMbpsChange: (mbps: number) => void;
+  maxMbps: number;
+  onMaxMbpsChange: (mbps: number) => void;
+  encodedWidth: number;
+  encodedHeight: number;
   onDownload: () => void;
   onCancel: () => void;
 }) {
+  const level = h264LevelFor(encodedWidth, encodedHeight, fps);
+  const gop = keyframeIntervalFor(fps);
+  const settingRow = (label: string, value: string, note?: string) => (
+    <div className="flex items-baseline justify-between gap-3 py-0.5" key={label}>
+      <span className="text-slate-400">{label}</span>
+      <span className="text-right">
+        {value}
+        {note ? <span className="text-slate-500"> {note}</span> : null}
+      </span>
+    </div>
+  );
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onCancel}>
       <div className="w-full max-w-md rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
@@ -2006,6 +2044,62 @@ function DownloadFormatModal({
             </span>
           </label>
         </div>
+        <div className="mb-3 flex flex-wrap items-end gap-3 rounded-lg border border-slate-700 bg-slate-800/60 p-3">
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Frame rate</div>
+            <select
+              className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black"
+              value={String(fps)}
+              onChange={(e) => onFpsChange(Number(e.target.value))}
+            >
+              {[24, 25, 30, 50, 60].map((option) => (
+                <option key={option} value={option}>{option} fps</option>
+              ))}
+            </select>
+          </label>
+          {format === "mp4" ? (
+            <>
+              <label className="space-y-1">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Target Mbps</div>
+                <Input
+                  type="number"
+                  min={1}
+                  className="w-24 text-right"
+                  value={String(targetMbps)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => onTargetMbpsChange(Number(e.target.value) || 0)}
+                />
+              </label>
+              <label className="space-y-1">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Max Mbps</div>
+                <Input
+                  type="number"
+                  min={1}
+                  className="w-24 text-right"
+                  value={String(maxMbps)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => onMaxMbpsChange(Number(e.target.value) || 0)}
+                />
+              </label>
+            </>
+          ) : null}
+          <div className="text-xs text-slate-400">
+            Set the frame rate to match your show output - it is what the pattern is recorded at.
+          </div>
+        </div>
+        {format === "mp4" ? (
+          <div className="mb-3 space-y-1 rounded-lg border border-slate-700 bg-slate-900 p-3 text-xs">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">The file you will get</div>
+            {settingRow("Format", MP4_PROFILE.container)}
+            {settingRow("Resolution", `${formatNumber(encodedWidth)} x ${formatNumber(encodedHeight)}`, "- this project's own")}
+            {settingRow("Frame rate", `Constant ${fps} fps`)}
+            {settingRow("Profile / level", `${MP4_PROFILE.profile} / ${level}`, level === MP4_PROFILE.preferredLevel ? undefined : `- ${MP4_PROFILE.preferredLevel} cannot carry this wall`)}
+            {settingRow("Pixel format", MP4_PROFILE.pixelFormat)}
+            {settingRow("Scan", MP4_PROFILE.scan)}
+            {settingRow("Keyframes", `Every ${gop} frames`, `- ${MP4_PROFILE.keyframeSeconds}s`)}
+            {settingRow("B-frames", String(MP4_PROFILE.bFrames), "- easier seeking")}
+            {settingRow("Bitrate", `${targetMbps} Mbps target, ${Math.max(targetMbps, maxMbps)} Mbps max`)}
+            {settingRow("Colour", MP4_PROFILE.colour)}
+          </div>
+        ) : null}
         {format === "mp4" ? (
           <div className="mb-3 rounded-lg border border-amber-400 bg-amber-500/15 p-2 text-xs text-amber-200">
             ⚠ MP4 requires an extra encoding pass after recording and can take significantly longer than WebM, especially for larger walls.
@@ -2213,10 +2307,19 @@ export default function App() {
   const [pasteAnchor, setPasteAnchor] = useState<{ x: number; y: number } | null>(null);
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
   const [videoRecordSeconds, setVideoRecordSeconds] = useState(0);
+  // How long THIS recording runs for - one loop, plus the margin the MP4 is
+  // cut back from (see MP4_RECORD_MARGIN_SECONDS).
+  const [videoRecordTotal, setVideoRecordTotal] = useState(LOOP_SECONDS);
   const [isEncodingMp4, setIsEncodingMp4] = useState(false);
   const [mp4EncodeProgress, setMp4EncodeProgress] = useState(0);
   const [showDownloadFormatModal, setShowDownloadFormatModal] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState<"webm" | "mp4">("webm");
+  // Delivery settings for the recorded video. The frame rate is the show's -
+  // it drives the recording itself, so it applies to both formats - while the
+  // bitrates are the MP4's rate control (see testPattern/mp4Encode).
+  const [videoFps, setVideoFps] = useState<number>(MP4_PROFILE.defaultFps);
+  const [mp4TargetMbps, setMp4TargetMbps] = useState<number>(MP4_PROFILE.defaultTargetMbps);
+  const [mp4MaxMbps, setMp4MaxMbps] = useState<number>(MP4_PROFILE.defaultMaxMbps);
   // Moving Test Pattern multi-display launch (see screenPlacement.ts) - only
   // populated while the picker is actually showing (2+ secondary screens,
   // no remembered match); the URL is held here so the picker's choice can
@@ -2516,9 +2619,9 @@ export default function App() {
   // inside downloadMovingTestPatternVideo).
   useEffect(() => {
     if (!isRecordingVideo) return;
-    const id = window.setInterval(() => setVideoRecordSeconds((s) => Math.min(LOOP_SECONDS, s + 0.25)), 250);
+    const id = window.setInterval(() => setVideoRecordSeconds((s) => Math.min(videoRecordTotal, s + 0.25)), 250);
     return () => window.clearInterval(id);
-  }, [isRecordingVideo]);
+  }, [isRecordingVideo, videoRecordTotal]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -4523,7 +4626,11 @@ const exportJson = () => {
   // bitrate would produce on this pattern's large flat colour fields and
   // sharp edges/text. Shared by both the WebM and MP4 downloads - MP4 just
   // pipes this same recording through encodeWebmToMp4 afterwards.
-  const recordMovingTestPatternWebm = (project: TestPatternProject): Promise<Blob> | null => {
+  const recordMovingTestPatternWebm = (
+    project: TestPatternProject,
+    captureFps: number,
+    seconds: number = LOOP_SECONDS,
+  ): { recording: Promise<Blob>; layout: TestPatternLayout } | null => {
     if (isRecordingVideo) return null;
     const mimeType = pickVideoMimeType();
     if (!mimeType) {
@@ -4548,9 +4655,14 @@ const exportJson = () => {
     ctx.scale(1, layout.contentPixelH / layout.H);
 
     const loopStart = performance.now();
+    // Drawn at the rate the FILE is being made at, not the live view's own
+    // gentler DRAW_FPS: nothing here is competing with a user interface, and a
+    // 60p delivery file whose picture only changes 24 times a second is a 60p
+    // file in name only. A wall too big to redraw in time simply repeats a
+    // frame - captureStream below samples on its own clock either way.
     const drawId = window.setInterval(() => {
       drawTestPatternFrame(ctx, layout, (performance.now() - loopStart) / 1000);
-    }, 1000 / DRAW_FPS);
+    }, 1000 / captureFps);
 
     // ~6 bits/pixel of total resolution, floor 8Mbps / cap 80Mbps: MediaRecorder's
     // default bitrate is far too low for this pattern's sharp edges and text,
@@ -4558,13 +4670,14 @@ const exportJson = () => {
     // instead of leaving every export at one low fixed rate. Uses the actual
     // encoded resolution (content resolution), not the native one.
     const videoBitsPerSecond = Math.min(80_000_000, Math.max(8_000_000, Math.round(layout.contentPixelW * layout.contentPixelH * 6)));
-    const stream = canvas.captureStream(DRAW_FPS);
+    const stream = canvas.captureStream(captureFps);
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond });
     const chunks: BlobPart[] = [];
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
     };
     setVideoRecordSeconds(0);
+    setVideoRecordTotal(seconds);
     setIsRecordingVideo(true);
     const result = new Promise<Blob>((resolve) => {
       recorder.onstop = () => {
@@ -4574,8 +4687,8 @@ const exportJson = () => {
       };
     });
     recorder.start();
-    setTimeout(() => recorder.stop(), LOOP_SECONDS * 1000);
-    return result;
+    setTimeout(() => recorder.stop(), seconds * 1000);
+    return { recording: result, layout };
   };
 
   // Filename carries the chosen surface, so a folder of per-screen recordings
@@ -4585,22 +4698,48 @@ const exportJson = () => {
     return `${fileSafeProjectName}${surfacePart}-front-test-pattern.${ext}`;
   };
 
+  // What the chosen surface will actually encode at - the content resolution
+  // of its own layout, which is what the download dialog quotes and what the
+  // H.264 level is chosen from.
+  const movingPatternEncodedSize = useMemo(() => {
+    const project = movingPatternProjectFor(movingPatternSurfaceKey);
+    if (!project) return { w: 0, h: 0 };
+    const layout = computeTestPatternLayout(project);
+    return { w: layout.contentPixelW, h: layout.contentPixelH };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movingPatternSurfaceKey, grid, subScreens, panelType, safeProjectName, surfaceName]);
+
   const downloadMovingTestPatternVideo = (project: TestPatternProject) => {
-    const recording = recordMovingTestPatternWebm(project);
-    if (!recording) return;
-    recording.then((blob) => downloadBlob(blob, movingPatternFileName(project, "webm")));
+    const started = recordMovingTestPatternWebm(project, videoFps);
+    if (!started) return;
+    started.recording.then((blob) => downloadBlob(blob, movingPatternFileName(project, "webm")));
   };
 
   const downloadMovingTestPatternMp4 = (project: TestPatternProject) => {
     if (isEncodingMp4) return;
-    const recording = recordMovingTestPatternWebm(project);
-    if (!recording) return;
-    recording.then(async (blob) => {
+    // Recorded longer than one loop and cut back to exactly one in the encode,
+    // so the file repeats without a jump - see MP4_RECORD_MARGIN_SECONDS.
+    const started = recordMovingTestPatternWebm(project, videoFps, LOOP_SECONDS + MP4_RECORD_MARGIN_SECONDS);
+    if (!started) return;
+    started.recording.then(async (blob) => {
       setIsEncodingMp4(true);
       setMp4EncodeProgress(0);
       try {
         const { encodeWebmToMp4 } = await import("./testPattern/mp4Encode");
-        const mp4Blob = await encodeWebmToMp4(blob, setMp4EncodeProgress);
+        // The encoded size is the CONTENT resolution - what the recording
+        // canvas actually is - which is also what decides the H.264 level.
+        const mp4Blob = await encodeWebmToMp4(
+          blob,
+          {
+            fps: videoFps,
+            targetMbps: mp4TargetMbps,
+            maxMbps: Math.max(mp4TargetMbps, mp4MaxMbps),
+            width: started.layout.contentPixelW,
+            height: started.layout.contentPixelH,
+            loopSeconds: LOOP_SECONDS,
+          },
+          setMp4EncodeProgress,
+        );
         downloadBlob(mp4Blob, movingPatternFileName(project, "mp4"));
       } catch (err) {
         console.error("MP4 encode failed", err);
@@ -6984,6 +7123,14 @@ const exportJson = () => {
         <DownloadFormatModal
           format={downloadFormat}
           onFormatChange={setDownloadFormat}
+          fps={videoFps}
+          onFpsChange={setVideoFps}
+          targetMbps={mp4TargetMbps}
+          onTargetMbpsChange={setMp4TargetMbps}
+          maxMbps={mp4MaxMbps}
+          onMaxMbpsChange={setMp4MaxMbps}
+          encodedWidth={movingPatternEncodedSize.w}
+          encodedHeight={movingPatternEncodedSize.h}
           onCancel={() => setShowDownloadFormatModal(false)}
           onDownload={() => {
             setShowDownloadFormatModal(false);
@@ -7074,7 +7221,7 @@ const exportJson = () => {
                 {isEncodingMp4
                   ? `Encoding MP4… ${Math.round(mp4EncodeProgress * 100)}%`
                   : isRecordingVideo
-                    ? `Recording… ${videoRecordSeconds.toFixed(0)}/${LOOP_SECONDS}s`
+                    ? `Recording… ${videoRecordSeconds.toFixed(0)}/${Math.round(videoRecordTotal)}s`
                     : "Download Moving Test Pattern"}
               </Button>
             </div>

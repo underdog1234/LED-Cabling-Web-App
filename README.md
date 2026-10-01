@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.54.0`
+Version `0.55.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,7 +21,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - The PDF report carries an **Output Canvas page** - the full canvas resolution, every screen drawn to scale where it sits on it, and the same numbers as a table - plus a **key** on both Panel Layout views explaining every mark on the drawing
 - A PDF **Weight breakdown** page: panels by type, every rigging and cable allowance with the arithmetic behind it, what is left out of the total, and a per-sub-screen panel weight
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
-- Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
+- Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. The **MP4 is written to fixed delivery settings** - constant frame rate, High profile at a level the wall actually fits, half-second keyframes, no B-frames, Rec.709 limited range, exactly one loop long - and the download dialog lists them, with the frame rate and bitrate editable to match your show. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
 - **Connectors are counted from the edges panels actually share** - one row per connector, per shared edge, with exposed edges adding nothing. Shape panels, corner panels and flat-laid corner panels each pull their own part, and a rotated panel's connectors move with its edges
 - An **MG9 Corner panel can be laid in flat**: the same part off the same shelf, drawn without the corner hatch, needing the flat connector instead of the corner one
 - Shaped panels (`MG12` triangle, `MG13` quarter circle) print the orientation code of the part they actually are - `LU` / `LD` / `RU` / `RD`, read from the front - so the drawing names the same stock line Stock Calculations counts
@@ -31,6 +31,47 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.55.0
+
+**The Moving Test Pattern MP4 is a delivery file now**
+
+It used to be whatever a constant-quality encode happened to produce, at the
+live view's own 24fps. It is now written to fixed settings, and the download
+dialog lists them before you commit to the encode:
+
+| Setting | What the file gets |
+| --- | --- |
+| Format | MP4 / H.264 |
+| Frame rate | **Constant** 60 fps by default - pick 24/25/30/50/60 to match your show |
+| Resolution | The project's own content resolution |
+| Profile / level | High / 4.2, or the lowest level that **can** carry the wall |
+| Pixel format | 8-bit 4:2:0 (`yuv420p`) |
+| Scan | Progressive |
+| Keyframes | Every half second - 30 frames at 60fps, 15 at 30fps |
+| B-frames | 0, for easier seeking |
+| Bitrate | 8 Mbps target, 12 Mbps ceiling - both editable |
+| Colour | Rec.709, limited (TV) range, tagged in the stream **and** in the file |
+
+- **The frame rate is real, not a tag.** The pattern is now drawn at the rate
+  the file is being made at, rather than the live view's gentler 24fps, and the
+  output is forced to constant frame rate - a wall too big to redraw in time
+  repeats a frame instead of the file going variable
+- **The level follows the wall.** An LED wall is routinely wider than any
+  broadcast format: 6,216 x 1,344 at 60fps needs level 5.2, and tagging that
+  stream 4.2 would be a lie a hardware decoder is entitled to act on. 4.2 is
+  used wherever it fits, and the dialog says when it does not
+- **The colour conversion is spelled out** rather than inherited from whatever
+  the browser tagged its recording as - which is the one thing a test pattern
+  cannot afford to get wrong
+- **The file is exactly one loop.** A 20-second recording came back 19.22
+  seconds long, so the pattern jumped every time it repeated; the recording is
+  now made longer than the loop on purpose and cut back to exactly one
+
+Verified by reading the produced file's own boxes rather than trusting the
+command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
+single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
+exactly 30 apart, and no composition-offset table (so no B-frames).
 
 ## Connector Rules
 
