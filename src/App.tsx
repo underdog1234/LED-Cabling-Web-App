@@ -82,7 +82,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.53.0";
+const APP_VERSION = "0.54.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -313,6 +313,21 @@ export const STOCK_CATALOG = {
 // Ballast per metre of wall width for a ground-supported wall's fencing.
 const TEMP_FENCING_WEIGHTS_PER_METRE = 3;
 
+/**
+ * Which variants each panel type can be set to.
+ *
+ * The shaped variants are MG9 parts, so they are MG9-only. CORNER is the
+ * exception: an MT panel can be used as a corner too. It is the SAME MT panel
+ * off the same shelf - nothing changes in the panel count - it just needs
+ * corner hardware, which stockRows counts per corner panel (2 brackets and 8
+ * bolts each).
+ */
+export const PANEL_TYPE_VARIANTS: Record<string, string[]> = {
+  MG9: ["STANDARD", "TRIANGLE", "CURVED", "CORNER", "CORNER_FLAT"],
+  MT: ["STANDARD", "CORNER"],
+  POSTER: ["STANDARD"],
+};
+
 export const PANEL_VARIANTS = {
   STANDARD: { id: "STANDARD", label: "Standard MG9", symbol: "", stockItem: null, shape: "rect" },
   TRIANGLE: { id: "TRIANGLE", label: "MG12 Triangle Panel", symbol: "△", stockItem: STOCK_CATALOG.mg12Triangle, shape: "triangle" },
@@ -325,6 +340,22 @@ export const PANEL_VARIANTS = {
   // are actually turning a corner is readable at a glance.
   CORNER_FLAT: { id: "CORNER_FLAT", label: "MG9 LED Corner Panel (flat)", symbol: "Corner flat", stockItem: STOCK_CATALOG.mg9Corner, shape: "rect" },
 } as const;
+
+/**
+ * The variant's name for a given panel type. The catalogue labels name MG9
+ * because that is the type they were written for; an MT panel used as a corner
+ * is the same variant and wants its own name on the picker, not "MG9".
+ */
+export const variantLabelFor = (panelType: string, variant: keyof typeof PANEL_VARIANTS): string => {
+  const label = PANEL_VARIANTS[variant].label;
+  return panelType === "MG9" ? label : label.replace(/MG9/g, PANEL_TYPES[panelType as PanelTypeKey]?.name ?? panelType);
+};
+
+/** A variant the panel type does not have falls back to standard - a hand-edited or older file can hold one. */
+export const variantForType = (panelType: string, variant: unknown): string =>
+  typeof variant === "string" && PANEL_VARIANTS[variant as keyof typeof PANEL_VARIANTS] && PANEL_TYPE_VARIANTS[panelType]?.includes(variant)
+    ? variant
+    : "STANDARD";
 
 // Shaped panels (MG12 triangle / MG13 quarter circle) are physical one-way
 // pieces: the location of the right-angle corner after rotation decides which
@@ -821,7 +852,10 @@ export const normalizePanels = (raw: unknown): Cell[] => {
       powerSequence: cell.powerSequence ?? null,
       powerManual: Boolean(cell.powerManual),
       isRemoved: Boolean(cell.isRemoved),
-      panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
+      panelVariant: variantForType(
+        cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
+        cell.panelVariant,
+      ) as PanelVariantKey,
       rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
       panelType: cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
       subScreenId: typeof cell.subScreenId === "string" ? cell.subScreenId : null,
@@ -886,7 +920,7 @@ const gridCellsToPanels = (rawGrid: LegacyGridCell[][], legacyAllType: PanelType
         powerSequence: cell.powerSequence ?? null,
         powerManual: Boolean(cell.powerManual),
         isRemoved: Boolean(cell.isRemoved),
-        panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
+        panelVariant: variantForType(cellType, cell.panelVariant) as PanelVariantKey,
         rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
         panelType: cellType,
         subScreenId: null,
@@ -3370,6 +3404,24 @@ export default function App() {
       } else {
         rowsOut.push(makeStockRow(STOCK_CATALOG.signalJoinerCable, 0, `fallback only if ${STOCK_CATALOG.signalJoiner.name} stock is exhausted`));
       }
+    }
+
+    // MT corners. An MT corner is the same MT panel off the same shelf - it is
+    // already in the panel count above - so what a corner adds is hardware
+    // only: 2 brackets and 8 bolts each. Counted PER CORNER PANEL, not per
+    // joined edge, which is how the part is actually fitted; MT joins
+    // otherwise need no connector at all, which is why MT is left out of the
+    // connector table in model/connectors.ts.
+    const mtCorners = activePanels.filter(
+      (cell) => cellPanelType(cell) === "MT" && (cell.panelVariant ?? "STANDARD") === "CORNER",
+    ).length;
+    if (mtCorners > 0) {
+      rowsOut.push(
+        makeStockRow(STOCK_CATALOG.mtCornerBracket, mtCorners * 2, `2 per MT corner panel across ${mtCorners} corner${mtCorners === 1 ? "" : "s"}`),
+      );
+      rowsOut.push(
+        makeStockRow(STOCK_CATALOG.mtCornerBracketBolt, mtCorners * 8, `8 per MT corner panel across ${mtCorners} corner${mtCorners === 1 ? "" : "s"}`),
+      );
     }
 
     // Panel-to-panel connectors, one row per stock item however many rules
@@ -6780,13 +6832,18 @@ const exportJson = () => {
       keys.forEach((key) => {
         const target = findCellById(next, key);
         if (!target || !isActiveCell(target)) return;
-        // Variants (triangle/curve/corner) are MG9-only.
-        if (cellPanelType(target) !== "MG9") return;
+        // Each type takes only the variants it physically has - the shaped
+        // ones are MG9 parts, while a corner can be MG9 or MT.
+        if (!PANEL_TYPE_VARIANTS[cellPanelType(target)]?.includes(variant)) return;
         target.panelVariant = variant;
       });
       return next;
     });
   };
+
+  // The variants the currently selected panel can be set to - drives the
+  // picker, and what it being empty of real choices disables.
+  const selectedVariantChoices = ((PANEL_TYPE_VARIANTS[selectedPanel ? cellPanelType(selectedPanel) : "MG9"] ?? ["STANDARD"]) as PanelVariantKey[]);
 
   const applySelectedPanelType = (type: PanelTypeKey) => {
     const keys = getSelectedIds(selectedCells, selectedId, grid);
@@ -7543,14 +7600,20 @@ const exportJson = () => {
                     <option key={key} value={key}>{PANEL_TYPES[key].name} panel</option>
                   ))}
                 </select>
+                {/* Only the variants the selected panel's own type has: every
+                    shape for MG9, standard or corner for MT. An MT corner is
+                    the same MT panel, so it changes no panel count - it only
+                    adds its corner hardware to the stock list. */}
                 <select
                   className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                  disabled={selectedCount === 0 || (selectedPanel ? cellPanelType(selectedPanel) !== "MG9" : false)}
+                  disabled={selectedCount === 0 || selectedVariantChoices.length < 2}
                   value={selectedPanel?.panelVariant ?? "STANDARD"}
                   onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
                 >
-                  {(Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).map((key) => (
-                    <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
+                  {selectedVariantChoices.map((key) => (
+                    <option key={key} value={key}>
+                      {variantLabelFor(selectedPanel ? cellPanelType(selectedPanel) : "MG9", key)}
+                    </option>
                   ))}
                 </select>
                 <Button intent="secondary" size="sm" onClick={copySelectedPanels} disabled={selectedCount === 0} title="Copy selected panels (Ctrl/Cmd+C)">Copy</Button>

@@ -36,10 +36,20 @@ describe("connectorForEdge", () => {
     expect(connectorForEdge("shape", "shape", "vertical")).toMatchObject({ connector: "connector180", qty: 2 });
   });
 
-  it("lets a shape panel's rule win over the corner rules", () => {
-    // A corner panel counts as MG9 when the other side of the edge is a shape.
-    expect(connectorForEdge("shape", "corner", "vertical")).toMatchObject({ connector: "horizontalConnector", qty: 2 });
-    expect(connectorForEdge("cornerFlat", "shape", "horizontal")).toMatchObject({ connector: "connector150", qty: 3 });
+  it("gives a corner panel meeting a shape its own rule, folded or flat", () => {
+    // Not the shape-to-MG9 rule, which is what a corner panel used to fall
+    // back to: 3 x 180 stacked, 2 x 150 side by side, either way up.
+    for (const corner of ["corner", "cornerFlat"] as ConnectorPanelClass[]) {
+      expect(connectorForEdge(corner, "shape", "horizontal")).toMatchObject({ connector: "connector180", qty: 3 });
+      expect(connectorForEdge("shape", corner, "horizontal")).toMatchObject({ connector: "connector180", qty: 3 });
+      expect(connectorForEdge(corner, "shape", "vertical")).toMatchObject({ connector: "connector150", qty: 2 });
+      expect(connectorForEdge("shape", corner, "vertical")).toMatchObject({ connector: "connector150", qty: 2 });
+    }
+  });
+
+  it("keeps a PLAIN MG9 against a shape on the shape-to-MG9 rule", () => {
+    expect(connectorForEdge("mg9", "shape", "horizontal")).toMatchObject({ connector: "connector150", qty: 3 });
+    expect(connectorForEdge("mg9", "shape", "vertical")).toMatchObject({ connector: "horizontalConnector", qty: 2 });
   });
 
   it("keeps the corner-to-plain-MG9 rule that was already there", () => {
@@ -154,12 +164,12 @@ describe("the connector table, whole", () => {
       "MG9 Corner (folded) + MG9 Corner (folded) | vertical | MG9 Corner Connector x3",
       "MG9 Corner (folded) + MG9 Corner (laid flat) | horizontal | MG9 Corner Connector x3",
       "MG9 Corner (folded) + MG9 Corner (laid flat) | vertical | MG9 Corner Connector x3",
-      "MG9 Corner (folded) + MG12 triangle / MG13 curve | horizontal | 150 Connector x3",
-      "MG9 Corner (folded) + MG12 triangle / MG13 curve | vertical | Horizontal Connector x2",
+      "MG9 Corner (folded) + MG12 triangle / MG13 curve | horizontal | 180 Connector x3",
+      "MG9 Corner (folded) + MG12 triangle / MG13 curve | vertical | 150 Connector x2",
       "MG9 Corner (laid flat) + MG9 Corner (laid flat) | horizontal | 150 Connector x3",
       "MG9 Corner (laid flat) + MG9 Corner (laid flat) | vertical | 150 Connector x3",
-      "MG9 Corner (laid flat) + MG12 triangle / MG13 curve | horizontal | 150 Connector x3",
-      "MG9 Corner (laid flat) + MG12 triangle / MG13 curve | vertical | Horizontal Connector x2",
+      "MG9 Corner (laid flat) + MG12 triangle / MG13 curve | horizontal | 180 Connector x3",
+      "MG9 Corner (laid flat) + MG12 triangle / MG13 curve | vertical | 150 Connector x2",
       "MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | horizontal | 180 Connector x3",
       "MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | vertical | 180 Connector x2",
     ]);

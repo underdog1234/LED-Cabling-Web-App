@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.53.0`
+Version `0.54.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -55,39 +55,76 @@ other; a **vertical edge** is a vertical line, so they sit side by side.
 | MG9 Corner (folded) + MG9 Corner (folded) | Side by side (vertical edge) | MG9 Corner Connector | 3 |
 | MG9 Corner (folded) + MG9 Corner (laid flat) | Stacked (horizontal edge) | MG9 Corner Connector | 3 |
 | MG9 Corner (folded) + MG9 Corner (laid flat) | Side by side (vertical edge) | MG9 Corner Connector | 3 |
-| MG9 Corner (folded) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 150 Connector | 3 |
-| MG9 Corner (folded) + MG12 triangle / MG13 curve | Side by side (vertical edge) | Horizontal Connector | 2 |
+| MG9 Corner (folded) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 180 Connector | 3 |
+| MG9 Corner (folded) + MG12 triangle / MG13 curve | Side by side (vertical edge) | 150 Connector | 2 |
 | MG9 Corner (laid flat) + MG9 Corner (laid flat) | Stacked (horizontal edge) | 150 Connector | 3 |
 | MG9 Corner (laid flat) + MG9 Corner (laid flat) | Side by side (vertical edge) | 150 Connector | 3 |
-| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 150 Connector | 3 |
-| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Side by side (vertical edge) | Horizontal Connector | 2 |
+| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 180 Connector | 3 |
+| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Side by side (vertical edge) | 150 Connector | 2 |
 | MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 180 Connector | 3 |
 | MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | Side by side (vertical edge) | 180 Connector | 2 |
 
-The order of the pair never changes the answer, and an MG9 Corner panel counts
-as a plain MG9 when the other side of the edge is a shaped panel.
+The order of the pair never changes the answer. A corner panel meeting a shape
+has its own rule - 3 x 180 stacked, 2 x 150 side by side - whether it is folded
+round the corner or laid flat.
 
-### What this does not count
+**MT panels** are not in this table: an MT join needs no connector. An MT panel
+can be marked as a **corner** (the same panel off the same shelf, so the panel
+count does not change), and each MT corner adds **2 x MT Corner Connecting
+Bracket and 8 x Bolt** - counted per corner panel, not per joined edge.
 
-These are the edges of the model rather than rules, and each one is pinned as a
-test in `src/connectors.test.ts`:
+### What this does not count, and why
 
-- **Only MG9 panels are considered.** MT panels and LED poster sections are
-  skipped entirely, so an MT wall asks for no connectors at all - including the
-  MT Corner Connecting Bracket and its Bolt, which are in the stock catalogue
-  but are never counted from a layout
+Each of these is pinned as a test in `src/connectors.test.ts`:
+
+- **Plain MG9 to plain MG9 adds nothing.** MG9 panels ship with their own
+  vertical connectors and three horizontals, so a plain panel-to-panel join
+  needs nothing pulled from the shelf
+- **MG9 Vertical Connector (12480)** is never chosen by a join rule for the
+  same reason - it comes only from the Modular Frame Bottom Beam allowance, 4
+  per 1m beam
 - **A brick bond is not seen as a join.** Anchors sit every 100mm along a 500mm
   edge, so a neighbour offset 100mm or 200mm still lines up - but one offset
   **half a panel (250mm)** lines up with nothing, and the pair reads as
-  unjoined. A staggered wall therefore counts no connectors along its
-  staggered joins
-- **An MT panel meeting an MG9 one is not seen as a join** either, their anchor
-  spacings being different
-- **Panels turned to an odd angle** (45 degrees, say) are not seen as joined
+  unjoined. On a plain MG9 wall this costs nothing, since such a join needs no
+  connector anyway; it only under-counts where a corner or shaped panel sits on
+  a staggered join
+- **Panels turned to an odd angle** (45 degrees, say) are not seen as joined.
+  Those joins are made with hardware outside this catalogue
 - **A triangle never joins along its hypotenuse**, nor a quarter circle along
   its arc - correctly, since there is nothing there to bolt to
-- **MG9 Vertical Connector (12480)** is never chosen by a join rule; it comes
-  only from the Modular Frame Bottom Beam allowance, 4 per 1m beam
+
+
+## Recent Changes In v0.54.0
+
+**Corner panels meeting a shape have their own rule**
+
+- A corner panel against an MG12 triangle or MG13 quarter circle now takes
+  **3 x 180 Connector stacked** and **2 x 150 Connector side by side**, whether
+  the corner is folded round the corner or laid flat. It used to count as a
+  plain MG9 there, which pulled the wrong part for both orientations
+- A **plain** MG9 against a shape is unchanged: 3 x 150 stacked, 2 x Horizontal
+  Connector side by side
+
+**MT panels can be marked as corners**
+
+- The panel variant picker now offers each panel type only what it physically
+  has: every shape for MG9, **Standard or Corner for MT**
+- An MT corner is the **same MT panel off the same shelf**, so the panel count
+  does not change. What it adds is hardware: **2 x MT Corner Connecting Bracket
+  (12274) and 8 x Bolt (12275) per corner panel**, counted per panel rather
+  than per joined edge, which is how the part is fitted
+- MT joins otherwise need no connector, which is why MT is not in the connector
+  table
+
+**The rest of the audit, settled**
+
+- Side-by-side corner joins stay at **3 per edge** - confirmed, not an oversight
+- Plain MG9 to plain MG9 stays at **nothing**: the panels ship with their own
+  vertical connectors and three horizontals
+- The MG9 Vertical Connector comes in the panels too, so no join rule asks for one
+- Odd-angle joins are made with hardware outside this catalogue and are not counted
+- All of it is written down under [Connector Rules](#connector-rules) and pinned in the tests
 
 ## Recent Changes In v0.53.0
 

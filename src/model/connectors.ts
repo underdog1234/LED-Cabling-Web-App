@@ -21,10 +21,12 @@
 // Horizontal edges, 3 per shared edge:
 //   MG9 Corner <-> MG9 Corner, both used flat  -> 150 Connector
 //   MG9 Corner <-> MG9 Corner, otherwise       -> MG9 Corner Connector
+//   MG9 Corner <-> shape                       -> 180 Connector
 //   shape      <-> MG9                         -> 150 Connector
 //   shape      <-> shape                       -> 180 Connector
 //
 // Vertical edges, 2 per shared edge:
+//   MG9 Corner <-> shape                       -> 150 Connector
 //   shape      <-> MG9                         -> Horizontal Connector
 //   shape      <-> shape                       -> 180 Connector
 //
@@ -32,12 +34,23 @@
 // The vertical case took the 150 Connector until v0.53.0; two shaped panels
 // meeting leg to leg need the 180 either way round.
 //
+// A CORNER PANEL MEETING A SHAPE has its own rule - 3 x 180 stacked, 2 x 150
+// side by side - and it applies whether the corner panel is folded round the
+// corner or laid flat. Until v0.54.0 a corner panel simply counted as a plain
+// MG9 against a shape, which pulled the wrong part for both orientations.
+//
 // Anything else keeps the rule it had before these were added:
 //   MG9 Corner <-> plain MG9, either way round -> 3 x 150 Connector
 //   MG9 Corner <-> MG9 Corner on a VERTICAL edge is not in the table above, so
 //     it keeps the 3-per-join rule too, split flat/corner the same way as the
 //     horizontal case - it is the same pair of parts either way round.
-//   plain MG9  <-> plain MG9                   -> nothing
+//   plain MG9  <-> plain MG9                   -> nothing. MG9 panels ship
+//     with their own vertical connectors and three horizontals, so a plain
+//     panel-to-panel join needs nothing pulled from the shelf.
+//
+// MT panels are not in this table at all. An MT join needs no connector; an MT
+// panel used as a CORNER needs 2 corner brackets and 8 bolts, which are
+// counted per corner panel rather than per edge (see stockRows in App.tsx).
 // ---------------------------------------------------------------------------
 
 /** What a panel counts as when working out the connector for a join. */
@@ -84,13 +97,17 @@ export const connectorForEdge = (
   // the shape rows are the specific case, the corner rows below the general one.
   if (isShape(a) || isShape(b)) {
     const bothShape = isShape(a) && isShape(b);
+    // A corner panel against a shape is its own case, folded or flat alike.
+    const cornerToShape = !bothShape && (isCorner(a) || isCorner(b));
     if (edge === "horizontal") {
-      return bothShape
-        ? { connector: "connector180", qty: 3, rule: "shape-to-shape horizontal edge" }
+      if (bothShape) return { connector: "connector180", qty: 3, rule: "shape-to-shape horizontal edge" };
+      return cornerToShape
+        ? { connector: "connector180", qty: 3, rule: "corner-to-shape horizontal edge" }
         : { connector: "connector150", qty: 3, rule: "shape-to-MG9 horizontal edge" };
     }
-    return bothShape
-      ? { connector: "connector180", qty: 2, rule: "shape-to-shape vertical edge" }
+    if (bothShape) return { connector: "connector180", qty: 2, rule: "shape-to-shape vertical edge" };
+    return cornerToShape
+      ? { connector: "connector150", qty: 2, rule: "corner-to-shape vertical edge" }
       : { connector: "horizontalConnector", qty: 2, rule: "shape-to-MG9 vertical edge" };
   }
 
