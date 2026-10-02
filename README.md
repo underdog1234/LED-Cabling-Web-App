@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.58.0`
+Version `0.59.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -72,6 +72,50 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.59.0
+
+**A sub-screen's pixel count is the rectangle it stands in**
+
+A sub-screen with a gap or a step in it was quoted one module column short on
+the Output Canvas and in the PDF, while the test pattern rendered the right
+figure. On the file this came from, the Left screen read **3,528 x 1,344** in
+both places and **3,696 x 1,344** on the test pattern - a 168px column, one
+whole panel, missing from the number the content gets built to.
+
+- A sub-screen's resolution is now its **footprint**, the same way the wall's
+  own Resolution already was. The two agree exactly on a solid rectangle and
+  part company the moment the shape is stepped, which is where the footprint
+  is the right answer
+- The **Complete layout resolution** line and the whole-layout entry had the
+  same fault when a project has no sub-screens: 5,880 where the wall is 6,216
+- This is also the only figure consistent with where the panels are actually
+  drawn on the canvas, which has always used their physical mm offsets - a
+  sub-screen's own panels could sit outside the box the canvas view drew
+  around them
+- The **packed** space is unchanged and still right where it is used: the
+  NovaStar cabinet topology in the `.uprj` export, where a processor has no
+  such thing as an empty gap pixel
+
+**Vertical cable runs sit on the panel, not on its edge**
+
+A vertical run was drawn about 0.9px from a panel's left edge, close enough
+that its outline actually overhung the boundary and the run read as if it
+belonged to the join rather than the panel.
+
+- Both lanes now sit **12% of the way in**, the same inset the horizontal lanes
+  already used - the signal run moves from 0.9px to 7.1px off the edge on a
+  full panel, roughly eight times further in, beside the text rather than on
+  the border
+- **No label got smaller.** A full panel still prints at 10px in the PDF and
+  9px on screen, and a poster section still gets its 6px
+- That is paid for by centring the label block on the space **beside** the
+  lanes instead of on the panel itself. Centring on the panel meant reserving
+  the same band twice - once on the left where the runs are, and once on the
+  right purely to stay symmetrical - and it was that second, empty reservation
+  that used to decide how big the text could be
+- The rule that a run never crosses a panel's text still holds, and is now
+  tested against where the text really sits
 
 ## Recent Changes In v0.58.0
 

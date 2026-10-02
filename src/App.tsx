@@ -84,7 +84,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.58.0";
+const APP_VERSION = "0.59.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1417,7 +1417,22 @@ export const getPanelSymbol = (cell: Cell) => {
 // The numbers come from the worst case: a panel is 78px across in the PDF and
 // at 100% zoom on screen, and its widest label ("🔌 P20 (999)") takes about
 // 59px of that, stacked four lines deep on a rotated or shaped panel.
-export const CABLE_LANE = { across: 0.12, beside: 0.04 } as const;
+//
+// `beside` used to be 0.04, which put the signal run about 0.9px from the
+// panel's left edge - close enough that its casing actually overhung the edge
+// and the run read as if it were drawn on the panel boundary rather than on
+// the panel. It is 0.12 now, the same inset as `across`, so both lanes sit a
+// clear eighth of the way in and a vertical run reads as belonging to the
+// panel it is crossing.
+//
+// That inset is paid for ONCE rather than twice, because the label block is
+// centred on the space LEFT OVER beside the lanes rather than on the panel
+// (see panelLabelCentreX). Centring on the panel would have meant reserving
+// the same band on the right as well, purely to keep the block symmetrical,
+// and that second band is what used to force the text smaller. Nothing here
+// changes any label size - a full panel still prints at 10px in the PDF and
+// 9px on screen, and a poster section still gets its 6px.
+export const CABLE_LANE = { across: 0.12, beside: 0.12 } as const;
 
 // How far signal and power are pulled apart when they do NOT share a run. The
 // shift is the same in x and y, so a run that turns a corner still meets the
@@ -1474,15 +1489,36 @@ const CABLE_REACH = CABLE_SEPARATION + CABLE_STROKE.chevron * 0.71 + CABLE_STROK
 // the run is leaving - and that panel's own labels finish right about there.
 export const PANEL_LABEL_BOTTOM_PX = Math.ceil(CABLE_STROKE.chevron * 0.36 + CABLE_STROKE.casing / 2) + 1;
 
+// How much of a panel's left edge the vertical cable lanes claim: the lane
+// itself, the signal/power separation either side of it, and half a casing so
+// the outer run's edge is included. Nothing is drawn beyond this, so this is
+// where a label is free to start.
+export const cableLaneClearPx = (w: number) => w * CABLE_LANE.beside + CABLE_SEPARATION + CABLE_STROKE.casing / 2;
+
+// A hair of margin on the far side, so the longest label stops short of the
+// panel's own edge instead of touching it.
+export const PANEL_LABEL_SIDE_PAD = CABLE_STROKE.casing / 2;
+
+/**
+ * Where a panel's label block centres, measured from the panel's left edge.
+ *
+ * NOT the panel's own centre: the vertical cable lanes run down the left-hand
+ * side, so the block is centred on what is left beside them. A centred block
+ * would have had to clear that band twice over - once on the left where the
+ * runs actually are, and once on the right to stay symmetrical - and it was
+ * that second, empty reservation that decided how big the text could be.
+ */
+export const panelLabelCentreX = (w: number) => (cableLaneClearPx(w) + (w - PANEL_LABEL_SIDE_PAD)) / 2;
+
 // Largest label font (px) that still leaves a panel's label block clear of the
 // cable lanes. A panel can carry four lines (row/column, signal, power and a
-// shape/rotation symbol), centred and stacked up from the bottom edge, so the
-// block is bounded in both directions:
+// shape/rotation symbol), stacked up from the bottom edge, so the block is
+// bounded in both directions:
 //   - vertically it has to finish below the power lane and its entry mark, and
 //     a line costs `stackPerFont` px of font size on top of the block's fixed
 //     `stackFixed` padding and leading;
 //   - horizontally the widest label ("🔌 P20 (999)", about 5.9x the font size)
-//     has to stay inside the two side lanes.
+//     has to fit between the vertical lanes and the panel's far edge.
 // Each renderer passes its own natural size and stack metrics, so a standard
 // panel at 100% zoom (and every panel in the PDF) keeps exactly the text size
 // it has always had; only panels too small for it - a zoomed-out workspace, a
@@ -1492,7 +1528,7 @@ export const PANEL_LABEL_BOTTOM_PX = Math.ceil(CABLE_STROKE.chevron * 0.36 + CAB
 export const PANEL_LABEL_MIN_PX = 6;
 export const panelLabelFontPx = (w: number, h: number, max: number, stackPerFont: number, stackFixed: number) => {
   const byHeight = (h * (1 - CABLE_LANE.across) - CABLE_REACH - stackFixed) / stackPerFont;
-  const byWidth = (w * (1 - 2 * CABLE_LANE.beside) - 2 * CABLE_SEPARATION - CABLE_STROKE.casing) / 5.9;
+  const byWidth = (w - cableLaneClearPx(w) - PANEL_LABEL_SIDE_PAD) / 5.9;
   const px = Math.floor(Math.min(max, byHeight, byWidth));
   return px >= PANEL_LABEL_MIN_PX ? px : 0;
 };
@@ -1550,7 +1586,9 @@ export const panelLabelPlacement = (
   });
   const fitsAtFoot = (px: number) => {
     const { halfW, halfH } = halfSize(px);
-    return panelLabelBlockFitsAt(r, shape, rotation, mirrorX, rectW / 2, rectH - bottomPad - halfH, halfW, halfH);
+    // Beside the cable lanes, not on the panel's own centre - the same place
+    // the block is actually drawn (see panelLabelCentreX).
+    return panelLabelBlockFitsAt(r, shape, rotation, mirrorX, panelLabelCentreX(rectW), rectH - bottomPad - halfH, halfW, halfH);
   };
   if (fitsAtFoot(basePx)) return { fontPx: basePx, centre: null };
   let fontPx = basePx;
@@ -4046,7 +4084,9 @@ export default function App() {
     layoutPanels.forEach((cell) => {
       if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
-      const cx = r.x + r.w / 2;
+      // Beside the vertical cable lanes rather than on the panel's centre -
+      // see panelLabelCentreX for why that is what keeps the text full size.
+      const cx = r.x + panelLabelCentreX(r.w);
       // Stack all per-panel info text from the BOTTOM of the panel upward,
       // leaving the top of the panel clear for the port-number badges and for
       // the cable lanes the router keeps its runs in (see CABLE_LANE). A full
@@ -5507,7 +5547,10 @@ const exportJson = () => {
           name: "Whole Layout",
           x: wholeLayoutCanvasX,
           y: wholeLayoutCanvasY,
-          resolution: resolutionOf(activePanels),
+          // Footprint, like the sub-screen entries above and like the wall's
+          // own quoted Resolution - this is canvas area, not the NovaStar
+          // cabinet topology.
+          resolution: wallFootprintResolutionOf(activePanels),
           color: normalizeSubScreenColor(null, 0),
           panels: activePanels.length,
         }];
@@ -8325,15 +8368,23 @@ const exportJson = () => {
                     1.18,
                   );
                   const fontPx = placement.fontPx;
+                  // Inset from the left by whatever the vertical cable lanes
+                  // claim, so the centred flex block lands beside the runs
+                  // instead of under them - the same offset the PDF uses (see
+                  // panelLabelCentreX). The shaped-panel case keeps measuring
+                  // its translate against the element's own centre, which this
+                  // inset has already moved.
+                  const laneInset = cableLaneClearPx(rect.w);
+                  const blockCentre = panelLabelCentreX(rect.w);
                   const blockStyle: React.CSSProperties = placement.centre
                     ? {
                         position: "absolute",
-                        left: 0,
-                        right: 0,
+                        left: laneInset,
+                        right: PANEL_LABEL_SIDE_PAD,
                         top: placement.centre.y - (labelLines.length * fontPx * 1.18) / 2,
-                        transform: `translateX(${placement.centre.x - rect.w / 2}px)`,
+                        transform: `translateX(${placement.centre.x - blockCentre}px)`,
                       }
-                    : { position: "absolute", left: 0, right: 0, bottom: PANEL_LABEL_BOTTOM_PX - 2 };
+                    : { position: "absolute", left: laneInset, right: PANEL_LABEL_SIDE_PAD, bottom: PANEL_LABEL_BOTTOM_PX - 2 };
                   return (
                     <div
                       key={`labels-${cell.id}`}

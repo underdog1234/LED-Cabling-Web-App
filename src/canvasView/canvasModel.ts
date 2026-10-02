@@ -68,9 +68,25 @@ export const wallFootprintResolutionOf = (panels: Cell[]): CanvasResolution => {
   return { w: Math.round(bbox.w * pxPerMmX), h: Math.round(bbox.h * pxPerMmY) };
 };
 
-/** A sub-screen's own pixel resolution, derived from its member panels. */
+/**
+ * A sub-screen's own pixel resolution: the FOOTPRINT its panels stand in, for
+ * exactly the reasons given above - a sub-screen is a wall in its own right,
+ * and the content mapped onto it has to span the whole rectangle.
+ *
+ * This used to be resolutionOf, the packed space, which lost a module column
+ * per gap: a 22-column sub-screen with a hole in each row was quoted as
+ * 3,528px wide on the Output Canvas and in the PDF, while the test pattern
+ * rendered the 3,696px the content really is. The packed figure is still the
+ * right one for the NovaStar cabinet topology - that is a different question,
+ * asked by exportBuilder, which goes to resolutionOf directly.
+ *
+ * It is also the only figure consistent with finalCanvasPositionOf, which
+ * places each panel on the canvas by its PHYSICAL mm offset within the
+ * sub-screen: with the packed figure, a sub-screen's own panels could sit
+ * outside the rectangle the canvas view drew around them.
+ */
 export const subScreenResolutionOf = (panels: Cell[], subScreenId: string): CanvasResolution =>
-  resolutionOf(panels.filter((cell) => cell.subScreenId === subScreenId));
+  wallFootprintResolutionOf(panels.filter((cell) => cell.subScreenId === subScreenId));
 
 /**
  * Each panel's tightly-packed pixel position within the wall's own native

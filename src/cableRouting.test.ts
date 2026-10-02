@@ -11,6 +11,8 @@ import {
   cableRunsClash,
   cableStrokes,
   spreadCableRun,
+  cableLaneClearPx,
+  panelLabelCentreX,
   panelLabelFontPx,
   routeCablePx,
   type CableKind,
@@ -18,26 +20,33 @@ import {
 
 // Cable runs are painted OVER the panels in both the workspace and the PDF, so
 // the route is the only thing keeping a panel's text readable. Every panel
-// prints its labels centred and stacked up from the bottom edge, which leaves
-// the strip above the topmost label and the margin either side of the text as
-// the only places a run may cross a panel. These tests pin that down, plus the
-// styling rules the two renderers share: one colour per service, one run (not
-// two) where signal and power travel together, and one outline ">" per panel
-// entered.
+// stacks its labels up from the bottom edge, centred on the space BESIDE the
+// vertical cable lanes (see panelLabelCentreX) rather than on the panel
+// itself, which leaves the strip above the topmost label and the lanes down
+// the left-hand side as the only places a run may cross a panel. These tests
+// pin that down, plus the styling rules the two renderers share: one colour
+// per service, one run (not two) where signal and power travel together, and
+// one outline ">" per panel entered.
 
 const panel = (x: number, y: number, size = 78) => ({ x, y, w: size, h: size });
 
 /**
  * Widest label block a panel can print, as a box inside the panel's rect: four
- * centred lines of the widest label there is, at its own distance off the
- * bottom edge.
+ * lines of the widest label there is, centred where the renderers actually
+ * centre it - beside the cable lanes, not on the panel - at its own distance
+ * off the bottom edge.
  * Deliberately the worst case in both directions - no real panel prints every
  * line at that width - so a route that clears this clears anything.
  */
 const labelBox = (r: { x: number; y: number; w: number; h: number }, fontPx: number) => {
   const textW = 5.9 * fontPx;
   const stackH = 4.9 * fontPx;
-  return { x: r.x + (r.w - textW) / 2, y: r.y + r.h - PANEL_LABEL_BOTTOM_PX - stackH, w: textW, h: stackH };
+  return {
+    x: r.x + panelLabelCentreX(r.w) - textW / 2,
+    y: r.y + r.h - PANEL_LABEL_BOTTOM_PX - stackH,
+    w: textW,
+    h: stackH,
+  };
 };
 
 /** Does a stroked segment of `width` touch `box`? */
@@ -300,5 +309,44 @@ describe("panelLabelFontPx", () => {
 
   it("leaves room for the separation between an unshared signal and power run", () => {
     expect(CABLE_SEPARATION * 2).toBeGreaterThanOrEqual(CABLE_STROKE.casing);
+  });
+
+  it("keeps every size after moving the vertical lanes in off the edge", () => {
+    // The lanes went from 4% to 12% of the panel width, and the label block
+    // moved off the panel's centre to pay for it. Nothing got smaller.
+    expect(panelLabelFontPx(78, 78, 10, 4.9, PANEL_LABEL_BOTTOM_PX)).toBe(10); // PDF
+    expect(panelLabelFontPx(78, 78, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5)).toBe(9); // workspace
+    expect(panelLabelFontPx(49.9, 74.9, 10, 4.9, PANEL_LABEL_BOTTOM_PX)).toBe(6); // poster section
+  });
+});
+
+describe("the vertical cable lanes", () => {
+  it("runs both of them inside the panel, not along its edge", () => {
+    // The complaint this fixed: the signal run sat 0.9px off a 78px panel's
+    // left edge, so its 4.5px casing actually spilled over the boundary and
+    // read as a line drawn on the panel edge rather than on the panel.
+    const r = { x: 0, y: 0, w: 78, h: 78 };
+    const signal = routeCablePx(r, { ...r, y: 78 }, "signal").pts[0].x;
+    const power = routeCablePx(r, { ...r, y: 78 }, "power").pts[0].x;
+    expect(signal - CABLE_STROKE.casing / 2).toBeGreaterThan(0);
+    expect(signal).toBeGreaterThan(6);
+    expect(power).toBeGreaterThan(signal);
+  });
+
+  it("leaves the whole lane clear of the text", () => {
+    // Everything the lanes occupy has to finish before the label starts.
+    for (const w of [78, 49.9, 156, 234]) {
+      const fontPx = panelLabelFontPx(w, w, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
+      if (!fontPx) continue;
+      const labelLeft = panelLabelCentreX(w) - (5.9 * fontPx) / 2;
+      expect({ w, clear: cableLaneClearPx(w) <= labelLeft + 0.001 }).toEqual({ w, clear: true });
+    }
+  });
+
+  it("centres the label on the space left beside the lanes, not on the panel", () => {
+    expect(panelLabelCentreX(78)).toBeGreaterThan(39);
+    // ...and never pushes it so far right that the block leaves the panel.
+    const fontPx = panelLabelFontPx(78, 78, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
+    expect(panelLabelCentreX(78) + (5.9 * fontPx) / 2).toBeLessThanOrEqual(78);
   });
 });

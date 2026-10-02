@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { makeGridPanels, getPanelSymbol, PANEL_TYPES, type Cell } from "./App";
-import { resolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
+import { resolutionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
 
 // Two different pixel spaces live in this app and they must not be confused:
 //
@@ -50,6 +50,48 @@ describe("wallFootprintResolutionOf", () => {
   it("uses each panel type's own pitch on an MT wall", () => {
     const panels = makeGridPanels(3, 2, "MT");
     expect(wallFootprintResolutionOf(panels)).toEqual({ w: 3 * PANEL_TYPES.MT.pixW, h: 2 * PANEL_TYPES.MT.pixH });
+  });
+});
+
+describe("subScreenResolutionOf", () => {
+  // A sub-screen is a wall in its own right, so its quoted resolution is the
+  // rectangle it stands in - the same figure the test pattern renders at.
+  // Reading it off the packed space instead lost a module column per gap: a
+  // 22-wide sub-screen with a hole in each row read 3,528px where the test
+  // pattern, the PDF's own layout image and the real content are 3,696px.
+  const screened = (cols: number, rows: number, holeOf: (row: number) => number | null): Cell[] =>
+    makeGridPanels(cols, rows, "MG9")
+      .filter((cell) => {
+        const col = Math.round(cell.x / (MG9.w * 1000));
+        const row = Math.round(cell.y / (MG9.h * 1000));
+        return holeOf(row) !== col;
+      })
+      .map((cell) => ({ ...cell, subScreenId: "screen-1" }));
+
+  it("spans every column the sub-screen stands in, gaps included", () => {
+    const panels = screened(22, 8, (row) => row + 1);
+    expect(subScreenResolutionOf(panels, "screen-1")).toEqual({ w: 22 * MG9.pixW, h: 8 * MG9.pixH });
+    // The exact numbers off the report: 3696 x 1344, not 3528 x 1344.
+    expect(subScreenResolutionOf(panels, "screen-1")).toEqual({ w: 3696, h: 1344 });
+    // The packed space is what it used to read, and still what the NovaStar
+    // cabinet topology is built in - both correct, for different jobs.
+    expect(resolutionOf(panels)).toEqual({ w: 21 * MG9.pixW, h: 8 * MG9.pixH });
+  });
+
+  it("agrees with the packed space on a solid rectangular sub-screen", () => {
+    const panels = screened(6, 3, () => null);
+    expect(subScreenResolutionOf(panels, "screen-1")).toEqual({ w: 6 * MG9.pixW, h: 3 * MG9.pixH });
+  });
+
+  it("measures only its own panels, not the wall around them", () => {
+    const mine = screened(4, 2, () => null);
+    const theirs = makeGridPanels(4, 2, "MG9").map((cell) => ({
+      ...cell,
+      id: `other-${cell.id}`,
+      x: cell.x + 10_000,
+      subScreenId: "screen-2",
+    }));
+    expect(subScreenResolutionOf([...mine, ...theirs], "screen-1")).toEqual({ w: 4 * MG9.pixW, h: 2 * MG9.pixH });
   });
 });
 
