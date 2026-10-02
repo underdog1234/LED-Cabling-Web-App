@@ -136,13 +136,23 @@ type AvailabilityProject = {
 // How much of an item is really unavailable over a date range: the most that
 // is out on any ONE day of it, not the sum of every booking that touches it.
 // Two jobs of 100 on different days inside the range are 100 unavailable, not
-// 200 - the first lot is back on the shelf before the second goes out.
+// 200 - the first lot is back on the shelf before the second goes out. A
+// CANCELLED job is not demand at all and is left out of both figures (its
+// equipment lines stay in Rentman, so the date query still returns them).
 //
 // The app works this out for itself from the bookings below, so it is right
 // whichever version of this Worker is deployed; this copy keeps the API's own
 // numbers honest for anything else reading it. The tested original, with the
 // cases it was written against, is led-cabling-web/src/rentman/availabilityPeak.ts.
 const DAY_MS = 86_400_000;
+
+// This account's subproject statuses (GET /statuses) are Pending, Canceled,
+// Confirmed, Prepped, On location, Returned, Inquiry and Concept. The API's
+// `name` is the US spelling "Canceled" while Rentman's UI shows "Cancelled",
+// so match the stem rather than either spelling. Only cancelled is dropped -
+// a Pending or Inquiry job is kit somebody is expecting to send out.
+const isCancelledStatus = (status: string | null | undefined): boolean =>
+  (status ?? "").toLowerCase().replace(/[^a-z]/g, "").startsWith("cancel");
 const dayNumber = (value: string | null | undefined): number | null => {
   if (!value) return null;
   const ms = Date.parse(value);
@@ -255,11 +265,14 @@ async function handleEquipmentAvailability(env: Env, url: URL): Promise<Response
       return;
     }
     const projects = byEquipmentId[eq.id] || [];
-    // Every booking added together. NOT what is unavailable - bookings on
-    // different days do not take the same kit twice - and kept only so a
-    // caller can show the two figures side by side. Use peakRequired.
-    const totalRequired = projects.reduce((sum, p) => sum + p.quantity, 0);
-    const { peak, peakStart, peakEnd } = peakRequiredFor(projects, from, to);
+    // Cancelled jobs are returned in `projects` so a caller can show them,
+    // but they are not demand and count towards neither figure below.
+    const counted = projects.filter((p) => !isCancelledStatus(p.status));
+    // Every booking that counts, added together. NOT what is unavailable -
+    // bookings on different days do not take the same kit twice - and kept
+    // only so a caller can show the two figures side by side. Use peakRequired.
+    const totalRequired = counted.reduce((sum, p) => sum + p.quantity, 0);
+    const { peak, peakStart, peakEnd } = peakRequiredFor(counted, from, to);
     // Deliberately not clamped at 0 - a negative "remaining" IS the shortage
     // this feature exists to surface.
     result[code] = {

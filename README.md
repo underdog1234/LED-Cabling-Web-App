@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.57.0`
+Version `0.58.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -72,6 +72,50 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.58.0
+
+**Cancelled jobs no longer hold stock**
+
+Rentman keeps a cancelled job's equipment lines rather than deleting them, so
+they kept coming back from the date-overlap query and were counted like any
+other booking. A job called off months ago could still show its panels as out,
+and the tool reported a shortage over kit sitting on the shelf.
+
+- A booking whose job is **cancelled is never counted** - not in **Out on the
+  day**, not in the sum beside it, not in **Available Stock**
+- It is still **listed**, marked *cancelled, not counted*, with a line saying
+  what it would have added: *"200 on 1 cancelled job is not counted - that kit
+  is on the shelf."* A planner can see the booking in Rentman, so silently
+  dropping it would raise the same question the old behaviour did
+- The PDF's Other Projects & Repairs page says the same, and its intro now
+  spells it out
+- Matching is on the status **stem**, because Rentman spells it two ways: the
+  API's status name is the US "Canceled" while the UI shows "Cancelled".
+  Checked against this account's real status list - Pending, Canceled,
+  Confirmed, Prepped, On location, Returned, Inquiry, Concept
+- **Only cancelled is dropped.** A Pending or Inquiry job is kit somebody is
+  seriously expecting to send out, and quietly freeing it would be the same
+  mistake in the other direction
+- The Worker has the same rule, so its own `peakRequired` and `remaining`
+  agree - but the app works this out from the bookings it is given, so it is
+  right **without redeploying**
+
+**Levelling packers on anything that stands on the floor**
+
+| Code | Name | When |
+| --- | --- | --- |
+| `12374` | Assorted Levelling Packers & Shims | Every deployment except **Flown** |
+
+One assorted set, which is how Rentman stocks it (quantity 1) - not a
+per-panel count. A flown wall hangs off the bar and has nothing to pack;
+ground support, floor and no-support walls all sit on whatever the venue's
+floor happens to be doing. With no deployment type chosen the row stays off
+the list, same as every other deployment-driven item.
+
+**Also:** the VX2000 Pro's shelf quantity is now `3`, confirmed against
+Rentman along with both processor codes and the packers' - all four read back
+exactly as entered.
 
 ## Recent Changes In v0.57.0
 

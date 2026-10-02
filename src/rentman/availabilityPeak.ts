@@ -15,9 +15,32 @@ import type { EquipmentAvailabilityProject } from "./rentmanClient";
 // sharing a day are competing for the same panels even when one derigs in the
 // morning and the other rigs in the afternoon - a planner wants that flagged,
 // not smoothed away by a clock.
+//
+// A CANCELLED job is not demand at all. Rentman keeps the equipment lines on a
+// cancelled job rather than deleting them, so they keep coming back from the
+// date-overlap query and used to be counted like any other booking - kit held
+// against a job that is not happening. Those are listed but never counted (see
+// isCancelledStatus).
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 86_400_000;
+
+/**
+ * Whether a booking's status means the job is off.
+ *
+ * Rentman has no status on the project itself, only on its subproject(s), and
+ * this account's own status list (GET /statuses) is: Pending, Canceled,
+ * Confirmed, Prepped, On location, Returned, Inquiry, Concept. Note the API's
+ * `name` is the US spelling "Canceled" while Rentman's UI shows the display
+ * name "Cancelled" - matching either exactly would miss half of it, which is
+ * why this normalises and tests the stem.
+ *
+ * Only cancelled is excluded. A Pending or Inquiry job is kit somebody is
+ * seriously expecting to send out, and quietly freeing it would be the same
+ * class of mistake in the other direction.
+ */
+export const isCancelledStatus = (status: string | null | undefined): boolean =>
+  (status ?? "").toLowerCase().replace(/[^a-z]/g, "").startsWith("cancel");
 
 /** The day a timestamp falls on, as a whole number of days since the epoch. Null when it cannot be read. */
 export const dayNumber = (value: string | null | undefined): number | null => {
@@ -37,10 +60,14 @@ export type PeakUsage = {
   peakEnd: string | null;
   /** The bookings that are out on the peak day - the ones to argue with. */
   peakBookings: EquipmentAvailabilityProject[];
-  /** Every overlapping booking added together, which is what this used to report. Kept so the two can be shown side by side. */
+  /** Every overlapping booking that COUNTS, added together - which is what this used to report. Kept so the two can be shown side by side. */
   total: number;
-  /** True when adding the bookings up overstates the real demand - i.e. they do not all clash. */
+  /** True when adding the counted bookings up overstates the real demand - i.e. they do not all clash. */
   overstated: boolean;
+  /** Bookings left out because their job is cancelled. Listed so they can be seen, never counted. */
+  cancelled: EquipmentAvailabilityProject[];
+  /** What those cancelled bookings would have added to the sum had they been counted. */
+  cancelledQuantity: number;
 };
 
 /**
@@ -55,14 +82,31 @@ export const peakUsage = (
   from: string,
   to: string,
 ): PeakUsage => {
-  const total = bookings.reduce((sum, booking) => sum + (Number(booking.quantity) || 0), 0);
-  const empty: PeakUsage = { peak: 0, peakStart: null, peakEnd: null, peakBookings: [], total, overstated: total > 0 };
+  // Cancelled jobs come back from the date query like any other booking -
+  // Rentman keeps their equipment lines - so they are split off here, before
+  // anything is counted, rather than being subtracted again further down.
+  const cancelled = bookings.filter((booking) => isCancelledStatus(booking.status));
+  const counted = bookings.filter((booking) => !isCancelledStatus(booking.status));
+  const quantityOf = (list: EquipmentAvailabilityProject[]) =>
+    list.reduce((sum, booking) => sum + (Number(booking.quantity) || 0), 0);
+  const total = quantityOf(counted);
+  const cancelledQuantity = quantityOf(cancelled);
+  const empty: PeakUsage = {
+    peak: 0,
+    peakStart: null,
+    peakEnd: null,
+    peakBookings: [],
+    total,
+    overstated: total > 0,
+    cancelled,
+    cancelledQuantity,
+  };
   const windowStart = dayNumber(from);
   const windowEnd = dayNumber(to);
   if (windowStart === null || windowEnd === null || windowEnd < windowStart) return empty;
 
   // Each booking clipped to the window, as a run of whole days.
-  const spans = bookings
+  const spans = counted
     .map((booking) => {
       const start = dayNumber(booking.planPeriodStart);
       const end = dayNumber(booking.planPeriodEnd);
@@ -119,5 +163,7 @@ export const peakUsage = (
     peakBookings,
     total,
     overstated: total > peak,
+    cancelled,
+    cancelledQuantity,
   };
 };

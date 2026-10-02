@@ -49,6 +49,16 @@ describe("STOCK_CATALOG", () => {
     expect(STOCK_CATALOG.vx1000Pro.code).not.toBe(STOCK_CATALOG.vx2000Pro.code);
   });
 
+  it("carries the levelling packers as the one assorted set Rentman stocks", () => {
+    // Checked live against Rentman: code 12374, current_quantity 1. It is a
+    // set, so the row is never a per-panel count.
+    expect(STOCK_CATALOG.levellingPackers).toEqual({
+      code: "12374",
+      name: "Assorted Levelling Packers & Shims",
+      stock: 1,
+    });
+  });
+
   it("reads each processor's shelf quantity from the MG9 catalogue", () => {
     // One number to keep current: the figures live in PANEL_TYPES.MG9.stock,
     // which is where a stock check updates them.

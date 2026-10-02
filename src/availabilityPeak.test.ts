@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { peakUsage } from "./rentman/availabilityPeak";
+import { isCancelledStatus, peakUsage } from "./rentman/availabilityPeak";
 import type { EquipmentAvailabilityProject } from "./rentman/rentmanClient";
 
 // "Can I have 320 panels from the 4th to the 9th?" is a question about the
@@ -18,6 +18,30 @@ const booking = (
   quantity,
   planPeriodStart,
   planPeriodEnd,
+});
+
+/** Same booking, on a job with a status other than Confirmed. */
+const withStatus = (base: EquipmentAvailabilityProject, status: string | null): EquipmentAvailabilityProject => ({
+  ...base,
+  status,
+});
+
+describe("isCancelledStatus", () => {
+  it("matches both spellings Rentman uses for the same status", () => {
+    // The API's status `name` is "Canceled"; the UI shows the display name
+    // "Cancelled". Matching either one exactly would miss half of them.
+    expect(isCancelledStatus("Canceled")).toBe(true);
+    expect(isCancelledStatus("Cancelled")).toBe(true);
+    expect(isCancelledStatus("cancelled by client")).toBe(true);
+  });
+
+  it("leaves every other status in this account's list counting", () => {
+    // The real list from GET /statuses - a job that is merely not confirmed
+    // yet is still kit somebody expects to send out.
+    ["Pending", "Confirmed", "Prepped", "On location", "Returned", "Inquiry", "Concept", null, ""].forEach((status) => {
+      expect({ status, cancelled: isCancelledStatus(status) }).toEqual({ status, cancelled: false });
+    });
+  });
 });
 
 describe("peakUsage", () => {
@@ -123,5 +147,50 @@ describe("peakUsage", () => {
       "2026-10-10",
     );
     expect(result).toMatchObject({ peak: 12, peakStart: "2026-10-04", peakEnd: "2026-10-04" });
+  });
+
+  it("does not hold kit against a job that was cancelled", () => {
+    // Rentman keeps a cancelled job's equipment lines, so they still come
+    // back from the date-overlap query - and used to be counted, reporting a
+    // shortage over kit sitting on the shelf.
+    const result = peakUsage(
+      [
+        booking("Live job", 100, "2026-10-04", "2026-10-06"),
+        withStatus(booking("Called off", 200, "2026-10-04", "2026-10-06"), "Canceled"),
+      ],
+      "2026-10-01",
+      "2026-10-10",
+    );
+    expect(result.peak).toBe(100);
+    expect(result.total).toBe(100);
+    expect(result.cancelledQuantity).toBe(200);
+    expect(result.cancelled.map((b) => b.projectName)).toEqual(["Called off"]);
+    // Not in the peak either, so nothing in the UI marks it as making one up.
+    expect(result.peakBookings.map((b) => b.projectName)).toEqual(["Live job"]);
+  });
+
+  it("reports nothing out when every job in the window is cancelled", () => {
+    const result = peakUsage(
+      [
+        withStatus(booking("Called off", 200, "2026-10-04", "2026-10-06"), "Cancelled"),
+        withStatus(booking("Also off", 50, "2026-10-05", "2026-10-07"), "Canceled"),
+      ],
+      "2026-10-01",
+      "2026-10-10",
+    );
+    expect(result).toMatchObject({ peak: 0, peakStart: null, peakEnd: null, total: 0, cancelledQuantity: 250 });
+    expect(result.peakBookings).toEqual([]);
+    // Nothing is being overstated - there is no demand here at all.
+    expect(result.overstated).toBe(false);
+  });
+
+  it("still counts a job that is only pending", () => {
+    const result = peakUsage(
+      [withStatus(booking("Not confirmed yet", 80, "2026-10-04", "2026-10-06"), "Pending")],
+      "2026-10-01",
+      "2026-10-10",
+    );
+    expect(result).toMatchObject({ peak: 80, total: 80, cancelledQuantity: 0 });
+    expect(result.cancelled).toEqual([]);
   });
 });

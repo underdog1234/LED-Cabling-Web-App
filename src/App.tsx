@@ -47,7 +47,7 @@ import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./n
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
 import { applyStockOverrides, baseCodeOf, buildStockComparison, loadStockOverrides, saveStockOverrides, type StockComparisonRow, type StockOverrides } from "./rentman/stockOverrides";
-import { peakUsage } from "./rentman/availabilityPeak";
+import { isCancelledStatus, peakUsage } from "./rentman/availabilityPeak";
 import {
   addedStockCodes,
   applyStockEdits,
@@ -84,7 +84,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.57.0";
+const APP_VERSION = "0.58.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -131,8 +131,9 @@ export const PANEL_TYPES = {
     },
     stock: {
       panels: 320,
+      // Confirmed against Rentman (GET /equipment?code=12247,12353).
       vx1000: 2,
-      vx2000: 2,
+      vx2000: 3,
       distro32: 4,
       distro63: 4,
       powerCable15m: 93,
@@ -256,6 +257,10 @@ export const STOCK_CATALOG = {
   // from there rather than retyped so there is one number to keep current.
   vx1000Pro: { code: "12247", name: "NovaStar VX1000 Pro LED Processor", stock: PANEL_TYPES.MG9.stock.vx1000 },
   vx2000Pro: { code: "12353", name: "NovaStar VX2000 Pro LED Processor Rack", stock: PANEL_TYPES.MG9.stock.vx2000 },
+  // One assorted set, not a per-panel count - Rentman stocks exactly 1 of it.
+  // Goes out with anything that stands on the floor rather than hanging; see
+  // stockRows for the rule.
+  levellingPackers: { code: "12374", name: "Assorted Levelling Packers & Shims", stock: 1 },
   signalJoiner: { code: "12280", name: "SEETRONIC SE8FF-05 F/M - F/M Joiner", stock: 10 },
   signalJoinerCable: { code: "12312", name: "SEETRONIC F/M - F/M Cable", stock: 11 },
   modularFrameScrew: { code: "12253", name: "YES TECH Modular Frame Installation Screw", stock: 384 },
@@ -3474,6 +3479,18 @@ export default function App() {
       rowsOut.push(makeStockRow(processorItem, 1, `1 per project (${PROCESSOR_SPECS[processorModel].label} selected)`));
     }
 
+    // Packers and shims level a wall that stands on the floor. A flown wall
+    // hangs off the bar and has nothing to pack, so this is every deployment
+    // EXCEPT Flown - ground support, floor and no-support walls all sit on
+    // whatever the venue's floor happens to be doing.
+    // No deployment chosen yet is not an answer either way, so it stays off
+    // the list until one is - same as every other deployment-driven row.
+    if (deploymentType && deploymentType !== DEPLOYMENT_TYPES.FLOWN) {
+      rowsOut.push(
+        makeStockRow(STOCK_CATALOG.levellingPackers, 1, `1 assorted set - ${deploymentType} deployment, not flown`),
+      );
+    }
+
     if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
       if (topRowBars.mg9 > 0) {
         rowsOut.push({
@@ -5340,7 +5357,7 @@ const exportJson = () => {
         // explains why the figures are not the sum of the jobs under them.
         const intro = pdf.splitTextToSize(
           availabilityCheckedRange
-            ? `Jobs overlapping ${availabilityCheckedRange.from} to ${availabilityCheckedRange.to}. The figure against each item is the most of it out on any ONE day of that range, not the sum of these jobs; * marks the ones making up that peak. Broken / repair is current, not date-ranged.`
+            ? `Jobs overlapping ${availabilityCheckedRange.from} to ${availabilityCheckedRange.to}. The figure against each item is the most of it out on any ONE day of that range, not the sum of these jobs; * marks the ones making up that peak. Cancelled jobs are listed but not counted. Broken / repair is current, not date-ranged.`
             : "Broken / repair is current, not date-ranged.",
           274,
         ) as string[];
@@ -5352,7 +5369,10 @@ const exportJson = () => {
         if (y === 0 || y + linesNeeded * 5 > 195) startPage(y !== 0);
       };
       withDetail.forEach((entry) => {
-        ensureRoom(entry.projects.length + entry.repairItems.length + 3);
+        // Headroom for the fixed lines above the bookings: the item's name,
+        // the peak line, the "booked across the whole range" line, the
+        // cancelled-jobs line and the repairs header.
+        ensureRoom(entry.projects.length + entry.repairItems.length + 5);
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(11);
         pdf.text(`${entry.row.code} - ${entry.row.name}`, 10, y);
@@ -5379,11 +5399,24 @@ const exportJson = () => {
             pdf.setTextColor(15, 23, 42);
             y += 4.5;
           }
+          // Cancelled jobs are listed below with the rest, so the page has to
+          // say why the numbers against them do not add up to the figure above.
+          if (usage?.cancelled.length) {
+            pdf.setTextColor(100, 116, 139);
+            pdf.text(
+              `${formatNumber(usage.cancelledQuantity)} on ${usage.cancelled.length} cancelled job${usage.cancelled.length === 1 ? "" : "s"} is not counted - that kit is on the shelf.`,
+              18,
+              y,
+            );
+            pdf.setTextColor(15, 23, 42);
+            y += 4.5;
+          }
           entry.projects.forEach((project) => {
+            const cancelled = isCancelledStatus(project.status);
             const inPeak = usage?.peakBookings.includes(project) ?? false;
             if (!inPeak) pdf.setTextColor(100, 116, 139);
             pdf.text(
-              `${inPeak ? "*" : " "} #${project.projectNumber} - ${project.projectName} - ${project.status ?? "No status"} - ${formatNumber(project.quantity)} - ${formatDateLabel(project.planPeriodStart)} to ${formatDateLabel(project.planPeriodEnd)}`,
+              `${inPeak ? "*" : " "} #${project.projectNumber} - ${project.projectName} - ${project.status ?? "No status"} - ${formatNumber(project.quantity)} - ${formatDateLabel(project.planPeriodStart)} to ${formatDateLabel(project.planPeriodEnd)}${cancelled ? " - not counted" : ""}`,
               18,
               y,
             );
@@ -8880,7 +8913,7 @@ const exportJson = () => {
                     <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.total}</th>
                     <th className="px-3 py-2 text-right">{stockOverridesApplied ? "Rentman Stock" : "Stock"}</th>
                     {availabilityByCode ? (
-                      <th className="px-3 py-2 text-right" title="The most of this item out on other jobs on any ONE day of your range - not the sum of every job that touches it">
+                      <th className="px-3 py-2 text-right" title="The most of this item out on other jobs on any ONE day of your range - not the sum of every job that touches it. Cancelled jobs do not count.">
                         Out on the day
                       </th>
                     ) : null}
@@ -9038,8 +9071,23 @@ const exportJson = () => {
                                   together - only {formatNumber(entry.usage.peak)} is ever out on one day.
                                 </div>
                               ) : null}
+                              {/* Cancelled jobs keep their equipment lines in
+                                  Rentman, so they still come back from the date
+                                  query. They are listed - somebody may want to
+                                  know the kit was earmarked - but they are not
+                                  demand, and saying so is better than silently
+                                  dropping a booking the planner can see in
+                                  Rentman. */}
+                              {entry.usage?.cancelled.length ? (
+                                <div className="mb-1 text-[11px] text-slate-400">
+                                  {formatNumber(entry.usage.cancelledQuantity)} on{" "}
+                                  {entry.usage.cancelled.length} cancelled job{entry.usage.cancelled.length === 1 ? "" : "s"} is not
+                                  counted - that kit is on the shelf.
+                                </div>
+                              ) : null}
                               <ul className="space-y-0.5 text-xs text-slate-300">
                                 {entry.projects.map((project, index) => {
+                                  const cancelled = isCancelledStatus(project.status);
                                   const inPeak = entry.usage?.peakBookings.includes(project) ?? false;
                                   return (
                                     <li key={index} className={inPeak ? "" : "text-slate-500"}>
@@ -9048,6 +9096,7 @@ const exportJson = () => {
                                       {formatNumber(project.quantity)} - {formatDateLabel(project.planPeriodStart)} to{" "}
                                       {formatDateLabel(project.planPeriodEnd)}
                                       {inPeak ? <span className="ml-1 text-amber-300">- in the peak</span> : null}
+                                      {cancelled ? <span className="ml-1 text-slate-500">- cancelled, not counted</span> : null}
                                     </li>
                                   );
                                 })}
