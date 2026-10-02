@@ -39,7 +39,7 @@ import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
 import { finalCanvasPositionOf, resolutionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
-import { type TestPatternLayout, type TestPatternProject, LOOP_SECONDS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
+import { type TestPatternLayout, type TestPatternProject, LOOP_SECONDS, computeTestPatternLayout, drawSurfaceBoundaries, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
 import { MP4_PROFILE, MP4_RECORD_MARGIN_SECONDS, h264LevelFor, keyframeIntervalFor } from "./testPattern/mp4Encode";
 import { isMultiScreenLikely, requestScreenDetails, openWindowOnScreen } from "./testPattern/screenPlacement";
 import ScreenPickerModal from "./testPattern/ScreenPickerModal";
@@ -84,7 +84,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.59.0";
+const APP_VERSION = "0.60.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1322,6 +1322,88 @@ export const getSelectedIds = (selectedCells: Set<string>, selectedId: string | 
   return expanded;
 };
 
+/**
+ * Short name for a variant on a chip, where the catalogue's full label ("MG9
+ * LED Corner Panel") is too long to read at a glance. Empty for STANDARD,
+ * which is just the panel type's own name.
+ */
+const PANEL_VARIANT_SHORT: Record<PanelVariantKey, string> = {
+  STANDARD: "",
+  TRIANGLE: "Triangle",
+  CURVED: "Curved",
+  CORNER: "Corner",
+  CORNER_FLAT: "Corner (flat)",
+};
+
+export type PanelMixEntry = {
+  key: string;
+  /** Short name for the chip, e.g. "MG9", "MG9 Triangle", "MT Corner". */
+  label: string;
+  /** The catalogue's own name for the part, for the chip's tooltip. */
+  detail: string;
+  count: number;
+  /** How many of that count are removed (inactive) panels. */
+  removed: number;
+};
+
+/**
+ * What a set of panels is made of, one entry per distinct physical part -
+ * which is the same split Stock Calculations orders against, so a selection
+ * reads in the same terms as the pull sheet.
+ *
+ * Posters are counted as COMPLETE posters rather than sections: selecting one
+ * pulls in all eight of its sections (see getSelectedIds), and reporting that
+ * as "8 LED Poster" would be a count of something nobody stocks.
+ */
+export const panelTypeMix = (cells: Cell[]): PanelMixEntry[] => {
+  const byKey = new Map<string, PanelMixEntry>();
+  const posterGroups = new Map<string, Set<string>>();
+  let posterUngrouped = 0;
+  let posterUngroupedRemoved = 0;
+  const entryFor = (key: string, label: string, detail: string) => {
+    let entry = byKey.get(key);
+    if (!entry) {
+      entry = { key, label, detail, count: 0, removed: 0 };
+      byKey.set(key, entry);
+    }
+    return entry;
+  };
+  cells.forEach((cell) => {
+    const type = cellPanelType(cell);
+    const typeName = PANEL_TYPES[type as PanelTypeKey]?.name ?? type;
+    if (type === "POSTER") {
+      if (cell.posterGroupId) {
+        const seen = posterGroups.get(cell.posterGroupId) ?? new Set<string>();
+        seen.add(cell.isRemoved ? "removed" : "active");
+        posterGroups.set(cell.posterGroupId, seen);
+      } else {
+        posterUngrouped += 1;
+        if (cell.isRemoved) posterUngroupedRemoved += 1;
+      }
+      return;
+    }
+    const variant = variantForType(type, cell.panelVariant) as PanelVariantKey;
+    const short = PANEL_VARIANT_SHORT[variant];
+    const entry = entryFor(
+      `${type}:${variant}`,
+      short ? `${typeName} ${short}` : typeName,
+      variantLabelFor(type, variant),
+    );
+    entry.count += 1;
+    if (cell.isRemoved) entry.removed += 1;
+  });
+  const posters = posterGroups.size + Math.ceil(posterUngrouped / POSTER_SECTIONS);
+  if (posters > 0) {
+    const entry = entryFor("POSTER:STANDARD", PANEL_TYPES.POSTER.name, `${PANEL_TYPES.POSTER.name} (${POSTER_SECTIONS} sections each)`);
+    entry.count = posters;
+    // A poster counts as removed only when every section of it is.
+    entry.removed =
+      [...posterGroups.values()].filter((states) => !states.has("active")).length +
+      Math.ceil(posterUngroupedRemoved / POSTER_SECTIONS);
+  }
+  return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+};
+
 /** The POSTER_COLS x POSTER_ROWS sections of one complete LED poster, sharing a group id. */
 export const makePosterAt = (xMm: number, yMm: number, subScreenId: string | null = null): Cell[] => {
   const groupId = newCellId();
@@ -2508,6 +2590,13 @@ export default function App() {
   const selectedPanel = findCellById(grid, selectedId);
   const activeSelectedKeys = getSelectedIds(selectedCells, selectedId, grid);
   const selectedCount = activeSelectedKeys.size;
+  // What the selection is actually made of, split the same way the stock list
+  // is - so "24 selected" can be read as the parts it would order.
+  const selectedMix = useMemo(
+    () => panelTypeMix(grid.filter((cell) => activeSelectedKeys.has(cell.id))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [grid, selectedCount, selectedId, selectedCells],
+  );
   const isPatchTargetActive = patchMode === "signal" ? activePort > 0 : activePowerPort > 0;
 
   // A dangling activeSubScreenId (e.g. left pointing at a sub-screen an undo
@@ -4475,12 +4564,19 @@ const exportJson = () => {
   // identity colour (null for the full wall) - drawn as a border and name
   // banner so a stack of PNGs is instantly tellable apart.
   const renderTestPatternCanvas = (panels: Cell[], name: string, accentColor: string | null): HTMLCanvasElement => {
+      // The full-wall PNG declares every sub-screen, so each one is outlined
+      // and NAMED on the image the same way the moving pattern already did it.
+      // Without this the whole-wall PNG was the one export that showed no
+      // sub-screen names at all. A single-screen PNG declares none: its own
+      // name goes on as the accent banner further down, and declaring the
+      // screen as well would print the name twice.
+      const declaredSubScreens = accentColor === null ? testPatternSubScreens : [];
       // Shares computeTestPatternLayout with the video/live test pattern
       // (drawTestPattern.ts) instead of keeping a separate duplicate
       // position/label computation - a previous duplicate here silently
       // reintroduced the same "gaps collapse, front-view labels wrong"
       // bugs the shared version had already been fixed for.
-      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName: name, panelType, panels });
+      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName: name, panelType, panels, subScreens: declaredSubScreens });
       const W = Math.max(1, layout.W);
       const H = Math.max(1, layout.H);
       const canvas = document.createElement("canvas");
@@ -4562,6 +4658,10 @@ const exportJson = () => {
 
       // No signal/power cable runs or entry marks in the PNG: it is a clean
       // front-view pixel map of the wall for the observer / processor.
+
+      // Every declared sub-screen's own outline and name, shared with the
+      // moving pattern rather than drawn again here.
+      drawSurfaceBoundaries(ctx, layout);
 
       // Sub-screen identity: a border in its own colour plus its name, so a
       // folder of per-sub-screen PNGs can be matched back to the layout at a
@@ -6216,8 +6316,19 @@ const exportJson = () => {
   // when the front view is shown. The workspace origin is the bbox corner
   // minus padding and stays fixed during a drag gesture.
   const WORKSPACE_PAD_MM = 300;
-  const workspaceOrigin = { x: wallBBox.x - WORKSPACE_PAD_MM, y: wallBBox.y - WORKSPACE_PAD_MM };
-  const workspaceSizeMm = { w: wallBBox.w + WORKSPACE_PAD_MM * 2, h: wallBBox.h + WORKSPACE_PAD_MM * 2 };
+  // With panels on the clipboard the workspace opens out by the size of what
+  // is waiting to be pasted, so a copy can be dropped CLEAR of the wall on any
+  // side instead of only within the usual 300mm margin - the pointer cannot
+  // reach past the workspace, so without this there was nowhere to put a copy
+  // that was not overlapping what it came from. Per axis, so a wide, short
+  // strip does not open up a tall empty workspace it will never use; the extra
+  // module is the gap you would leave anyway. It goes on all four sides, and
+  // comes straight back off when the clipboard is cleared.
+  const pastePadX = clipboard ? clipboard.w + MODULE_MM : 0;
+  const pastePadY = clipboard ? clipboard.h + MODULE_MM : 0;
+  const workspacePad = { x: WORKSPACE_PAD_MM + pastePadX, y: WORKSPACE_PAD_MM + pastePadY };
+  const workspaceOrigin = { x: wallBBox.x - workspacePad.x, y: wallBBox.y - workspacePad.y };
+  const workspaceSizeMm = { w: wallBBox.w + workspacePad.x * 2, h: wallBBox.h + workspacePad.y * 2 };
   const mmToPx = (mm: number) => mm * pxPerMm;
   // Sets zoom so the FULL workspace (every active panel, including any
   // imported far outside the default view) fits inside the scrollable
@@ -7814,6 +7925,18 @@ const exportJson = () => {
                 </Button>
                 <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
                 <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
+                {/* What those panels ARE, one chip per physical part, in the
+                    same terms Stock Calculations orders them - a selection of
+                    24 that is 20 standard panels and 4 corners is two
+                    different pulls, and the count alone never said so. */}
+                {selectedMix.map((entry) => (
+                  <StatusChip key={entry.key} tone="sky">
+                    <span title={entry.detail}>
+                      {entry.count} x {entry.label}
+                      {entry.removed ? ` (${entry.removed} inactive)` : ""}
+                    </span>
+                  </StatusChip>
+                ))}
                 {editMode === "move" ? (
                   <>
                     <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">

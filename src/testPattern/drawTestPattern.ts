@@ -60,6 +60,14 @@ export type TestPatternSurface = {
   name: string;
   /** The sub-screen's own identity colour, or null for a whole-wall surface. */
   color: string | null;
+  /**
+   * True when this is a real sub-screen the project declared, rather than the
+   * whole-wall or "Unassigned" catch-all. A declared sub-screen is named on
+   * the pattern even when it is the only surface there - rendering one screen
+   * on its own is exactly when its name matters most, because the shape alone
+   * no longer says which screen you are looking at.
+   */
+  isSubScreen: boolean;
   cells: Cell[];
   bbox: RectMm;
 };
@@ -343,7 +351,7 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
   declaredSubScreens.forEach((screen) => {
     const cells = activePanels.filter((cell) => cell.subScreenId === screen.id);
     if (!cells.length) return;
-    surfaces.push({ id: screen.id, name: screen.name, color: screen.color, cells, bbox: bboxOf(cells) });
+    surfaces.push({ id: screen.id, name: screen.name, color: screen.color, isSubScreen: true, cells, bbox: bboxOf(cells) });
   });
   const claimed = new Set(surfaces.flatMap((surface) => surface.cells.map((cell) => cell.id)));
   const leftover = activePanels.filter((cell) => !claimed.has(cell.id));
@@ -356,6 +364,7 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
       id: wholeWall ? WHOLE_WALL_SURFACE_ID : UNASSIGNED_SURFACE_ID,
       name: wholeWall ? (project.surfaceName || "").trim() : "Unassigned",
       color: null,
+      isSubScreen: false,
       cells: leftover,
       bbox: bboxOf(leftover),
     });
@@ -956,13 +965,18 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   drawInfoText(ctx, layout);
 };
 
-// Each sub-screen's own boundary and name, in its own colour - drawn only
-// when the wall genuinely has more than one surface, so a plain wall looks
-// exactly as it always did. Inset by the stroke width so the line lands ON
-// the outermost panels (the wall canvas is the wall's tight bounding box, so
-// anything drawn outside a surface at the wall edge would be clipped away).
-const drawSurfaceBoundaries = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
-  if (layout.surfaces.length < 2) return;
+// Each sub-screen's own boundary and name, in its own colour. Drawn when the
+// wall has more than one surface, and ALSO when it has exactly one that is a
+// declared sub-screen - rendering a single screen on its own is where its name
+// matters most, since the shape no longer tells you which screen it is, and
+// the name was previously only in the small info block. A plain wall with no
+// sub-screens still has nothing drawn over it, exactly as before.
+// Inset by the stroke width so the line lands ON the outermost panels (the
+// wall canvas is the wall's tight bounding box, so anything drawn outside a
+// surface at the wall edge would be clipped away).
+export const drawSurfaceBoundaries = (ctx: CanvasRenderingContext2D, layout: TestPatternLayout) => {
+  const named = layout.surfaces.filter((surface) => surface.isSubScreen);
+  if (layout.surfaces.length < 2 && !named.length) return;
   const { W, H } = layout;
   const stroke = Math.max(2, Math.round(Math.min(W, H) * 0.004));
   const fontPx = Math.max(12, Math.round(Math.min(W, H) * 0.022));

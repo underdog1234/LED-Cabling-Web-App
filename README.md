@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.59.0`
+Version `0.60.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -72,6 +72,48 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.60.0
+
+**The selection says what it is made of**
+
+Panel Tools showed "24 selected" and nothing else, so a selection of 20 standard
+panels and 4 corners read the same as 24 plain ones - two different pulls, one
+number.
+
+- A chip per **physical part** now sits beside the count: `7 x MG9`,
+  `1 x MG9 Triangle`, `2 x MT Corner`, biggest group first
+- The split is the one **Stock Calculations** orders against, so a selection
+  reads in the same terms as the pull sheet. The catalogue's own name for the
+  part is on each chip's tooltip
+- **Posters count as whole posters**, not the eight sections that selecting one
+  pulls in
+- A group holding inactive panels says so - `4 x MG9 (2 inactive)` - so Delete
+  and Restore hold no surprises
+
+**Copied panels open the workspace up**
+
+The workspace stopped 300mm past the wall, and the pointer cannot reach past
+the workspace, so there was nowhere to drop a copy except on top of what it
+came from.
+
+- With panels on the clipboard the workspace **opens out by the size of what is
+  waiting to be pasted**, on all four sides, so a copy can be placed clear of
+  the wall in any direction
+- Per axis, so copying a wide, short strip does not open up a tall empty
+  workspace it will never use
+- It comes straight back off when the clipboard is cleared
+
+**Sub-screen names on the test pattern**
+
+- The **full-wall** test pattern PNG was the one export that showed no
+  sub-screen names at all. It now outlines and names each screen in its own
+  colour, the same way the moving pattern already did
+- A **single sub-screen** rendered on its own now carries its name too. The
+  boundary-and-name pass used to bail out whenever there was only one surface,
+  which is exactly the case where the name matters most - the shape alone no
+  longer says which screen you are looking at
+- A plain wall with no sub-screens still has nothing drawn over it
 
 ## Recent Changes In v0.59.0
 

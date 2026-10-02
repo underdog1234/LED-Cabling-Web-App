@@ -5,6 +5,7 @@ import {
   getContentPixelHeight,
   drawBouncingLogo,
   drawAlignmentOverlay,
+  drawSurfaceBoundaries,
   WHOLE_WALL_SURFACE_ID,
   UNASSIGNED_SURFACE_ID,
   type TestPatternLayout,
@@ -263,6 +264,53 @@ describe("computeTestPatternLayout surfaces", () => {
     expect(left.bbox.w).toBe(336);
     expect(right.bbox.w).toBe(336);
     expect(left.bbox.x + left.bbox.w === right.bbox.x || right.bbox.x + right.bbox.w === left.bbox.x).toBe(true);
+  });
+
+  it("names a single sub-screen rendered on its own", () => {
+    // Rendering one screen is where its name matters most - the shape alone
+    // no longer says which screen it is - and the boundary/name pass used to
+    // bail out whenever there was only one surface.
+    const panels = twoScreenWall().filter((cell) => cell.subScreenId === "left");
+    const layout = computeTestPatternLayout({
+      projectName: "Test",
+      panelType: "MG9",
+      panels,
+      subScreens: [{ id: "left", name: "Left Screen", color: "#38bdf8" }],
+    });
+    expect(layout.surfaces).toHaveLength(1);
+    expect(layout.surfaces[0]).toMatchObject({ id: "left", name: "Left Screen", isSubScreen: true });
+
+    const drawn: string[] = [];
+    const ctx = {
+      save: () => {}, restore: () => {},
+      strokeRect: () => {}, fillRect: () => {},
+      measureText: () => ({ width: 50 }),
+      fillText: (text: string) => drawn.push(text),
+      set font(_v: string) {}, set strokeStyle(_v: string) {}, set fillStyle(_v: string) {},
+      set lineWidth(_v: number) {}, set textAlign(_v: string) {}, set textBaseline(_v: string) {},
+      set lineJoin(_v: string) {},
+    };
+    drawSurfaceBoundaries(ctx as unknown as CanvasRenderingContext2D, layout);
+    expect(drawn).toEqual(["LEFT SCREEN"]);
+  });
+
+  it("leaves a plain wall with no sub-screens unmarked", () => {
+    // Nothing is drawn over a wall that has no sub-screens at all, exactly as
+    // before - the single-surface case is only named when it is a real screen.
+    const layout = computeTestPatternLayout({ projectName: "Test", panelType: "MG9", panels: makeGridPanels(3, 2, "MG9") });
+    expect(layout.surfaces[0].isSubScreen).toBe(false);
+    const drawn: string[] = [];
+    const ctx = {
+      save: () => { drawn.push("save"); }, restore: () => {},
+      strokeRect: () => { drawn.push("rect"); }, fillRect: () => {},
+      measureText: () => ({ width: 50 }),
+      fillText: (text: string) => drawn.push(text),
+      set font(_v: string) {}, set strokeStyle(_v: string) {}, set fillStyle(_v: string) {},
+      set lineWidth(_v: number) {}, set textAlign(_v: string) {}, set textBaseline(_v: string) {},
+      set lineJoin(_v: string) {},
+    };
+    drawSurfaceBoundaries(ctx as unknown as CanvasRenderingContext2D, layout);
+    expect(drawn).toEqual([]);
   });
 
   it("puts panels outside any sub-screen in their own Unassigned surface", () => {
