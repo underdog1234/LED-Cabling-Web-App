@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.56.0`
+Version `0.57.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -72,6 +72,39 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.57.0
+
+**The processor is now on the equipment list**
+
+Picking a Processor Model puts that processor on the stock list, 1 per project:
+
+| Processor Model | Code | Name |
+| --- | --- | --- |
+| NovaStar VX1000 Pro | `12247` | NovaStar VX1000 Pro LED Processor |
+| NovaStar VX2000 Pro | `12353` | NovaStar VX2000 Pro LED Processor Rack |
+
+- The row **follows the selection**, so changing model swaps the line rather
+  than leaving two processors on the sheet, and **None selected** (manual port
+  planning) leaves the processor off the list entirely
+- Quantity is **1** - deliberately not one per 13.1MP. The Processor Capacity
+  readout and the NovaStar validation already say when a wall is too big for
+  the model picked, and the answer to that is a bigger processor, not a second
+  unit appearing quietly on the pull sheet
+- Both are catalogue items, so they reach the on-screen table, the CSV, the PDF
+  stock table and the Rentman stock check like anything else - and either can
+  be added by hand from **Add an item** when the unit going out is not the one
+  the project was planned on
+- Shelf quantities are the MG9 catalogue's own `vx1000`/`vx2000` figures (2
+  each), read from there rather than retyped, so a stock check updates one
+  number
+
+**Also: every catalogue code is now tested.** No two items may sit on one code
+(a duplicate reads as a doubled requirement and breaks the Rentman comparison),
+every shelf quantity has to be a whole number, and the codes that read
+backwards on purpose - triangle `12399` above quarter-circle `12398`, the floor
+parts on `12250`/`12251`/`12252` - are pinned, so a future tidy-up cannot swap
+them back.
 
 ## Recent Changes In v0.56.0
 

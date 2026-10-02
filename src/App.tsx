@@ -84,7 +84,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.56.0";
+const APP_VERSION = "0.57.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -249,6 +249,13 @@ const DEPLOYMENT_TYPES = {
 
 export const STOCK_CATALOG = {
   prodCase: { code: "12317", name: "LED Prod Case", stock: 1 },
+  // The processor the project is built around. Which of the two gets pulled
+  // follows the Processor Model selection, one per project (see stockRows) -
+  // "None selected" means manual port planning and no processor row at all.
+  // Shelf quantities are the MG9 catalogue's own vx1000/vx2000 figures, read
+  // from there rather than retyped so there is one number to keep current.
+  vx1000Pro: { code: "12247", name: "NovaStar VX1000 Pro LED Processor", stock: PANEL_TYPES.MG9.stock.vx1000 },
+  vx2000Pro: { code: "12353", name: "NovaStar VX2000 Pro LED Processor Rack", stock: PANEL_TYPES.MG9.stock.vx2000 },
   signalJoiner: { code: "12280", name: "SEETRONIC SE8FF-05 F/M - F/M Joiner", stock: 10 },
   signalJoinerCable: { code: "12312", name: "SEETRONIC F/M - F/M Cable", stock: 11 },
   modularFrameScrew: { code: "12253", name: "YES TECH Modular Frame Installation Screw", stock: 384 },
@@ -1212,7 +1219,7 @@ const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
 // list by hand alone - the name and shelf quantity are read here each time the
 // list is built, so they follow the catalogue rather than a stale copy saved
 // into the project file.
-const stockCatalogLookup = (code: string): { name: string; stock: number } | null =>
+export const stockCatalogLookup = (code: string): { name: string; stock: number } | null =>
   Object.values(STOCK_CATALOG).find((item) => item.code === code) ?? null;
 
 /**
@@ -3457,6 +3464,16 @@ export default function App() {
 
     rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
 
+    // The selected processor, 1 per project. The capacity readout and the
+    // NovaStar validation already say when a wall is too big for the model
+    // picked, so this is deliberately not "one per 13.1MP" - it is the unit
+    // the project is actually built on. No processor selected (manual port
+    // planning) means no processor row.
+    if (processorModel) {
+      const processorItem = processorModel === "VX2000_PRO" ? STOCK_CATALOG.vx2000Pro : STOCK_CATALOG.vx1000Pro;
+      rowsOut.push(makeStockRow(processorItem, 1, `1 per project (${PROCESSOR_SPECS[processorModel].label} selected)`));
+    }
+
     if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
       if (topRowBars.mg9 > 0) {
         rowsOut.push({
@@ -3596,7 +3613,7 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, connectorNeeds, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, connectorNeeds, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars, processorModel]);
 
   // The on-screen table, PDF table and CSV export all list order/pull
   // quantities, not raw internal line items - a row whose real order
