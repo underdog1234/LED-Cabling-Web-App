@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.60.0`
+Version `0.61.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -72,6 +72,24 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.61.0
+
+**Spare mesh modules on an MT wall**
+
+| Code | Name | Quantity |
+| --- | --- | --- |
+| `12626` | YES TECH MT P3.9-7.8 LED Mesh Module | 3% of the MT panels, rounded up |
+
+- Any MT panel on the layout puts the module on the list. It is **pure spare**:
+  the row reads **Required 0**, with the 3% in the Spares column, because the
+  modules go out fitted inside the panels - what travels separately is a
+  handful to swap a dead one out on site
+- Rounded **up**, so there is always at least one wherever there is any MT at
+  all. A 192-panel wall takes **6**; 34 panels takes 2; 33 takes 1
+- This is why MT panels themselves carry a **0% spare ratio** - nobody takes a
+  spare mesh panel, they take the module that fails
+- An MG9 or poster wall never sees the row
 
 ## Recent Changes In v0.60.0
 

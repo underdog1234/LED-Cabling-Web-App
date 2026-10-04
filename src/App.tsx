@@ -84,7 +84,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.60.0";
+const APP_VERSION = "0.61.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -318,6 +318,11 @@ export const STOCK_CATALOG = {
   patchSignalCable: { code: "12272", name: "YES TECH Patch F/M - F/M Signal Cable", stock: 14 },
   mtCornerBracket: { code: "12274", name: "YES TECH MT Corner Connecting Bracket", stock: 100 },
   mtCornerBracketBolt: { code: "12275", name: "YES TECH MT Corner Connecting Bracket Bolt", stock: 400 },
+  // The replaceable LED module inside an MT mesh panel. Never ordered as a
+  // build quantity - the modules arrive fitted in the panels - so its row is
+  // pure spare: a few to swap out on site when one fails. Shelf quantity
+  // confirmed against Rentman.
+  mtMeshModule: { code: "12626", name: "YES TECH MT P3.9-7.8 LED Mesh Module", stock: 20 },
   tempFencingWeight: { code: "12357", name: "Temporary Fencing Weight", stock: 51 },
   // Stocked and ordered as COMPLETE posters, never as the eight sections the
   // grid holds - so this row's quantity is poster count, not section count.
@@ -326,6 +331,17 @@ export const STOCK_CATALOG = {
 
 // Ballast per metre of wall width for a ground-supported wall's fencing.
 const TEMP_FENCING_WEIGHTS_PER_METRE = 3;
+
+/**
+ * Spare MT mesh modules, as a fraction of the MT panels on the wall.
+ *
+ * MT panels themselves carry a 0% spare ratio (see PANEL_TYPES.MT.defaults) -
+ * nobody takes a spare mesh panel - because the part that gets swapped when
+ * something fails is the MODULE inside one. This is that spare, and the only
+ * reason the module ever appears on a stock list; it is never a build
+ * quantity, since the modules go out fitted in the panels.
+ */
+const MT_MESH_MODULE_SPARE_RATIO = 0.03;
 
 /**
  * Which variants each panel type can be set to.
@@ -3587,6 +3603,23 @@ export default function App() {
         mt.spare,
         mt.spareRounded,
         mt.total,
+      );
+    }
+
+    // Spare mesh modules for an MT wall. Required is deliberately 0: the
+    // modules are already in the panels counted above, and what goes on the
+    // truck is a handful of spares to swap a dead one out on site. Always at
+    // least 1 wherever there is any MT at all - ceil(3%) of even a single
+    // panel is one module, which is the point of carrying them.
+    if (mtCount > 0) {
+      const meshSpare = Math.ceil(mtCount * MT_MESH_MODULE_SPARE_RATIO);
+      rowsOut.push(
+        makeStockRow(
+          STOCK_CATALOG.mtMeshModule,
+          0,
+          `spares only - ${Math.round(MT_MESH_MODULE_SPARE_RATIO * 100)}% of ${mtCount} MT panel${mtCount === 1 ? "" : "s"}, rounded up`,
+          meshSpare,
+        ),
       );
     }
 

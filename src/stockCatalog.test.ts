@@ -59,6 +59,17 @@ describe("STOCK_CATALOG", () => {
     });
   });
 
+  it("carries the MT mesh module, the part that actually gets swapped", () => {
+    // Checked live against Rentman: code 12626, current_quantity 20. It only
+    // ever appears as a spare - see MT_MESH_MODULE_SPARE_RATIO - because the
+    // modules go out fitted in the panels.
+    expect(STOCK_CATALOG.mtMeshModule).toEqual({
+      code: "12626",
+      name: "YES TECH MT P3.9-7.8 LED Mesh Module",
+      stock: 20,
+    });
+  });
+
   it("reads each processor's shelf quantity from the MG9 catalogue", () => {
     // One number to keep current: the figures live in PANEL_TYPES.MG9.stock,
     // which is where a stock check updates them.
