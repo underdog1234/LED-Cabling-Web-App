@@ -110,7 +110,7 @@ export default function ExportDialog({ config, selectedIds, currentTime, onClose
             ))}
           </div>
           {format !== "png" && items.some((i) => i.beeps.length) ? (
-            <div className="text-xs text-emerald-300">The sync beeps go in the file as its soundtrack. MP4 places them on the exact flash frames; WebM records them live, so pick MP4 for measuring lip sync.</div>
+            <div className="text-xs text-emerald-300">The sync beeps go in the file as its soundtrack. Each beep lands on its flash frame.</div>
           ) : null}
           {format === "png" ? (
             <div className="flex flex-wrap items-end gap-3">
@@ -137,7 +137,7 @@ export default function ExportDialog({ config, selectedIds, currentTime, onClose
                 ) : null}
               </div>
               <div className="text-xs text-slate-400">
-                Exactly one loop ({config.loopSeconds}s) per file, recorded in real time{items.length > 1 ? `, one file after another (${items.length} files, about ${Math.ceil((items.length * config.loopSeconds) / 60)} min)` : ""}.
+                Exactly one loop ({config.loopSeconds}s) per file, drawn frame by frame so no frame is missed even on a busy computer{items.length > 1 ? `, one file after another (${items.length} files)` : ""}. Browsers that can&apos;t encode that way record in real time instead - keep this tab in front while they do.
               </div>
               {format === "mp4" ? (
                 <div className="text-xs text-slate-400">

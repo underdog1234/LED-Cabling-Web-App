@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.66.0`
+Version `0.67.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -74,6 +74,24 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.67.0
+
+**Test Pattern Generator: output controls on the main page, full-length videos**
+
+- Video downloads are drawn and encoded frame by frame (WebCodecs) instead of
+  recorded against the clock, so every file is exactly one loop with every
+  frame in it, whatever else the computer is doing - and the sync beeps sit
+  on their flash frames in WebM as well as MP4. Browsers without WebCodecs (or
+  odd pixel sizes) still record in real time
+- The playback bar has separate **Play** and **Pause** buttons, and an
+  **Output** row: Fullscreen, Bouncing logo, Fit to display, Status box,
+  Beeps here / Beeps in output window and a labelled **Beep delay (ms)**. The
+  output window follows these, and its own keys (H, L, S) change them here too
+- An output window that isn't fullscreen shows a click-to-go-fullscreen
+  banner, and the editor says so too
+- The bouncing logo now bounces inside each sub-screen, not across the whole
+  canvas
 
 ## Recent Changes In v0.66.0
 

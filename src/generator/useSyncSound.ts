@@ -20,10 +20,20 @@ const readPrefs = (key: string, defaultOn: boolean): Prefs => {
   }
 };
 
-export function useSyncSound(source: () => SoundFrame | null, key: string, defaultOn: boolean) {
+/**
+ * `controlled`, when given, overrides the remembered on/off and offset - the
+ * separate output window takes both from the editor.
+ */
+export function useSyncSound(
+  source: () => SoundFrame | null,
+  key: string,
+  defaultOn: boolean,
+  controlled?: { enabled: boolean; offsetMs: number; onEnabled: (v: boolean) => void },
+) {
   const sound = useRef<SyncSound | null>(null);
   if (!sound.current) sound.current = new SyncSound();
-  const [prefs, setPrefs] = useState<Prefs>(() => readPrefs(key, defaultOn));
+  const [ownPrefs, setPrefs] = useState<Prefs>(() => readPrefs(key, defaultOn));
+  const prefs = controlled ? { enabled: controlled.enabled, offsetMs: controlled.offsetMs } : ownPrefs;
   const [blocked, setBlocked] = useState(false);
   const [active, setActive] = useState(false);
   const sourceRef = useRef(source);
@@ -33,12 +43,16 @@ export function useSyncSound(source: () => SoundFrame | null, key: string, defau
     sound.current!.enabled = prefs.enabled;
     sound.current!.offsetMs = prefs.offsetMs;
     sound.current!.reset();
+  }, [prefs.enabled, prefs.offsetMs]);
+
+  useEffect(() => {
+    if (controlled) return;
     try {
-      localStorage.setItem(key, JSON.stringify(prefs));
+      localStorage.setItem(key, JSON.stringify(ownPrefs));
     } catch {
       // Not remembered next time; nothing else depends on it.
     }
-  }, [prefs, key]);
+  }, [ownPrefs, key, controlled]);
 
   // Browsers only allow sound after the person has clicked or pressed a key.
   useEffect(() => {
@@ -80,7 +94,8 @@ export function useSyncSound(source: () => SoundFrame | null, key: string, defau
     blocked,
     setEnabled: (enabled: boolean) => {
       if (enabled) sound.current!.unlock();
-      setPrefs((p) => ({ ...p, enabled }));
+      if (controlled) controlled.onEnabled(enabled);
+      else setPrefs((p) => ({ ...p, enabled }));
     },
     setOffsetMs: (offsetMs: number) => setPrefs((p) => ({ ...p, offsetMs })),
   };

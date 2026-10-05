@@ -84,7 +84,30 @@ export const defaultPlayback = (): Playback => ({ playing: true, anchor: Date.no
 
 export const playbackTime = (p: Playback, now = Date.now()): number => (p.playing ? p.anchorTime + (now - p.anchor) / 1000 : p.anchorTime);
 
-export type OutputState = { config: GeneratorConfig; playback: Playback };
+/**
+ * How the output shows itself - live only, never part of a download. Set from
+ * the editor's playback bar; an output window's own keys ask the editor to
+ * change it, so both always agree.
+ */
+export type OutputDisplay = {
+  /** Bouncing logo inside every sub-screen. */
+  logo: boolean;
+  /** Scale the output to the display instead of 1:1. */
+  fit: boolean;
+  /** The resolution / 1:1 status box. */
+  status: boolean;
+  /** Beeps from the separate output window. */
+  beeps: boolean;
+  /** Milliseconds the beeps are moved by, everywhere. */
+  beepOffsetMs: number;
+};
+
+export const defaultDisplay = (): OutputDisplay => ({ logo: false, fit: false, status: true, beeps: false, beepOffsetMs: 0 });
+
+export type OutputState = { config: GeneratorConfig; playback: Playback; display: OutputDisplay };
+
+/** What an output window sends back: a change to the display settings. */
+export type OutputRequest = { type: "display"; patch: Partial<OutputDisplay> } | { type: "status"; fullscreen: boolean; oneToOne: boolean };
 
 export const publishOutputState = (state: OutputState, channel: BroadcastChannel | null) => {
   write(OUTPUT_KEY, state);
@@ -96,9 +119,9 @@ export const publishOutputState = (state: OutputState, channel: BroadcastChannel
 };
 
 export const readOutputState = (): OutputState | null => {
-  const raw = read(OUTPUT_KEY) as { config?: unknown; playback?: Playback } | null;
+  const raw = read(OUTPUT_KEY) as { config?: unknown; playback?: Playback; display?: Partial<OutputDisplay> } | null;
   if (!raw || !raw.config) return null;
-  return { config: normalizeConfig(raw.config), playback: raw.playback ?? defaultPlayback() };
+  return { config: normalizeConfig(raw.config), playback: raw.playback ?? defaultPlayback(), display: { ...defaultDisplay(), ...(raw.display ?? {}) } };
 };
 
 export const openChannel = (): BroadcastChannel | null => {

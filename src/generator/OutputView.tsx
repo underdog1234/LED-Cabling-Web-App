@@ -7,7 +7,8 @@
 import { useEffect, useRef, useState } from "react";
 import { computePixelMappingStatus, watchDevicePixelRatio } from "../testPattern/pixelMapping";
 import mmsLogoUrl from "../testPattern/assets/mms-logo.png";
-import { effectiveConfig, openChannel, playbackTime, readOutputState, type OutputState } from "./storage";
+import { defaultDisplay, effectiveConfig, openChannel, playbackTime, readOutputState, type OutputDisplay, type OutputRequest, type OutputState } from "./storage";
+import type { GeneratorConfig, Rect } from "./model";
 import { renderComposite, renderScreen, loadLedModule } from "./render";
 import { useSyncSound } from "./useSyncSound";
 
@@ -17,6 +18,8 @@ type Props = {
   /** null = the whole canvas. */
   screenId: string | null;
   onClose?: () => void;
+  /** Inline only: change the display settings (the separate window asks over the channel instead). */
+  onDisplay?: (patch: Partial<OutputDisplay>) => void;
 };
 
 const bounce = (t: number, speed: number, range: number) => {
@@ -26,19 +29,63 @@ const bounce = (t: number, speed: number, range: number) => {
   return x <= range ? x : period - x;
 };
 
-export default function OutputView({ stateRef, screenId, onClose }: Props) {
+// Wall-clock based, so the logo keeps moving while the pattern is paused.
+const drawLogo = (ctx: CanvasRenderingContext2D, img: HTMLImageElement, area: Rect, t: number, seed: number) => {
+  const lw = Math.max(16, Math.round(Math.min(area.w, area.h) * 0.18));
+  const lh = lw * (img.naturalHeight / img.naturalWidth);
+  if (lw > area.w || lh > area.h) return;
+  // Each screen gets its own start point and pace, so they don't move in lockstep.
+  const rx = area.w - lw;
+  const ry = area.h - lh;
+  const x = bounce(t + seed * 3.7, Math.max(20, rx / 9), rx);
+  const y = bounce(t + seed * 2.3, Math.max(20, ry / 7), ry);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(area.x, area.y, area.w, area.h);
+  ctx.clip();
+  ctx.drawImage(img, area.x + x, area.y + y, lw, lh);
+  ctx.restore();
+};
+
+/** Where the logo bounces: inside every visible sub-screen on the canvas, or the one screen being shown. */
+const logoAreas = (config: GeneratorConfig, screenId: string | null): Array<{ rect: Rect; seed: number }> => {
+  if (screenId) {
+    const s = config.screens.find((x) => x.id === screenId);
+    return s ? [{ rect: { x: 0, y: 0, w: s.w, h: s.h }, seed: 0 }] : [];
+  }
+  const { w, h } = config.canvas;
+  return config.screens.flatMap((s, i) => {
+    if (!s.visible) return [];
+    const x0 = Math.max(0, s.x);
+    const y0 = Math.max(0, s.y);
+    const x1 = Math.min(w, s.x + s.w);
+    const y1 = Math.min(h, s.y + s.h);
+    return x1 > x0 && y1 > y0 ? [{ rect: { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, seed: i }] : [];
+  });
+};
+
+export default function OutputView({ stateRef, screenId, onClose, onDisplay }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ownState = useRef<OutputState | null>(stateRef ? null : readOutputState());
   const [, setVersion] = useState(0);
   const [dpr, setDpr] = useState(() => window.devicePixelRatio || 1);
   const [isFullscreen, setIsFullscreen] = useState(() => document.fullscreenElement != null);
-  const [statusVisible, setStatusVisible] = useState(true);
-  const [fit, setFit] = useState(false);
-  const [logo, setLogo] = useState(false);
   const [box, setBox] = useState({ w: 0, h: 0 });
   const logoRef = useRef<HTMLImageElement | null>(null);
 
   const current = () => (stateRef ? stateRef.current : ownState.current);
+  const channelRef = useRef<BroadcastChannel | null>(null);
+  const display: OutputDisplay = current()?.display ?? defaultDisplay();
+  const { fit, logo, status: statusVisible } = display;
+  /** Display changes always go through the editor, so its buttons stay in step. */
+  const changeDisplay = (patch: Partial<OutputDisplay>) => {
+    if (onDisplay) onDisplay(patch);
+    else channelRef.current?.postMessage({ type: "display", patch } satisfies OutputRequest);
+  };
+  const changeRef = useRef(changeDisplay);
+  changeRef.current = changeDisplay;
+  const displayRef = useRef(display);
+  displayRef.current = display;
 
   // Inline output shares the editor's sound setting; a separate window has
   // its own, off to begin with so the two windows don't both beep.
@@ -51,23 +98,37 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
       const screens = screenId ? config.screens.filter((x) => x.id === screenId) : config.screens;
       return { config, screens, time: playbackTime(s.playback, now), playing: s.playback.playing };
     },
-    stateRef ? "testPatternGenerator:sound:editor" : "testPatternGenerator:sound:output",
-    !!stateRef,
+    "testPatternGenerator:sound:editor",
+    true,
+    // The separate window beeps when the editor's "Beeps in output window" is on.
+    stateRef ? undefined : { enabled: display.beeps, offsetMs: display.beepOffsetMs, onEnabled: (v) => changeDisplay({ beeps: v }) },
   );
   const soundRef = useRef(sound);
   soundRef.current = sound;
 
-  // Separate window: follow the editor.
+  // Separate window: follow the editor, and tell it whether this window is
+  // fullscreen and 1:1 (the editor shows a warning when it isn't).
   useEffect(() => {
     if (stateRef) return;
     const channel = openChannel();
     if (!channel) return;
+    channelRef.current = channel;
     channel.onmessage = (e) => {
-      ownState.current = e.data as OutputState;
+      const data = e.data as OutputState | OutputRequest;
+      if ("type" in data) return;
+      ownState.current = { ...data, display: { ...defaultDisplay(), ...(data.display ?? {}) } };
       setVersion((v) => v + 1);
     };
-    return () => channel.close();
+    const id = window.setInterval(() => {
+      channel.postMessage({ type: "status", fullscreen: document.fullscreenElement != null, oneToOne: oneToOneRef.current } satisfies OutputRequest);
+    }, 1000);
+    return () => {
+      window.clearInterval(id);
+      channelRef.current = null;
+      channel.close();
+    };
   }, [stateRef]);
+  const oneToOneRef = useRef(true);
 
   useEffect(() => {
     const img = new Image();
@@ -113,17 +174,15 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
         renderComposite(ctx, config, time, cache);
       }
       const img = logoRef.current;
-      if (logo && img?.complete && img.naturalWidth) {
-        const lw = Math.max(16, Math.round(Math.min(outW, outH) * 0.12));
-        const lh = lw * (img.naturalHeight / img.naturalWidth);
-        const t = now / 1000;
-        ctx.drawImage(img, bounce(t, (outW - lw) / 18, outW - lw), bounce(t, (outH - lh) / 14, outH - lh), lw, lh);
+      if (displayRef.current.logo && img?.complete && img.naturalWidth) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        logoAreas(config, screenId).forEach(({ rect, seed }) => drawLogo(ctx, img, rect, now / 1000, seed));
       }
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outW, outH, screenId, logo]);
+  }, [outW, outH, screenId]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -181,9 +240,10 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
-      if (k === "h") setStatusVisible((v) => !v);
+      if (k === "h") changeRef.current({ status: !displayRef.current.status });
       if (k === "f") document.documentElement.requestFullscreen?.().catch(() => {});
-      if (k === "l") setLogo((v) => !v);
+      if (k === "l") changeRef.current({ logo: !displayRef.current.logo });
+      if (k === " ") e.preventDefault();
       if (k === "s") soundRef.current.setEnabled(!soundRef.current.enabled);
       if (e.key === "Escape" && onClose) {
         if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
@@ -209,12 +269,16 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
   const displayW = Math.round((window.screen?.width ?? 0) * dpr);
   const displayH = Math.round((window.screen?.height ?? 0) * dpr);
   const scaled = mapping === "scaled";
+  oneToOneRef.current = !scaled && !fit;
+  const enterFullscreen = () => document.documentElement.requestFullscreen?.().catch(() => {});
 
   return (
     <div
       className="fixed inset-0 z-50 overflow-auto bg-black"
       style={{ background: fit ? "#000" : state.config.canvas.background }}
-      onClick={() => setStatusVisible(true)}
+      onClick={() => {
+        if (!statusVisible) changeDisplay({ status: true });
+      }}
     >
       <canvas ref={canvasRef} className="absolute left-0 top-0 block" />
       {statusVisible ? (
@@ -222,7 +286,7 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
           className="fixed left-3 top-3 z-10 max-w-xs cursor-pointer space-y-2 font-mono text-xs"
           onClick={(e) => {
             e.stopPropagation();
-            setStatusVisible(false);
+            changeDisplay({ status: false });
           }}
         >
           {scaled ? (
@@ -239,10 +303,10 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
             {sound.enabled && sound.blocked && sound.active ? <Row label="Sound:" value="Click to allow" warn /> : null}
             <Row label="Browser -> Output:" value={fit ? "Scaled (fit)" : scaled ? "Scaled" : "1:1"} warn={scaled && !fit} />
             <div className="flex flex-wrap gap-1 pt-1 font-sans">
-              <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); setFit((v) => !v); }}>
+              <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); changeDisplay({ fit: !fit }); }}>
                 {fit ? "Native 1:1" : "Fit to output"}
               </button>
-              <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); setLogo((v) => !v); }}>
+              <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); changeDisplay({ logo: !logo }); }}>
                 {logo ? "Hide logo" : "Bouncing logo"}
               </button>
               <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); sound.setEnabled(!sound.enabled); }}>
@@ -261,13 +325,13 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
       {!isFullscreen ? (
         <button
           type="button"
-          className="fixed bottom-4 right-4 z-10 rounded-lg border border-white/30 bg-black/60 px-4 py-2 text-sm font-bold tracking-widest text-white hover:bg-black/80"
+          className="fixed left-1/2 top-3 z-20 -translate-x-1/2 rounded-lg border-2 border-amber-400 bg-amber-500/90 px-5 py-2 text-sm font-bold text-black shadow-lg hover:bg-amber-400"
           onClick={(e) => {
             e.stopPropagation();
-            document.documentElement.requestFullscreen?.().catch(() => {});
+            enterFullscreen();
           }}
         >
-          ENTER FULLSCREEN
+          ⚠ NOT FULLSCREEN - click here to go fullscreen
         </button>
       ) : null}
     </div>

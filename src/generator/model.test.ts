@@ -293,3 +293,19 @@ describe("sync tones", () => {
     expect(screenBeeps(makeScreen(0, { pattern: "smpte" }), 10)).toEqual([]);
   });
 });
+
+describe("webm writer", () => {
+  it("writes a WebM whose header carries the exact length and one cluster per keyframe", async () => {
+    const { muxWebm } = await import("./webmMux");
+    const packets = Array.from({ length: 50 }, (_, i) => ({ track: 1 as const, timestampUs: Math.round((i * 1e6) / 25), key: i % 25 === 0, data: new Uint8Array([i]) }));
+    const file = muxWebm(packets, { width: 64, height: 32, fps: 25, durationSeconds: 2, videoCodec: "V_VP9" });
+    expect([...file.slice(0, 4)]).toEqual([0x1a, 0x45, 0xdf, 0xa3]);
+    const hex = Buffer.from(file).toString("hex");
+    // Duration (0x4489) as a float64 of 2000 ms.
+    const dur = Buffer.alloc(8);
+    dur.writeDoubleBE(2000);
+    expect(hex).toContain("4489" + "0100000000000008" + dur.toString("hex"));
+    expect(hex.split("1f43b675").length - 1).toBe(2);
+    expect(hex).toContain("1c53bb6b");
+  });
+});
