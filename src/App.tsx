@@ -85,7 +85,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.63.0";
+const APP_VERSION = "0.64.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -7572,6 +7572,9 @@ const exportJson = () => {
               </Button>
               <Button intent="secondary" onClick={openQuickPanelLayoutTab} title="Open a standalone panel-count calculator in a new tab">
                 <LayoutGrid className="h-4 w-4" />Quick Panel Layout
+              </Button>
+              <Button intent="secondary" onClick={() => window.open(`${location.pathname.replace(/[^/]*$/, "")}generator.html`, "_blank")} title="Open the standalone Test Pattern Generator - any canvas size, multiple sub-screens, no LED panels needed. Import this project's saved file there to bring the Output Canvas across.">
+                <Video className="h-4 w-4" />Test Pattern Generator
               </Button>
               <Button intent="ghost" onClick={() => setShowHelp(true)}>
                 <HelpCircle className="h-4 w-4" />Help

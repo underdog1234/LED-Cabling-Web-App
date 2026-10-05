@@ -1,10 +1,12 @@
 # LED Cabling Web App
 
-Version `0.63.0`
+Version `0.64.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
 ## What It Does
+
+- **Test Pattern Generator** (`generator.html`, also opened from the planner's toolbar) - a standalone page for any video output, projector, monitor or LED screen. See [Test Pattern Generator](#test-pattern-generator) below
 
 - Build LED walls by rows and columns, or place panels freely (non-uniform layouts) with drag, edge-snap and joining
 - Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
@@ -72,6 +74,14 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.64.0
+
+**A standalone Test Pattern Generator**
+
+The planner's Output Canvas and Moving Test Pattern, opened up into their own
+page at `generator.html` for any output - no LED panels needed. See
+[Test Pattern Generator](#test-pattern-generator).
 
 ## Recent Changes In v0.63.0
 
@@ -1214,6 +1224,77 @@ To publish:
 5. Wait for the `Deploy GitHub Pages` workflow to finish.
 
 The site uses a relative Vite base path so it works on repository Pages URLs.
+
+## Test Pattern Generator
+
+Live at `https://underdog1234.github.io/LED-Cabling-Web-App/generator.html`
+(the **Test Pattern Generator** button in the planner opens it). It needs no
+project and no panels: start from a resolution.
+
+**Canvas and sub-screens**
+
+- One main canvas of any whole-pixel size (presets for 1280 x 720, 1920 x 1080,
+  1920 x 1200, 2560 x 1440, 3840 x 2160, 4096 x 2160, their portrait versions and
+  the planner's wide canvases, or anything you type, with an optional aspect
+  lock and your own named presets). Unused canvas is black, or any colour
+- Any number of **sub-screens**, each with its own name, colour, resolution,
+  X/Y, test pattern, pattern settings, overlays and animation offset - so
+  different patterns run side by side. Add, duplicate, delete, rename, hide and
+  lock them; overlap them and set the layer order
+- Drag to move, drag the handles to resize (Shift keeps the ratio), or type
+  exact numbers. Arrow keys nudge the selection (Shift for the bigger step;
+  both steps are settable). Every position and size is a whole pixel
+- Snap to canvas edges, canvas centre, other screens and an optional grid, with
+  guides shown while you drag (hold Alt to place freely)
+- Select several screens (Ctrl/Cmd-click, Shift-click, or drag a box) and
+  align left / centre / right / top / middle / bottom to the canvas, the
+  selection or a reference screen; match a reference's size; distribute evenly
+  (gaps differ by at most one pixel when the space doesn't divide); space them
+  with a fixed gap; or arrange in a row, a column or a grid with pixel gaps
+- The planner's Output Canvas warnings: off-canvas, negative positions,
+  overlaps, and a layout bigger than the canvas
+- Optional LED maths: a calculator for resolution from panel rows, columns and
+  panel pixel size, and a per-screen panel grid that drives the LED Moving
+  Pattern. NovaStar processor input assignment (whole canvas or per screen) is
+  kept too
+- **Import LED Planner project** opens a saved planner file: its Output Canvas
+  resolution, each sub-screen at its canvas position and footprint resolution,
+  running the planner's own Moving Test Pattern, with its processor inputs
+
+**Patterns**: Screen ID & Resolution, SMPTE and EBU bars, colour checker
+patches, grid / crosshatch, circles with safe areas and aspect frames,
+checkerboard, greyscale steps, gradient ramps, solid fields, colour field
+cycle, moving bar, timecode with sync flash, pixel structure, zone plate,
+fictional faces (illustrations from a seed, across twelve skin tones, each
+labelled fictional), the LED Moving Pattern, and the planner's own layout
+pattern for imported screens. Animated patterns all loop exactly on the
+canvas's loop length.
+
+**Output and playback**
+
+- Play / pause / restart, a playlist of steps (each step remembers every
+  screen's pattern and settings, for a set number of seconds, looping or not)
+- **Output window** opens the whole canvas or one screen, at native
+  resolution, on the display you choose (same display picker as the planner);
+  it follows the editor live. **Fullscreen** shows it full screen in place.
+  Both report whether the output is really 1:1, with Fit to output and the
+  live-only bouncing logo
+
+**Downloads** - choose before exporting:
+
+- **Entire canvas** at its exact resolution with every visible screen
+- **One sub-screen** at its own resolution - rendered on its own, so a
+  neighbour that overlaps it never appears in the file
+- **Selected sub-screens** as separate files in one ZIP
+
+as a PNG still (at a chosen point in the loop), a WebM loop, or an MP4 loop
+written with the planner's delivery settings. Files are named
+`<screen>_<pattern>_<width>x<height>.<ext>`.
+
+**Saving**: the working setup is autosaved in the browser; named
+configurations can be saved and reloaded there, and any setup saved to or
+opened from a `.testpattern.json` file - every screen's position, resolution,
+pattern, settings, overlays and layer order, the playlist and your presets.
 
 ## Pixel-Accurate Test Pattern
 
