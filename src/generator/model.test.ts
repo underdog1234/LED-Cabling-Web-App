@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   RESOLUTION_PRESETS,
   alignRects,
+  applyAutoCycle,
   applyPlaylistStep,
+  autoCyclePatternAt,
   arrangeRects,
   defaultConfig,
   distributeRects,
@@ -10,6 +12,7 @@ import {
   exportFileName,
   layoutWarnings,
   makeScreen,
+  motionOffset,
   normalizeConfig,
   playlistStepAt,
   reorderLayers,
@@ -20,6 +23,7 @@ import {
   uniqueNames,
   type Rect,
 } from "./model";
+import { photoFaceGrid, pickFaces } from "./photoFaces";
 
 const isInt = (n: number) => Number.isInteger(n);
 
@@ -206,5 +210,86 @@ describe("playlists", () => {
     expect(applied.screens[0].pattern).toBe("solid");
     expect(applied.screens[0].settings.solid.color).toBe("#ff0000");
     expect(applied.screens[1]).toBe(c.screens[1]);
+  });
+});
+
+describe("motion", () => {
+  it("scrolls a whole number of pixels and comes back to the start at the end of the loop", () => {
+    const m = { direction: "left" as const, passes: 2 };
+    expect(motionOffset(m, 0, 1920, 1080)).toEqual({ dx: 0, dy: 0 });
+    expect(motionOffset(m, 1, 1920, 1080)).toEqual({ dx: 0, dy: 0 });
+    expect(motionOffset(m, 0.125, 1920, 1080)).toEqual({ dx: 1440, dy: 0 });
+    expect(motionOffset({ direction: "right", passes: 1 }, 0.25, 1920, 1080)).toEqual({ dx: 480, dy: 0 });
+    expect(motionOffset({ direction: "down", passes: 1 }, 0.5, 1920, 1081)).toEqual({ dx: 0, dy: 541 });
+    const d = motionOffset({ direction: "diagonal", passes: 3 }, 0.37, 1001, 777);
+    expect(isInt(d.dx) && isInt(d.dy)).toBe(true);
+    expect(d.dx).toBeLessThan(1001);
+    expect(motionOffset({ direction: "none", passes: 1 }, 0.5, 100, 100)).toEqual({ dx: 0, dy: 0 });
+  });
+});
+
+describe("auto cycle", () => {
+  it("steps through every pattern, optionally staggered per screen", () => {
+    const ids = ["a", "b", "c"];
+    expect(autoCyclePatternAt(ids, 0, 5)).toBe("a");
+    expect(autoCyclePatternAt(ids, 5, 5)).toBe("b");
+    expect(autoCyclePatternAt(ids, 16, 5)).toBe("a");
+    expect(autoCyclePatternAt(ids, 0, 5, 2)).toBe("c");
+    const c = defaultConfig();
+    expect(applyAutoCycle(c, ids, 7)).toBe(c);
+    c.autoCycle = { enabled: true, seconds: 5, stagger: true };
+    expect(applyAutoCycle(c, ids, 7).screens.map((s) => s.pattern)).toEqual(["b", "c", "a", "b"]);
+  });
+  it("is kept when a configuration is saved and reopened", () => {
+    const c = defaultConfig();
+    c.autoCycle = { enabled: true, seconds: 12, stagger: true };
+    c.screens[0].motion = { direction: "up", passes: 4 };
+    c.screens[0].overlays.clock = true;
+    const back = normalizeConfig(JSON.parse(JSON.stringify(c)));
+    expect(back.autoCycle).toEqual(c.autoCycle);
+    expect(back.screens[0].motion).toEqual({ direction: "up", passes: 4 });
+    expect(back.screens[0].overlays.clock).toBe(true);
+    expect(normalizeConfig({ screens: [{ motion: { direction: "sideways" } }] }).screens[0].motion).toEqual({ direction: "none", passes: 1 });
+  });
+});
+
+describe("photo faces", () => {
+  it("fills the screen with square cells and never stretches a face", () => {
+    const g = photoFaceGrid(1920, 1080, 3);
+    expect(g).toEqual({ cell: 360, cols: 5, rows: 3, x0: 60, y0: 0 });
+    const p = photoFaceGrid(1080, 1920, 3);
+    expect(p.cell).toBe(640);
+    expect(p.cols).toBe(1);
+    const narrow = photoFaceGrid(100, 1000, 2);
+    expect(narrow.cell).toBe(100);
+    expect(narrow.cols * narrow.cell).toBeLessThanOrEqual(100);
+    expect(narrow.rows * narrow.cell).toBeLessThanOrEqual(1000);
+  });
+  it("uses every face once before repeating, in a fixed order per variation", () => {
+    const a = pickFaces(30, 4);
+    expect(new Set(a.slice(0, 24)).size).toBe(24);
+    expect(a).toEqual(pickFaces(30, 4));
+    expect(pickFaces(30, 5)).not.toEqual(a);
+    for (let i = 1; i < a.length; i += 1) expect(a[i]).not.toBe(a[i - 1]);
+  });
+});
+
+describe("sync tones", () => {
+  it("beeps with every AV sync flash, and lands each beep on its exact sample", async () => {
+    const { screenBeeps, beepsBetween, renderBeepsWav } = await import("./audio");
+    const screen = makeScreen(0, { pattern: "av-sync", settings: { "av-sync": { fps: "25", interval: 2, flashFrames: 2, beepFreq: 110 } } });
+    const beeps = screenBeeps(screen, 10);
+    expect(beeps.map((b) => b.at)).toEqual([0, 2, 4, 6, 8]);
+    expect(beeps[0].duration).toBeCloseTo(0.08);
+    // A screen's animation offset moves its beeps with its flashes.
+    expect(screenBeeps({ ...screen, phase: 0.5 }, 10).map((b) => b.at)).toEqual([1.5, 3.5, 5.5, 7.5, 9.5]);
+    expect(beepsBetween(beeps, 10, 9, 13).map((b) => b.time)).toEqual([10, 12]);
+    const wav = renderBeepsWav(beeps, 10, 3, 1000);
+    const samples = new Int16Array(wav.buffer.slice(44));
+    expect(samples.length).toBe(3000);
+    expect(samples.slice(0, 80).some((v) => v !== 0)).toBe(true);
+    expect(samples.slice(80, 2000).every((v) => v === 0)).toBe(true);
+    expect(samples.slice(2000, 2080).some((v) => v !== 0)).toBe(true);
+    expect(screenBeeps(makeScreen(0, { pattern: "smpte" }), 10)).toEqual([]);
   });
 });

@@ -9,6 +9,7 @@ import { computePixelMappingStatus, watchDevicePixelRatio } from "../testPattern
 import mmsLogoUrl from "../testPattern/assets/mms-logo.png";
 import { effectiveConfig, openChannel, playbackTime, readOutputState, type OutputState } from "./storage";
 import { renderComposite, renderScreen, loadLedModule } from "./render";
+import { useSyncSound } from "./useSyncSound";
 
 type Props = {
   /** Inline (fullscreen inside the editor): the editor's live state. Omit in the separate window. */
@@ -38,6 +39,23 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
   const logoRef = useRef<HTMLImageElement | null>(null);
 
   const current = () => (stateRef ? stateRef.current : ownState.current);
+
+  // Inline output shares the editor's sound setting; a separate window has
+  // its own, off to begin with so the two windows don't both beep.
+  const sound = useSyncSound(
+    () => {
+      const s = current();
+      if (!s) return null;
+      const now = Date.now();
+      const { config } = effectiveConfig(s.config, s.playback, now);
+      const screens = screenId ? config.screens.filter((x) => x.id === screenId) : config.screens;
+      return { config, screens, time: playbackTime(s.playback, now), playing: s.playback.playing };
+    },
+    stateRef ? "testPatternGenerator:sound:editor" : "testPatternGenerator:sound:output",
+    !!stateRef,
+  );
+  const soundRef = useRef(sound);
+  soundRef.current = sound;
 
   // Separate window: follow the editor.
   useEffect(() => {
@@ -166,6 +184,7 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
       if (k === "h") setStatusVisible((v) => !v);
       if (k === "f") document.documentElement.requestFullscreen?.().catch(() => {});
       if (k === "l") setLogo((v) => !v);
+      if (k === "s") soundRef.current.setEnabled(!soundRef.current.enabled);
       if (e.key === "Escape" && onClose) {
         if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
         onClose();
@@ -217,6 +236,7 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
             <Row label="Display Resolution:" value={displayW && displayH ? `${displayW} x ${displayH} (approx.)` : "Unknown"} />
             <Row label="Device Pixel Ratio:" value={dpr.toFixed(2)} />
             <Row label="Fullscreen:" value={isFullscreen ? "Yes" : "No"} />
+            {sound.enabled && sound.blocked && sound.active ? <Row label="Sound:" value="Click to allow" warn /> : null}
             <Row label="Browser -> Output:" value={fit ? "Scaled (fit)" : scaled ? "Scaled" : "1:1"} warn={scaled && !fit} />
             <div className="flex flex-wrap gap-1 pt-1 font-sans">
               <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); setFit((v) => !v); }}>
@@ -225,13 +245,16 @@ export default function OutputView({ stateRef, screenId, onClose }: Props) {
               <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); setLogo((v) => !v); }}>
                 {logo ? "Hide logo" : "Bouncing logo"}
               </button>
+              <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); sound.setEnabled(!sound.enabled); }}>
+                {sound.enabled ? "🔊 Beeps on" : "🔇 Beeps off"}
+              </button>
               {onClose ? (
                 <button type="button" className="rounded border border-slate-500 bg-slate-800 px-2 py-0.5 text-white" onClick={(e) => { e.stopPropagation(); document.exitFullscreen?.().catch(() => {}); onClose(); }}>
                   Close output
                 </button>
               ) : null}
             </div>
-            <div className="pt-1 text-[10px] text-slate-500">Click to hide · H toggles · F fullscreen · L logo (live only, never exported){onClose ? " · Esc closes" : ""}</div>
+            <div className="pt-1 text-[10px] text-slate-500">Click to hide · H toggles · F fullscreen · L logo (live only, never exported) · S beeps{onClose ? " · Esc closes" : ""}</div>
           </div>
         </div>
       ) : null}

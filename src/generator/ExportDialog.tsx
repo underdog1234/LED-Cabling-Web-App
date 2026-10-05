@@ -109,6 +109,9 @@ export default function ExportDialog({ config, selectedIds, currentTime, onClose
               </SmallButton>
             ))}
           </div>
+          {format !== "png" && items.some((i) => i.beeps.length) ? (
+            <div className="text-xs text-emerald-300">The sync beeps go in the file as its soundtrack. MP4 places them on the exact flash frames; WebM records them live, so pick MP4 for measuring lip sync.</div>
+          ) : null}
           {format === "png" ? (
             <div className="flex flex-wrap items-end gap-3">
               <div className="w-40">

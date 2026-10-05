@@ -8,7 +8,7 @@
 // a single-screen export can never pick up a neighbour that overlaps it.
 // ---------------------------------------------------------------------------
 
-import type { GeneratorConfig, LedLayoutSource, SubScreen } from "./model";
+import { motionOffset, type GeneratorConfig, type LedLayoutSource, type SubScreen } from "./model";
 import { LED_LAYOUT_PATTERN_ID, PATTERN_BY_ID, resolveSettings, type PatternInfo } from "./patterns";
 
 // --- LED planner layouts (loaded on demand) ---------------------------------
@@ -81,7 +81,72 @@ export const patternInfoFor = (screen: SubScreen, time: number, rc: RenderContex
   };
 };
 
-const drawOverlays = (ctx: CanvasRenderingContext2D, screen: SubScreen) => {
+/**
+ * Analogue clock with a seconds hand, plus the time in digits under it, in
+ * the top-right corner. It shows the time of day (this computer's clock), not
+ * the pattern clock, so it is the one thing on screen that never loops.
+ */
+const drawClock = (ctx: CanvasRenderingContext2D, w: number, h: number, nowMs: number) => {
+  const minD = Math.min(w, h);
+  const r = Math.max(18, Math.round(minD * 0.11));
+  const margin = Math.max(6, Math.round(minD * 0.03));
+  const digitsPx = Math.max(10, Math.round(r * 0.36));
+  const cx = w - margin - r;
+  const cy = margin + r;
+  const d = new Date(nowMs);
+  const sec = d.getSeconds();
+  const min = d.getMinutes() + sec / 60;
+  const hr = (d.getHours() % 12) + min / 60;
+  ctx.save();
+  ctx.fillStyle = "rgba(2,6,23,0.8)";
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = Math.max(1.5, r * 0.04);
+  ctx.stroke();
+  ctx.lineCap = "round";
+  for (let i = 0; i < 60; i += 1) {
+    const a = (i / 60) * Math.PI * 2;
+    const major = i % 5 === 0;
+    const inner = r * (major ? 0.78 : 0.88);
+    ctx.lineWidth = Math.max(1, r * (major ? 0.05 : 0.02));
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.sin(a) * inner, cy - Math.cos(a) * inner);
+    ctx.lineTo(cx + Math.sin(a) * r * 0.94, cy - Math.cos(a) * r * 0.94);
+    ctx.stroke();
+  }
+  const hand = (turns: number, length: number, width: number, colour: string, tail = 0) => {
+    const a = turns * Math.PI * 2;
+    ctx.strokeStyle = colour;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(cx - Math.sin(a) * tail, cy + Math.cos(a) * tail);
+    ctx.lineTo(cx + Math.sin(a) * length, cy - Math.cos(a) * length);
+    ctx.stroke();
+  };
+  hand(hr / 12, r * 0.5, Math.max(2, r * 0.08), "#ffffff");
+  hand(min / 60, r * 0.74, Math.max(1.5, r * 0.055), "#ffffff");
+  hand(sec / 60, r * 0.86, Math.max(1, r * 0.025), "#ef4444", r * 0.18);
+  ctx.fillStyle = "#ef4444";
+  ctx.beginPath();
+  ctx.arc(cx, cy, Math.max(2, r * 0.06), 0, Math.PI * 2);
+  ctx.fill();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const text = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(sec)}`;
+  ctx.font = `bold ${digitsPx}px 'Courier New', monospace`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  const tw = ctx.measureText(text).width + digitsPx * 0.6;
+  const ty = cy + r + Math.round(digitsPx * 0.25);
+  ctx.fillStyle = "rgba(2,6,23,0.8)";
+  ctx.fillRect(cx - tw / 2, ty, tw, digitsPx * 1.2);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(text, cx, ty + digitsPx * 0.1);
+  ctx.restore();
+};
+
+const drawOverlays = (ctx: CanvasRenderingContext2D, screen: SubScreen, nowMs: number) => {
   const { w, h } = screen;
   const o = screen.overlays;
   const stroke = Math.max(2, Math.round(Math.min(w, h) * 0.004));
@@ -120,22 +185,16 @@ const drawOverlays = (ctx: CanvasRenderingContext2D, screen: SubScreen) => {
     ctx.fillStyle = "#ffffff";
     ctx.fillText(text, stroke + pad, y + pad, boxW - pad * 2);
   }
+  if (o.clock) drawClock(ctx, w, h, nowMs);
   ctx.restore();
 };
 
-/**
- * Paints one screen into a context whose origin is the screen's top-left and
- * whose drawable area is exactly screen.w x screen.h.
- */
-export const renderScreen = (ctx: CanvasRenderingContext2D, screen: SubScreen, time: number, rc: RenderContext) => {
+// One scratch canvas for scrolling screens. Every render is synchronous, so
+// screens drawn one after another can share it.
+let motionSurface: HTMLCanvasElement | null = null;
+
+const drawPattern = (ctx: CanvasRenderingContext2D, screen: SubScreen, info: PatternInfo) => {
   const { w, h } = screen;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(0, 0, w, h);
-  ctx.clip();
-  ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, w, h);
-  const info = patternInfoFor(screen, time, rc);
   if (screen.pattern === LED_LAYOUT_PATTERN_ID && screen.ledLayout) {
     const layout = ledLayoutFor(screen.ledLayout);
     if (layout && ledModule) {
@@ -159,7 +218,42 @@ export const renderScreen = (ctx: CanvasRenderingContext2D, screen: SubScreen, t
     def.draw(ctx, w, h, resolveSettings(def, screen.settings[def.id]), info);
     ctx.restore();
   }
-  drawOverlays(ctx, screen);
+};
+
+/**
+ * Paints one screen into a context whose origin is the screen's top-left and
+ * whose drawable area is exactly screen.w x screen.h.
+ */
+export const renderScreen = (ctx: CanvasRenderingContext2D, screen: SubScreen, time: number, rc: RenderContext) => {
+  const { w, h } = screen;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, w, h);
+  ctx.clip();
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, w, h);
+  const info = patternInfoFor(screen, time, rc);
+  const { dx, dy } = motionOffset(screen.motion, info.progress, w, h);
+  if (!dx && !dy) {
+    drawPattern(ctx, screen, info);
+  } else {
+    // Moving: the finished pattern scrolls across the screen and wraps round,
+    // a whole pixel at a time, so it stays as sharp as the still version.
+    if (!motionSurface) motionSurface = document.createElement("canvas");
+    if (motionSurface.width !== w || motionSurface.height !== h) {
+      motionSurface.width = w;
+      motionSurface.height = h;
+    }
+    const mctx = motionSurface.getContext("2d")!;
+    mctx.setTransform(1, 0, 0, 1, 0, 0);
+    mctx.fillStyle = "#000000";
+    mctx.fillRect(0, 0, w, h);
+    drawPattern(mctx, screen, info);
+    for (const ox of dx ? [dx - w, dx] : [0]) {
+      for (const oy of dy ? [dy - h, dy] : [0]) ctx.drawImage(motionSurface, ox, oy);
+    }
+  }
+  drawOverlays(ctx, screen, Date.now());
   ctx.restore();
 };
 

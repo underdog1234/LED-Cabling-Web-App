@@ -65,7 +65,7 @@ export const importPlannerProject = async (
     });
     if (color && /^#[0-9a-fA-F]{6}$/.test(color)) screen.color = color.toLowerCase();
     // A planner sub-screen already names itself on its pattern; the label overlay would say it twice.
-    screen.overlays = { border: false, label: false, resolution: false, crosshair: false };
+    screen.overlays = { border: false, label: false, resolution: false, crosshair: false, clock: false };
     screens.push(screen);
   };
 

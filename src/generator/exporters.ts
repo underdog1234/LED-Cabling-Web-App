@@ -11,7 +11,9 @@
 import { zipSync } from "fflate";
 import { MP4_RECORD_MARGIN_SECONDS } from "../testPattern/mp4Encode";
 import { exportFileName, uniqueNames, type GeneratorConfig, type SubScreen } from "./model";
+import { beepsFor, renderBeepsWav, screenBeeps, startRecordingSound, type ScheduledBeep } from "./audio";
 import { patternName } from "./patterns";
+import { loadPhotoFaces } from "./photoFaces";
 import { canvasPatternLabel, renderComposite, renderScreen, type RenderContext } from "./render";
 
 export type ExportFormat = "png" | "webm" | "mp4";
@@ -22,6 +24,8 @@ export type ExportItem = {
   w: number;
   h: number;
   draw: (ctx: CanvasRenderingContext2D, time: number) => void;
+  /** Sync tones the video carries, on the pattern clock. Empty for a silent file. */
+  beeps: ScheduledBeep[];
 };
 
 export const downloadBlob = (blob: Blob, filename: string) => {
@@ -42,6 +46,7 @@ export const canvasItem = (config: GeneratorConfig): ExportItem => {
     w: config.canvas.w,
     h: config.canvas.h,
     draw: (ctx, time) => renderComposite(ctx, config, time, cache),
+    beeps: beepsFor(config.screens, config.loopSeconds),
   };
 };
 
@@ -55,6 +60,7 @@ export const screenItem = (config: GeneratorConfig, screen: SubScreen): ExportIt
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       renderScreen(ctx, screen, time, rc);
     },
+    beeps: screenBeeps(screen, config.loopSeconds),
   };
 };
 
@@ -94,7 +100,7 @@ export const pickVideoMimeType = (): string | null => {
  * own frame rate from a clock starting at zero, so the recording begins on
  * the loop's first frame.
  */
-export const recordWebm = (item: ExportItem, fps: number, seconds: number, onTick?: (elapsed: number) => void): Promise<Blob> => {
+export const recordWebm = (item: ExportItem, fps: number, seconds: number, loopSeconds: number, withSound: boolean, onTick?: (elapsed: number) => void): Promise<Blob> => {
   const mimeType = pickVideoMimeType();
   if (!mimeType) return Promise.reject(new Error("This browser can't record video (no WebM/MediaRecorder support). Try Chrome, Edge or Firefox."));
   const canvas = document.createElement("canvas");
@@ -106,26 +112,40 @@ export const recordWebm = (item: ExportItem, fps: number, seconds: number, onTic
   // ~6 bits per pixel, 8 to 80 Mbps - the planner's own rate, generous enough
   // for hard edges and small text.
   const videoBitsPerSecond = Math.min(80_000_000, Math.max(8_000_000, Math.round(item.w * item.h * 6)));
-  const stream = canvas.captureStream(fps);
-  const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond });
+  // Frames are pushed by hand straight after each draw, so every frame is
+  // stamped with the moment it shows rather than whenever the browser next
+  // sampled the canvas - what keeps a flash on the same frame as its beep.
+  const stream = canvas.captureStream(0);
+  const videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
+  // The sync tones play into the recording live; the audio starts a moment
+  // after this, and the picture clock is held back by the same moment.
+  const sound = withSound ? startRecordingSound(item.beeps, loopSeconds, seconds) : null;
+  if (sound) stream.addTrack(sound.track);
+  const withOpus = mimeType.replace(/codecs=([^;]+)/, "codecs=$1,opus");
+  const recorder = new MediaRecorder(stream, { mimeType: sound && MediaRecorder.isTypeSupported?.(withOpus) ? withOpus : mimeType, videoBitsPerSecond });
   const chunks: BlobPart[] = [];
   recorder.ondataavailable = (e) => {
     if (e.data.size > 0) chunks.push(e.data);
   };
-  const start = performance.now();
-  const drawId = window.setInterval(() => {
-    const t = (performance.now() - start) / 1000;
-    item.draw(ctx, t);
-    onTick?.(t);
-  }, 1000 / fps);
+  let drawId = 0;
   return new Promise((resolve) => {
     recorder.onstop = () => {
       window.clearInterval(drawId);
+      sound?.stop();
       stream.getTracks().forEach((track) => track.stop());
       resolve(new Blob(chunks, { type: mimeType }));
     };
     recorder.start();
-    setTimeout(() => recorder.stop(), seconds * 1000);
+    // The clock starts with the recording, on the loop's first frame.
+    const start = performance.now() + (sound?.leadMs ?? 0);
+    videoTrack.requestFrame?.();
+    drawId = window.setInterval(() => {
+      const t = Math.max(0, (performance.now() - start) / 1000);
+      item.draw(ctx, t);
+      videoTrack.requestFrame?.();
+      onTick?.(t);
+    }, 1000 / fps);
+    setTimeout(() => recorder.stop(), seconds * 1000 + (sound?.leadMs ?? 0));
   });
 };
 
@@ -144,6 +164,8 @@ export const runExport = async (
   onProgress: (p: ExportProgress) => void,
 ): Promise<{ blob: Blob; filename: string; files: string[] }> => {
   if (!items.length) throw new Error("Nothing to export - choose at least one screen.");
+  // A still taken before the portraits arrive would show "Loading faces…".
+  await loadPhotoFaces();
   const files: Array<{ name: string; data: Uint8Array }> = [];
   const names = uniqueNames(items.map((item) => item.fileBase(format)));
   for (let i = 0; i < items.length; i += 1) {
@@ -155,7 +177,8 @@ export const runExport = async (
       blob = await renderPng(item, options.time);
     } else {
       const seconds = format === "mp4" ? options.loopSeconds + MP4_RECORD_MARGIN_SECONDS : options.loopSeconds;
-      const webm = await recordWebm(item, options.video.fps, seconds, (t) =>
+      // MP4 gets its tones from an exact WAV instead of the live recording.
+      const webm = await recordWebm(item, options.video.fps, seconds, options.loopSeconds, format === "webm", (t) =>
         onProgress({ label: `${prefix}Recording ${names[i]} - ${Math.min(seconds, t).toFixed(0)}s of ${seconds.toFixed(0)}s`, ratio: (i + Math.min(1, t / seconds) * (format === "mp4" ? 0.5 : 1)) / items.length }),
       );
       if (format === "mp4") {
@@ -172,6 +195,7 @@ export const runExport = async (
             loopSeconds: options.loopSeconds,
           },
           (r) => onProgress({ label: `${prefix}Encoding ${names[i]} - ${Math.round(r * 100)}%`, ratio: (i + 0.5 + r * 0.5) / items.length }),
+          item.beeps.length ? renderBeepsWav(item.beeps, options.loopSeconds, options.loopSeconds) : undefined,
         );
       } else {
         blob = webm;
