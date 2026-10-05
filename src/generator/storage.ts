@@ -15,6 +15,8 @@ const AUTOSAVE_KEY = "testPatternGenerator:config:v1";
 const SAVED_KEY = "testPatternGenerator:saved:v1";
 const PRESETS_KEY = "testPatternGenerator:presets:v1";
 const OUTPUT_KEY = "testPatternGenerator:output:v1";
+/** Written by the LED Cabling Planner when it opens the generator: its open project, as a saved file would hold it. */
+const PLANNER_KEY = "testPatternGenerator:plannerProject:v1";
 export const OUTPUT_CHANNEL = "testPatternGenerator:output";
 
 const read = (key: string): unknown => {
@@ -41,6 +43,15 @@ export const loadAutosave = (): GeneratorConfig | null => {
 };
 
 export const saveAutosave = (config: GeneratorConfig) => write(AUTOSAVE_KEY, config);
+
+export type PlannerHandoff = { sentAt: string; project: unknown };
+
+/** The project the planner last opened the generator with, if any. */
+export const readPlannerHandoff = (): PlannerHandoff | null => {
+  const raw = read(PLANNER_KEY) as Partial<PlannerHandoff> | null;
+  if (!raw || !raw.project || typeof raw.project !== "object") return null;
+  return { sentAt: typeof raw.sentAt === "string" ? raw.sentAt : "", project: raw.project };
+};
 
 export type SavedConfig = { name: string; savedAt: string; config: GeneratorConfig };
 

@@ -50,6 +50,7 @@ import {
   openChannel,
   playbackTime,
   publishOutputState,
+  readPlannerHandoff,
   saveAutosave,
   storeCustomPresets,
   storeSavedConfigs,
@@ -368,16 +369,67 @@ export default function GeneratorApp() {
     downloadBlob(blob, `${fileSafe(configRef.current.name)}.testpattern.json`);
   };
 
+  // Undo brings back whatever was here before the import.
+  const importPlanner = async (data: Parameters<typeof importPlannerProject>[0]) => {
+    const next = await importPlannerProject(data, configRef.current);
+    commit(next, true);
+    setSelectedIds(next.screens.map((s) => s.id));
+    flash(`Imported ${next.screens.length} screen${next.screens.length === 1 ? "" : "s"} from the LED Cabling Planner project${next.name ? ` "${next.name}"` : ""}.`);
+  };
+
+  const [plannerHandoff, setPlannerHandoff] = useState(readPlannerHandoff);
+  // The planner may send a newer project while this tab stays open.
+  useEffect(() => {
+    const onStorage = () => setPlannerHandoff(readPlannerHandoff());
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  const loadPlannerHandoff = async (quiet: boolean) => {
+    const handoff = readPlannerHandoff();
+    setPlannerHandoff(handoff);
+    if (!handoff) {
+      if (!quiet) window.alert("No LED Cabling Planner project has been sent here yet. Use the Test Pattern Generator button in the planner.");
+      return;
+    }
+    try {
+      await importPlanner(handoff.project as Parameters<typeof importPlannerProject>[0]);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "The planner project could not be read.";
+      if (quiet) flash(`Opened without the planner project: ${message}`);
+      else window.alert(message);
+    }
+  };
+
+  const openDefaultProject = () => {
+    const c = { ...defaultConfig(), customPresets: configRef.current.customPresets };
+    commit(c, true);
+    setSelectedIds([c.screens[0].id]);
+    flash("Opened the default project (4 screens). Undo goes back to what was here.");
+  };
+
+  // Opened from the planner's Test Pattern Generator button: bring its
+  // project in once, then drop the flag so a reload keeps any edits.
+  const fromPlannerDone = useRef(false);
+  useEffect(() => {
+    if (fromPlannerDone.current) return;
+    fromPlannerDone.current = true;
+    const params = new URLSearchParams(location.search);
+    if (params.get("fromPlanner") !== "1") return;
+    params.delete("fromPlanner");
+    const query = params.toString();
+    history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+    void loadPlannerHandoff(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const openFile = (file: File, planner: boolean) => {
     const reader = new FileReader();
     reader.onload = async () => {
       try {
         const data = JSON.parse(String(reader.result || "{}"));
         if (planner || looksLikePlannerProject(data)) {
-          const next = await importPlannerProject(data, configRef.current);
-          commit(next, true);
-          setSelectedIds(next.screens.map((s) => s.id));
-          flash(`Imported ${next.screens.length} screen${next.screens.length === 1 ? "" : "s"} from the LED Cabling Planner project.`);
+          await importPlanner(data);
         } else {
           const next = normalizeConfig(data);
           commit(next, true);
@@ -469,7 +521,15 @@ export default function GeneratorApp() {
         <SmallButton onClick={() => setShowConfigs(true)}>Configurations</SmallButton>
         <SmallButton onClick={saveFile}>Save file</SmallButton>
         <SmallButton onClick={() => fileRef.current?.click()}>Open file</SmallButton>
+        <SmallButton
+          onClick={() => void loadPlannerHandoff(false)}
+          disabled={!plannerHandoff}
+          title={plannerHandoff ? "Bring in the project the LED Cabling Planner last opened this page with: its Output Canvas, sub-screens and their positions, each running its LED layout pattern" : "Open this page from the LED Cabling Planner's Test Pattern Generator button to bring its project across"}
+        >
+          Planner project
+        </SmallButton>
         <SmallButton onClick={() => plannerRef.current?.click()} title="Open a project saved by the LED Cabling Planner: its Output Canvas and sub-screens come across">Import LED Planner project</SmallButton>
+        <SmallButton onClick={openDefaultProject} title="Start again from the default four-screen setup">Default project</SmallButton>
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
         <input ref={plannerRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, true); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />

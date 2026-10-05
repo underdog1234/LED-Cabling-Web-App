@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.65.0`
+Version `0.66.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -74,6 +74,18 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.66.0
+
+**The planner opens the Test Pattern Generator with its project**
+
+- The planner's **Test Pattern Generator** button now takes the open project
+  with it: the generator opens on the project's Output Canvas, with every
+  sub-screen at its canvas position and resolution, each running the planner's
+  LED layout test pattern for its panels (or one Whole Layout screen when the
+  project has no sub-screens). Undo goes back to what the generator had before
+- **Planner project** in the generator brings that project in again, and
+  **Default project** goes back to the four-screen starting setup
 
 ## Recent Changes In v0.65.0
 
@@ -1278,6 +1290,9 @@ project and no panels: start from a resolution.
   panel pixel size, and a per-screen panel grid that drives the LED Moving
   Pattern. NovaStar processor input assignment (whole canvas or per screen) is
   kept too
+- Opened from the planner's **Test Pattern Generator** button, the generator
+  starts on the planner's open project (and **Planner project** brings it in
+  again); **Default project** returns to the four-screen starting setup
 - **Import LED Planner project** opens a saved planner file: its Output Canvas
   resolution, each sub-screen at its canvas position and footprint resolution,
   running the planner's own Moving Test Pattern, with its processor inputs
