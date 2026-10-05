@@ -77,8 +77,8 @@ const playTone = (ctx: BaseAudioContext, dest: AudioNode, when: number, b: Sched
   osc.stop(when + b.duration + 0.01);
 };
 
-/** A 16-bit mono WAV of `seconds` with every beep written in at its exact sample. */
-export const renderBeepsWav = (beeps: ScheduledBeep[], loopSeconds: number, seconds: number, sampleRate = 48000): Uint8Array => {
+/** The beeps as 16-bit mono samples, each starting on its exact sample. */
+export const renderBeepSamples = (beeps: ScheduledBeep[], loopSeconds: number, seconds: number, sampleRate = 48000): Int16Array => {
   const n = Math.max(1, Math.round(seconds * sampleRate));
   const samples = new Int16Array(n);
   beepsBetween(beeps, loopSeconds, 0, seconds).forEach((b) => {
@@ -92,6 +92,13 @@ export const renderBeepsWav = (beeps: ScheduledBeep[], loopSeconds: number, seco
       samples[start + i] = Math.max(-32768, Math.min(32767, v));
     }
   });
+  return samples;
+};
+
+/** A 16-bit mono WAV of `seconds` with every beep written in at its exact sample. */
+export const renderBeepsWav = (beeps: ScheduledBeep[], loopSeconds: number, seconds: number, sampleRate = 48000): Uint8Array => {
+  const samples = renderBeepSamples(beeps, loopSeconds, seconds, sampleRate);
+  const n = samples.length;
   const out = new Uint8Array(44 + n * 2);
   const view = new DataView(out.buffer);
   const text = (at: number, s: string) => [...s].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));

@@ -11,7 +11,8 @@
 import { zipSync } from "fflate";
 import { MP4_RECORD_MARGIN_SECONDS } from "../testPattern/mp4Encode";
 import { exportFileName, uniqueNames, type GeneratorConfig, type SubScreen } from "./model";
-import { beepsFor, renderBeepsWav, screenBeeps, startRecordingSound, type ScheduledBeep } from "./audio";
+import { beepsFor, renderBeepSamples, renderBeepsWav, screenBeeps, startRecordingSound, type ScheduledBeep } from "./audio";
+import { muxWebm, opusHead, type MuxPacket } from "./webmMux";
 import { patternName } from "./patterns";
 import { loadPhotoFaces } from "./photoFaces";
 import { canvasPatternLabel, renderComposite, renderScreen, type RenderContext } from "./render";
@@ -95,6 +96,138 @@ export const pickVideoMimeType = (): string | null => {
   return null;
 };
 
+// --- frame-by-frame encoding (WebCodecs) ----------------------------------------
+// Draws every frame of the loop at its exact time and encodes it, as fast as
+// the computer allows - no real-time clock involved. So the file is always
+// exactly one loop long, with every frame present and every beep on its
+// frame, however busy the machine or whichever tab is in front. Browsers
+// without WebCodecs fall back to the real-time recorder below.
+
+const VIDEO_CODECS: Array<{ codec: string; mux: "V_VP9" | "V_VP8" }> = [
+  { codec: "vp09.00.41.08", mux: "V_VP9" },
+  { codec: "vp09.00.51.08", mux: "V_VP9" },
+  { codec: "vp8", mux: "V_VP8" },
+];
+
+const pickEncoder = async (w: number, h: number, fps: number, bitrate: number) => {
+  if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") return null;
+  for (const c of VIDEO_CODECS) {
+    const config: VideoEncoderConfig = { codec: c.codec, width: w, height: h, bitrate, framerate: fps, bitrateMode: "variable", latencyMode: "quality" };
+    try {
+      const support = await VideoEncoder.isConfigSupported(config);
+      if (support.supported) return { config, mux: c.mux };
+    } catch {
+      // Try the next codec.
+    }
+  }
+  return null;
+};
+
+const encodeOpus = async (samples: Int16Array, sampleRate: number): Promise<{ packets: MuxPacket[]; head: Uint8Array; preSkip: number } | null> => {
+  if (typeof AudioEncoder === "undefined" || typeof AudioData === "undefined") return null;
+  const config: AudioEncoderConfig = { codec: "opus", sampleRate, numberOfChannels: 1, bitrate: 128_000 };
+  try {
+    if (!(await AudioEncoder.isConfigSupported(config)).supported) return null;
+  } catch {
+    return null;
+  }
+  const packets: MuxPacket[] = [];
+  let description: Uint8Array | null = null;
+  let failed: unknown = null;
+  const encoder = new AudioEncoder({
+    output: (chunk, meta) => {
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      packets.push({ track: 2, timestampUs: chunk.timestamp, key: true, data });
+      const d = meta?.decoderConfig?.description;
+      if (d && !description) description = d instanceof ArrayBuffer ? new Uint8Array(d) : new Uint8Array((d as ArrayBufferView).buffer.slice(0));
+    },
+    error: (e) => {
+      failed = e;
+    },
+  });
+  encoder.configure(config);
+  const block = 960;
+  for (let i = 0; i < samples.length; i += block) {
+    const part = samples.slice(i, Math.min(samples.length, i + block));
+    encoder.encode(new AudioData({ format: "s16", sampleRate, numberOfChannels: 1, numberOfFrames: part.length, timestamp: Math.round((i / sampleRate) * 1e6), data: part }));
+  }
+  await encoder.flush();
+  encoder.close();
+  if (failed) return null;
+  const desc = description as Uint8Array | null;
+  const preSkip = desc && desc.length >= 12 ? new DataView(desc.buffer, desc.byteOffset).getUint16(10, true) : 312;
+  return { packets, head: desc && desc.length >= 19 ? desc : opusHead(1, sampleRate, preSkip), preSkip };
+};
+
+/**
+ * Exactly `seconds` of the item as a WebM, frame by frame, or null when this
+ * browser can't encode that way (the caller then records in real time).
+ */
+export const encodeWebmFrames = async (
+  item: ExportItem,
+  fps: number,
+  seconds: number,
+  loopSeconds: number,
+  withSound: boolean,
+  onTick?: (elapsed: number) => void,
+): Promise<Blob | null> => {
+  // Encoders want even dimensions; the file is never resized, so odd sizes record in real time instead.
+  if (item.w % 2 || item.h % 2) return null;
+  const bitrate = Math.min(80_000_000, Math.max(8_000_000, Math.round(item.w * item.h * 6)));
+  const picked = await pickEncoder(item.w, item.h, fps, bitrate);
+  if (!picked) return null;
+  let audio: Awaited<ReturnType<typeof encodeOpus>> = null;
+  if (withSound && item.beeps.length) {
+    audio = await encodeOpus(renderBeepSamples(item.beeps, loopSeconds, seconds), 48000);
+    if (!audio) return null;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = item.w;
+  canvas.height = item.h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  const packets: MuxPacket[] = [];
+  let failed: unknown = null;
+  const encoder = new VideoEncoder({
+    output: (chunk) => {
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      packets.push({ track: 1, timestampUs: chunk.timestamp, key: chunk.type === "key", data });
+    },
+    error: (e) => {
+      failed = e;
+    },
+  });
+  encoder.configure(picked.config);
+  const frames = Math.max(1, Math.round(seconds * fps));
+  const frameUs = 1e6 / fps;
+  for (let i = 0; i < frames; i += 1) {
+    if (failed) break;
+    const t = i / fps;
+    item.draw(ctx, t);
+    const frame = new VideoFrame(canvas, { timestamp: Math.round(i * frameUs), duration: Math.round(frameUs) });
+    encoder.encode(frame, { keyFrame: i % fps === 0 });
+    frame.close();
+    onTick?.(t);
+    // Keep the encoder's queue short, and let the page repaint the progress.
+    while (encoder.encodeQueueSize > 4) await new Promise((r) => setTimeout(r, 1));
+    if (i % 10 === 9) await new Promise((r) => setTimeout(r, 0));
+  }
+  if (!failed) await encoder.flush().catch((e) => (failed = e));
+  encoder.close();
+  if (failed) return null;
+  const data = muxWebm([...packets, ...(audio?.packets ?? [])], {
+    width: item.w,
+    height: item.h,
+    fps,
+    durationSeconds: frames / fps,
+    videoCodec: picked.mux,
+    audio: audio ? { codecPrivate: audio.head, sampleRate: 48000, channels: 1, preSkip: audio.preSkip } : undefined,
+  });
+  return new Blob([data as unknown as BlobPart], { type: "video/webm" });
+};
+
 /**
  * Records `seconds` of the item to WebM. The pattern is drawn at the file's
  * own frame rate from a clock starting at zero, so the recording begins on
@@ -112,11 +245,7 @@ export const recordWebm = (item: ExportItem, fps: number, seconds: number, loopS
   // ~6 bits per pixel, 8 to 80 Mbps - the planner's own rate, generous enough
   // for hard edges and small text.
   const videoBitsPerSecond = Math.min(80_000_000, Math.max(8_000_000, Math.round(item.w * item.h * 6)));
-  // Frames are pushed by hand straight after each draw, so every frame is
-  // stamped with the moment it shows rather than whenever the browser next
-  // sampled the canvas - what keeps a flash on the same frame as its beep.
-  const stream = canvas.captureStream(0);
-  const videoTrack = stream.getVideoTracks()[0] as MediaStreamTrack & { requestFrame?: () => void };
+  const stream = canvas.captureStream(fps);
   // The sync tones play into the recording live; the audio starts a moment
   // after this, and the picture clock is held back by the same moment.
   const sound = withSound ? startRecordingSound(item.beeps, loopSeconds, seconds) : null;
@@ -138,11 +267,9 @@ export const recordWebm = (item: ExportItem, fps: number, seconds: number, loopS
     recorder.start();
     // The clock starts with the recording, on the loop's first frame.
     const start = performance.now() + (sound?.leadMs ?? 0);
-    videoTrack.requestFrame?.();
     drawId = window.setInterval(() => {
       const t = Math.max(0, (performance.now() - start) / 1000);
       item.draw(ctx, t);
-      videoTrack.requestFrame?.();
       onTick?.(t);
     }, 1000 / fps);
     setTimeout(() => recorder.stop(), seconds * 1000 + (sound?.leadMs ?? 0));
@@ -176,11 +303,19 @@ export const runExport = async (
       onProgress({ label: `${prefix}Rendering ${names[i]}`, ratio: i / items.length });
       blob = await renderPng(item, options.time);
     } else {
-      const seconds = format === "mp4" ? options.loopSeconds + MP4_RECORD_MARGIN_SECONDS : options.loopSeconds;
-      // MP4 gets its tones from an exact WAV instead of the live recording.
-      const webm = await recordWebm(item, options.video.fps, seconds, options.loopSeconds, format === "webm", (t) =>
-        onProgress({ label: `${prefix}Recording ${names[i]} - ${Math.min(seconds, t).toFixed(0)}s of ${seconds.toFixed(0)}s`, ratio: (i + Math.min(1, t / seconds) * (format === "mp4" ? 0.5 : 1)) / items.length }),
+      const share = format === "mp4" ? 0.5 : 1;
+      // Frame by frame where the browser can, exactly one loop; MP4 gets its
+      // tones from an exact WAV instead of the recording.
+      let webm = await encodeWebmFrames(item, options.video.fps, options.loopSeconds, options.loopSeconds, format === "webm", (t) =>
+        onProgress({ label: `${prefix}Rendering ${names[i]} - ${t.toFixed(1)}s of ${options.loopSeconds}s`, ratio: (i + Math.min(1, t / options.loopSeconds) * share) / items.length }),
       );
+      if (!webm) {
+        // Real-time fallback; MP4 records a little longer and is cut back to one loop.
+        const seconds = format === "mp4" ? options.loopSeconds + MP4_RECORD_MARGIN_SECONDS : options.loopSeconds;
+        webm = await recordWebm(item, options.video.fps, seconds, options.loopSeconds, format === "webm", (t) =>
+          onProgress({ label: `${prefix}Recording ${names[i]} - ${Math.min(seconds, t).toFixed(0)}s of ${seconds.toFixed(0)}s`, ratio: (i + Math.min(1, t / seconds) * share) / items.length }),
+        );
+      }
       if (format === "mp4") {
         onProgress({ label: `${prefix}Loading the MP4 encoder`, ratio: (i + 0.5) / items.length });
         const { encodeWebmToMp4 } = await import("../testPattern/mp4Encode");

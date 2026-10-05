@@ -50,9 +50,13 @@ import {
   openChannel,
   playbackTime,
   publishOutputState,
+  readPlannerHandoff,
   saveAutosave,
   storeCustomPresets,
   storeSavedConfigs,
+  defaultDisplay,
+  type OutputDisplay,
+  type OutputRequest,
   type OutputState,
   type Playback,
   type SavedConfig,
@@ -151,18 +155,32 @@ export default function GeneratorApp() {
     if (config.screens.some((s) => s.ledLayout)) void loadLedModule();
   }, [config.screens]);
 
-  // Output window link.
+  // How the output shows itself (logo, fit, status box, output-window beeps).
+  const [display, setDisplay] = useState<OutputDisplay>(defaultDisplay);
+  const patchDisplay = (patch: Partial<OutputDisplay>) => setDisplay((d) => ({ ...d, ...patch }));
+  // What the separate output window last reported about itself.
+  const [outputStatus, setOutputStatus] = useState<{ fullscreen: boolean; oneToOne: boolean; at: number } | null>(null);
+
+  // Output window link: state goes out, display changes and status come back.
   useEffect(() => {
-    channelRef.current = openChannel();
-    return () => channelRef.current?.close();
+    const channel = openChannel();
+    channelRef.current = channel;
+    if (channel) {
+      channel.onmessage = (e) => {
+        const msg = e.data as OutputRequest | undefined;
+        if (msg?.type === "display") patchDisplay(msg.patch);
+        else if (msg?.type === "status") setOutputStatus({ fullscreen: msg.fullscreen, oneToOne: msg.oneToOne, at: Date.now() });
+      };
+    }
+    return () => channel?.close();
   }, []);
-  const outputStateRef = useRef<OutputState>({ config, playback });
+  const outputStateRef = useRef<OutputState>({ config, playback, display });
   useEffect(() => {
     playbackRef.current = playback;
-    outputStateRef.current = { config, playback };
+    outputStateRef.current = { config, playback, display };
     const id = window.setTimeout(() => publishOutputState(outputStateRef.current, channelRef.current), 30);
     return () => window.clearTimeout(id);
-  }, [config, playback]);
+  }, [config, playback, display]);
 
   // A coarse clock for the playback readout and playlist highlight.
   useEffect(() => {
@@ -204,6 +222,14 @@ export default function GeneratorApp() {
     "testPatternGenerator:sound:editor",
     true,
   );
+  useEffect(() => patchDisplay({ beepOffsetMs: sound.offsetMs }), [sound.offsetMs]);
+  // The output window reports in about once a second; quiet for longer means it was closed.
+  const outputWindowLive = !!outputStatus && now - outputStatus.at < 3000;
+  const goFullscreen = () => {
+    setInlineOutput({ screenId: outputTarget === "__canvas" ? null : outputTarget });
+    document.documentElement.requestFullscreen?.().catch(() => {});
+  };
+
   const currentTime = playbackTime(playback, now);
   const activeStep = effectiveConfig(config, playback, now).stepIndex;
 
@@ -368,16 +394,67 @@ export default function GeneratorApp() {
     downloadBlob(blob, `${fileSafe(configRef.current.name)}.testpattern.json`);
   };
 
+  // Undo brings back whatever was here before the import.
+  const importPlanner = async (data: Parameters<typeof importPlannerProject>[0]) => {
+    const next = await importPlannerProject(data, configRef.current);
+    commit(next, true);
+    setSelectedIds(next.screens.map((s) => s.id));
+    flash(`Imported ${next.screens.length} screen${next.screens.length === 1 ? "" : "s"} from the LED Cabling Planner project${next.name ? ` "${next.name}"` : ""}.`);
+  };
+
+  const [plannerHandoff, setPlannerHandoff] = useState(readPlannerHandoff);
+  // The planner may send a newer project while this tab stays open.
+  useEffect(() => {
+    const onStorage = () => setPlannerHandoff(readPlannerHandoff());
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  const loadPlannerHandoff = async (quiet: boolean) => {
+    const handoff = readPlannerHandoff();
+    setPlannerHandoff(handoff);
+    if (!handoff) {
+      if (!quiet) window.alert("No LED Cabling Planner project has been sent here yet. Use the Test Pattern Generator button in the planner.");
+      return;
+    }
+    try {
+      await importPlanner(handoff.project as Parameters<typeof importPlannerProject>[0]);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "The planner project could not be read.";
+      if (quiet) flash(`Opened without the planner project: ${message}`);
+      else window.alert(message);
+    }
+  };
+
+  const openDefaultProject = () => {
+    const c = { ...defaultConfig(), customPresets: configRef.current.customPresets };
+    commit(c, true);
+    setSelectedIds([c.screens[0].id]);
+    flash("Opened the default project (4 screens). Undo goes back to what was here.");
+  };
+
+  // Opened from the planner's Test Pattern Generator button: bring its
+  // project in once, then drop the flag so a reload keeps any edits.
+  const fromPlannerDone = useRef(false);
+  useEffect(() => {
+    if (fromPlannerDone.current) return;
+    fromPlannerDone.current = true;
+    const params = new URLSearchParams(location.search);
+    if (params.get("fromPlanner") !== "1") return;
+    params.delete("fromPlanner");
+    const query = params.toString();
+    history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+    void loadPlannerHandoff(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const openFile = (file: File, planner: boolean) => {
     const reader = new FileReader();
     reader.onload = async () => {
       try {
         const data = JSON.parse(String(reader.result || "{}"));
         if (planner || looksLikePlannerProject(data)) {
-          const next = await importPlannerProject(data, configRef.current);
-          commit(next, true);
-          setSelectedIds(next.screens.map((s) => s.id));
-          flash(`Imported ${next.screens.length} screen${next.screens.length === 1 ? "" : "s"} from the LED Cabling Planner project.`);
+          await importPlanner(data);
         } else {
           const next = normalizeConfig(data);
           commit(next, true);
@@ -394,7 +471,7 @@ export default function GeneratorApp() {
   // --- output -----------------------------------------------------------------------
 
   const openOutputWindow = async () => {
-    publishOutputState({ config: configRef.current, playback: playbackRef.current }, channelRef.current);
+    publishOutputState(outputStateRef.current, channelRef.current);
     const params = new URLSearchParams({ output: "1" });
     if (outputTarget !== "__canvas") params.set("screen", outputTarget);
     const url = `${location.pathname}?${params.toString()}`;
@@ -469,7 +546,15 @@ export default function GeneratorApp() {
         <SmallButton onClick={() => setShowConfigs(true)}>Configurations</SmallButton>
         <SmallButton onClick={saveFile}>Save file</SmallButton>
         <SmallButton onClick={() => fileRef.current?.click()}>Open file</SmallButton>
+        <SmallButton
+          onClick={() => void loadPlannerHandoff(false)}
+          disabled={!plannerHandoff}
+          title={plannerHandoff ? "Bring in the project the LED Cabling Planner last opened this page with: its Output Canvas, sub-screens and their positions, each running its LED layout pattern" : "Open this page from the LED Cabling Planner's Test Pattern Generator button to bring its project across"}
+        >
+          Planner project
+        </SmallButton>
         <SmallButton onClick={() => plannerRef.current?.click()} title="Open a project saved by the LED Cabling Planner: its Output Canvas and sub-screens come across">Import LED Planner project</SmallButton>
+        <SmallButton onClick={openDefaultProject} title="Start again from the default four-screen setup">Default project</SmallButton>
         <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, false); e.target.value = ""; }} />
         <input ref={plannerRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) openFile(f, true); e.target.value = ""; }} />
         <span className="mx-1 h-5 w-px bg-slate-700" />
@@ -496,52 +581,73 @@ export default function GeneratorApp() {
 
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <main className="min-w-0 space-y-3">
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
-            <SmallButton active={playback.playing} onClick={() => setPlaying(!playback.playing)} title="Play / pause (Space)">{playback.playing ? "❚❚ Pause" : "▶ Play"}</SmallButton>
-            <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
-            <span className="font-mono text-xs text-slate-300">
-              {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
-            </span>
-            <span className="mx-1 h-5 w-px bg-slate-700" />
-            <Check checked={sound.enabled} onChange={sound.setEnabled} title="Play the timecode and AV sync beeps through this computer, in step with the flashes">
-              🔊 Sync beeps
-            </Check>
-            {sound.enabled ? (
-              <>
-                <NumField
-                  className="w-20"
-                  value={sound.offsetMs}
-                  min={-1000}
-                  max={1000}
-                  title="Audio offset in milliseconds: positive delays the beep, to match a display that shows the picture late"
-                  onCommit={sound.setOffsetMs}
-                />
-                <span className="text-xs text-slate-400">ms</span>
-                {sound.blocked && sound.active ? <span className="text-xs text-amber-300">Click anywhere to allow sound</span> : null}
-              </>
-            ) : null}
-            <span className="mx-1 h-5 w-px bg-slate-700" />
-            <Check
-              checked={config.autoCycle.enabled}
-              onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
-              title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
-            >
-              Auto cycle all patterns
-            </Check>
-            {config.autoCycle.enabled ? (
-              <>
-                <span className="text-xs text-slate-400">every</span>
-                <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
-                <span className="text-xs text-slate-400">s</span>
-                <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
-                  Different per screen
-                </Check>
-              </>
-            ) : null}
-            {playback.playlist.active && activeStep !== null ? (
-              <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
-            ) : null}
-            <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
+          <div className="space-y-2 rounded-xl border border-slate-700 bg-slate-900/80 px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-14 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Playback</span>
+              <SmallButton active={playback.playing} onClick={() => setPlaying(true)} title="Play (Space toggles)">▶ Play</SmallButton>
+              <SmallButton active={!playback.playing} onClick={() => setPlaying(false)} title="Pause (Space toggles)">❚❚ Pause</SmallButton>
+              <SmallButton onClick={restart} title="Back to the start of the loop">⏮ Restart</SmallButton>
+              <span className="font-mono text-xs text-slate-300">
+                {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
+              </span>
+              <span className="mx-1 h-5 w-px bg-slate-700" />
+              <Check
+                checked={config.autoCycle.enabled}
+                onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
+                title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
+              >
+                Auto cycle all patterns
+              </Check>
+              {config.autoCycle.enabled ? (
+                <>
+                  <span className="text-xs text-slate-400">change every</span>
+                  <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} title="Seconds each pattern stays up" onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
+                  <span className="text-xs text-slate-400">seconds</span>
+                  <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
+                    Different per screen
+                  </Check>
+                </>
+              ) : null}
+              {playback.playlist.active && activeStep !== null ? (
+                <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
+              ) : null}
+              <span className="ml-auto text-xs text-slate-400">{selectedIds.length ? `${selectedIds.length} selected` : "Nothing selected"}</span>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 border-t border-slate-800 pt-2">
+              <span className="w-14 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Output</span>
+              <SmallButton onClick={goFullscreen} title="Show the output full screen on this display (Esc closes it)">⛶ Fullscreen</SmallButton>
+              <SmallButton active={display.logo} onClick={() => patchDisplay({ logo: !display.logo })} title="A logo bouncing round inside every sub-screen, on the live output only - never in a download">
+                Bouncing logo
+              </SmallButton>
+              <SmallButton active={display.fit} onClick={() => patchDisplay({ fit: !display.fit })} title="Scale the output to fill the display instead of showing it 1:1">
+                Fit to display
+              </SmallButton>
+              <SmallButton active={display.status} onClick={() => patchDisplay({ status: !display.status })} title="The box in the corner of the output with its resolution and 1:1 check">
+                Status box
+              </SmallButton>
+              {outputWindowLive ? (
+                outputStatus!.fullscreen ? (
+                  <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Output window is fullscreen{outputStatus!.oneToOne ? " and 1:1" : ""}</span>
+                ) : (
+                  <span className="rounded border border-amber-400/70 bg-amber-500/15 px-2 py-0.5 text-xs font-semibold text-amber-200" title="Browsers only allow fullscreen from a click in that window: click the yellow banner on the output display">
+                    ⚠ Output window is not fullscreen - click the banner on that display
+                  </span>
+                )
+              ) : null}
+              <span className="mx-1 h-5 w-px bg-slate-700" />
+              <Check checked={sound.enabled} onChange={sound.setEnabled} title="Play the timecode and AV sync beeps from this window, in step with the flashes">
+                🔊 Beeps here
+              </Check>
+              <Check checked={display.beeps} onChange={(v) => patchDisplay({ beeps: v })} title="Play the beeps from the separate output window instead (or as well)">
+                🔊 Beeps in output window
+              </Check>
+              <label className="flex items-center gap-1 text-xs text-slate-400" title="Moves every beep later (positive) or earlier (negative) by this many milliseconds, to line the sound up with a display or processor that shows the picture late">
+                Beep delay
+                <NumField className="w-20" value={sound.offsetMs} min={-1000} max={1000} onCommit={sound.setOffsetMs} />
+                ms
+              </label>
+              {(sound.enabled && sound.blocked && sound.active) ? <span className="text-xs text-amber-300">Click anywhere to allow sound</span> : null}
+            </div>
           </div>
           <div className="rounded-xl border border-slate-700 bg-slate-900/60 p-3">
             <CanvasEditor
@@ -675,6 +781,7 @@ export default function GeneratorApp() {
       {inlineOutput ? (
         <OutputView
           stateRef={outputStateRef}
+          onDisplay={patchDisplay}
           screenId={inlineOutput.screenId}
           onClose={() => {
             setInlineOutput(null);

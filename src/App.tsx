@@ -85,7 +85,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.65.0";
+const APP_VERSION = "0.67.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -4485,46 +4485,64 @@ export default function App() {
     }
   };
 
+// Everything a saved project file holds - also what the Test Pattern
+// Generator is handed when it is opened from here.
+const projectFilePayload = () => {
+  // formatVersion 7: adds manual stock-list edits (v1-v6 files still open,
+  // see openJson - the number bump itself is purely documentation, there's
+  // no branching logic tied to it anywhere).
+  //
+  // The edits are saved, the edited rows are not: they are notes against a
+  // stock code ("pull 4 of these, not 6", "not this time"), so reopening the
+  // file recalculates the list from the layout as it always did and lays the
+  // same notes back over it.
+  // stockRows here is always the plain catalog-based numbers (this file
+  // snapshots the theoretical required/spare/rounded math, not a live
+  // Rentman read that would just go stale the moment the file is
+  // reopened) - the equipment mapping that drives live data is account-
+  // wide and lives in localStorage instead, not in this per-project file.
+  return {
+    formatVersion: 7,
+    appVersion: APP_VERSION,
+    projectName: safeProjectName,
+    surfaceName,
+    panelType,
+    powerDistro,
+    backupSignalLoop,
+    includeReinforcementPlate,
+    deploymentType,
+    wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
+    panels: grid,
+    patching: { signalPortsUsed, powerPortsUsed },
+    stockRows,
+    subScreens,
+    outputCanvas: { w: outputCanvasW, h: outputCanvasH },
+    wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
+    processorModel,
+    canvasInputs,
+    inputMode,
+    wholeCanvasInputId,
+    rentmanDateFrom: projectDateFrom,
+    rentmanDateTo: projectDateTo,
+    stockEdits,
+  };
+};
+
+// The generator is a separate page, so the open project goes across the same
+// way the Moving Test Pattern window gets it: through localStorage, read once
+// by the new tab (generator.html?fromPlanner=1).
+const openTestPatternGenerator = () => {
+  try {
+    localStorage.setItem("testPatternGenerator:plannerProject:v1", JSON.stringify({ sentAt: new Date().toISOString(), project: projectFilePayload() }));
+  } catch (err) {
+    console.error("Could not hand the project to the Test Pattern Generator", err);
+  }
+  window.open(`${location.pathname.replace(/[^/]*$/, "")}generator.html?fromPlanner=1`, "_blank");
+};
+
 const exportJson = () => {
   try {
-    // formatVersion 7: adds manual stock-list edits (v1-v6 files still open,
-    // see openJson - the number bump itself is purely documentation, there's
-    // no branching logic tied to it anywhere).
-    //
-    // The edits are saved, the edited rows are not: they are notes against a
-    // stock code ("pull 4 of these, not 6", "not this time"), so reopening the
-    // file recalculates the list from the layout as it always did and lays the
-    // same notes back over it.
-    // stockRows here is always the plain catalog-based numbers (this file
-    // snapshots the theoretical required/spare/rounded math, not a live
-    // Rentman read that would just go stale the moment the file is
-    // reopened) - the equipment mapping that drives live data is account-
-    // wide and lives in localStorage instead, not in this per-project file.
-    const payload = {
-      formatVersion: 7,
-      appVersion: APP_VERSION,
-      projectName: safeProjectName,
-      surfaceName,
-      panelType,
-      powerDistro,
-      backupSignalLoop,
-      includeReinforcementPlate,
-      deploymentType,
-      wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
-      panels: grid,
-      patching: { signalPortsUsed, powerPortsUsed },
-      stockRows,
-      subScreens,
-      outputCanvas: { w: outputCanvasW, h: outputCanvasH },
-      wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
-      processorModel,
-      canvasInputs,
-      inputMode,
-      wholeCanvasInputId,
-      rentmanDateFrom: projectDateFrom,
-      rentmanDateTo: projectDateTo,
-      stockEdits,
-    };
+    const payload = projectFilePayload();
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
     const url = window.URL.createObjectURL(blob);
@@ -7573,7 +7591,7 @@ const exportJson = () => {
               <Button intent="secondary" onClick={openQuickPanelLayoutTab} title="Open a standalone panel-count calculator in a new tab">
                 <LayoutGrid className="h-4 w-4" />Quick Panel Layout
               </Button>
-              <Button intent="secondary" onClick={() => window.open(`${location.pathname.replace(/[^/]*$/, "")}generator.html`, "_blank")} title="Open the standalone Test Pattern Generator - any canvas size, multiple sub-screens, no LED panels needed. Import this project's saved file there to bring the Output Canvas across.">
+              <Button intent="secondary" onClick={openTestPatternGenerator} title="Open the Test Pattern Generator with this project: its Output Canvas, sub-screens and their positions, each running this layout's LED test pattern">
                 <Video className="h-4 w-4" />Test Pattern Generator
               </Button>
               <Button intent="ghost" onClick={() => setShowHelp(true)}>
