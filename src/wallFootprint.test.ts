@@ -102,18 +102,32 @@ describe("getPanelSymbol", () => {
     rotation,
   });
 
-  it("names which physical part a shaped panel is, by the corner its rotation puts the right angle in", () => {
+  it("names which physical part a shaped panel is, the way the shelf names it", () => {
     // The same LU / LD / RU / RD buckets Stock Calculations counts against the
-    // shelf, read from the front - so the drawing names the part you pick.
-    expect(getPanelSymbol(shaped("TRIANGLE", 0))).toBe("△ LD");
-    expect(getPanelSymbol(shaped("TRIANGLE", 90))).toBe("△ LU");
-    expect(getPanelSymbol(shaped("TRIANGLE", 180))).toBe("△ RU");
-    expect(getPanelSymbol(shaped("TRIANGLE", 270))).toBe("△ RD");
+    // shelf, read from the FRONT of the wall - so the drawing names the part
+    // you pick. Left/Right is the corner the right angle is drawn in; Up/Down
+    // is the shelf's own vertical sense, which runs the opposite way (a
+    // rotation-0 triangle draws its corner at the bottom and is the "Up"
+    // part). See TRIANGLE_ORIENTATION - these are deliberate.
+    expect(getPanelSymbol(shaped("TRIANGLE", 0))).toBe("△ LU");
+    expect(getPanelSymbol(shaped("TRIANGLE", 90))).toBe("△ LD");
+    expect(getPanelSymbol(shaped("TRIANGLE", 180))).toBe("△ RD");
+    expect(getPanelSymbol(shaped("TRIANGLE", 270))).toBe("△ RU");
 
-    expect(getPanelSymbol(shaped("CURVED", 0))).toBe("◜ RD");
-    expect(getPanelSymbol(shaped("CURVED", 90))).toBe("◜ LD");
-    expect(getPanelSymbol(shaped("CURVED", 180))).toBe("◜ LU");
-    expect(getPanelSymbol(shaped("CURVED", 270))).toBe("◜ RU");
+    expect(getPanelSymbol(shaped("CURVED", 0))).toBe("◜ RU");
+    expect(getPanelSymbol(shaped("CURVED", 90))).toBe("◜ LU");
+    expect(getPanelSymbol(shaped("CURVED", 180))).toBe("◜ LD");
+    expect(getPanelSymbol(shaped("CURVED", 270))).toBe("◜ RD");
+  });
+
+  it("keeps each rotation on its own part, with the four never colliding", () => {
+    // Whatever the naming, the one thing that must hold is that the four
+    // rotations map onto four DIFFERENT one-way parts - two rotations sharing
+    // a bucket would order half the wall wrong.
+    for (const variant of ["TRIANGLE", "CURVED"] as const) {
+      const names = [0, 90, 180, 270].map((rotation) => getPanelSymbol(shaped(variant, rotation)));
+      expect(new Set(names).size).toBe(4);
+    }
   });
 
   it("leaves a plain panel alone, and still flags one that is merely rotated", () => {

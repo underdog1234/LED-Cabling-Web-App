@@ -23,7 +23,7 @@ describe("panelTypeMix", () => {
     ]);
   });
 
-  it("names each shape as its own part", () => {
+  it("names each shape as its own part, down to the orientation", () => {
     const mix = panelTypeMix([
       ...typed(makeGridPanels(1, 1, "MG9"), "MG9", "TRIANGLE"),
       ...typed(makeGridPanels(1, 1, "MG9"), "MG9", "CURVED"),
@@ -32,13 +32,54 @@ describe("panelTypeMix", () => {
     ]);
     expect(mix.map((entry) => entry.label).sort()).toEqual([
       "MG9 Corner (flat)",
-      "MG9 Curved",
-      "MG9 Triangle",
+      "MG9 Curved RU",
+      "MG9 Triangle LU",
       "MT Corner",
     ]);
     // The catalogue's own name rides along for the tooltip, with MT named as
     // itself rather than as the MG9 the label was written for.
     expect(mix.find((entry) => entry.label === "MT Corner")?.detail).toBe("MT LED Corner Panel");
+    expect(mix.find((entry) => entry.label === "MG9 Triangle LU")?.detail).toBe("MG12 Triangle Panel \u2196 Left Up");
+  });
+
+  it("keeps each triangle orientation on its own line", () => {
+    // Four triangles facing four ways are four different one-way parts off
+    // four different shelves - exactly how Stock Calculations counts them.
+    const mix = panelTypeMix(
+      [0, 90, 180, 270].map((rotation) => ({
+        ...makeGridPanels(1, 1, "MG9")[0],
+        id: `t-${rotation}`,
+        panelType: "MG9" as const,
+        panelVariant: "TRIANGLE" as const,
+        rotation,
+      })),
+    );
+    expect(mix).toHaveLength(4);
+    expect(mix.map((entry) => entry.label).sort()).toEqual([
+      "MG9 Triangle LD",
+      "MG9 Triangle LU",
+      "MG9 Triangle RD",
+      "MG9 Triangle RU",
+    ]);
+    mix.forEach((entry) => expect(entry.count).toBe(1));
+  });
+
+  it("snaps a shaped panel spun off the quarter turns to the nearest part", () => {
+    // There is no half-way triangle on the shelf, so 45 degrees reads as the
+    // quarter turn it is nearest (see normalizeRotation) rather than being
+    // dropped off the list - the same bucket Stock Calculations will order.
+    const mix = panelTypeMix([
+      { ...makeGridPanels(1, 1, "MG9")[0], panelType: "MG9", panelVariant: "TRIANGLE", rotation: 45 },
+    ]);
+    expect(mix).toEqual([expect.objectContaining({ label: "MG9 Triangle LD", count: 1 })]);
+  });
+
+  it("leaves a plain or corner panel with no orientation on its name", () => {
+    const mix = panelTypeMix([
+      ...typed(makeGridPanels(2, 1, "MG9"), "MG9"),
+      ...typed(makeGridPanels(1, 1, "MG9"), "MG9", "CORNER"),
+    ]);
+    expect(mix.map((entry) => entry.label).sort()).toEqual(["MG9", "MG9 Corner"]);
   });
 
   it("counts whole posters, not the eight sections selecting one pulls in", () => {

@@ -115,6 +115,35 @@ describe("mirrorGridRef", () => {
     expect(gridRefLabel(mirrorGridRef({ from: 2, to: 3 }, 4))).toBe("2 & 3");
     expect(mirrorGridRef(undefined, 4)).toBeUndefined();
   });
+
+  // Every reference number the app prints is read from the FRONT of the wall:
+  // the panel labels, the PDF's chain tables, the test pattern and the hover
+  // readout. These pin the one relationship they all depend on - column N
+  // counted from the front sits (total - N) modules along the layout's own
+  // left-to-right geometry - so the number on a panel and the position quoted
+  // for it can never drift apart.
+  it("puts front column 1 at the far end of the layout's own geometry", () => {
+    const panels = [at(0, 0), at(500, 0), at(1000, 0), at(1500, 0)];
+    const { refs, cols } = panelGridRefs(panels, (p) => ({ x: p.x, y: p.y, w: 500, h: 500 }));
+    expect(cols).toBe(4);
+    const frontCol = (p: PanelRecord) => gridRefLabel(mirrorGridRef(refs.get(p.id)?.cols, cols));
+    // Left-to-right in the layout's own space counts DOWN from the front.
+    expect(panels.map(frontCol)).toEqual(["4", "3", "2", "1"]);
+    // ...and the front-referenced x offset of each panel agrees with it: the
+    // panel called "1" is at front x 0, which is the far end in this space.
+    const frontX = (p: PanelRecord) => 4 * 500 - p.x - 500;
+    expect(frontX(panels[3])).toBe(0);
+    expect(frontX(panels[0])).toBe(1500);
+    panels.forEach((p) => {
+      expect({ col: frontCol(p), x: frontX(p) }).toEqual({ col: frontCol(p), x: (Number(frontCol(p)) - 1) * 500 });
+    });
+  });
+
+  it("keeps rows alone - flipping a wall left to right moves nothing up or down", () => {
+    const panels = [at(0, 0), at(0, 500), at(0, 1000)];
+    const { refs } = panelGridRefs(panels, (p) => ({ x: p.x, y: p.y, w: 500, h: 500 }));
+    expect(panels.map((p) => gridRefLabel(refs.get(p.id)?.rows))).toEqual(["1", "2", "3"]);
+  });
 });
 
 // ---------------------------------------------------------------------------

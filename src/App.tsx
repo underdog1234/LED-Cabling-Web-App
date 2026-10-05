@@ -12,6 +12,7 @@ import {
   bandPanelsByColumn,
   computeAnchorSnapDelta,
   gridRefLabel,
+  mirrorGridRef,
   panelFramePoint,
   panelGridRefs,
   panelLabelAnchor,
@@ -84,7 +85,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.62.0";
+const APP_VERSION = "0.64.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -397,10 +398,20 @@ const SHAPE_ORIENTATIONS = {
   RD: { key: "RD", icon: "↘", label: "Right Down" },
 } as const;
 type ShapeOrientationKey = keyof typeof SHAPE_ORIENTATIONS;
-// Right-angle corner after clockwise rotation -> orientation bucket.
-// Base shapes (rotation 0): triangle corner bottom-left (LD); sector corner bottom-right (RD).
-const TRIANGLE_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "LD", 90: "LU", 180: "RU", 270: "RD" };
-const SECTOR_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "RD", 90: "LD", 180: "LU", 270: "RU" };
+// Which physical part a rotation calls for, as the shelf names it. Read from
+// the FRONT of the wall, which is the side you are standing on when you build
+// it.
+//
+// Left/Right is the corner the right angle is drawn in. Up/Down is the
+// SHELF's own vertical sense, which runs the opposite way to the drawn corner:
+// a rotation-0 triangle draws its right angle at the bottom and is the part
+// named "Up". That is not a slip - it is how the parts are labelled, confirmed
+// by the person who picks them, and the label has to name the part somebody
+// pulls rather than describe the picture. Do not "correct" these back to the
+// drawn corner; the stock list, the panel labels and the pull sheet all go
+// through here, so flipping them silently orders the wrong one-way part.
+const TRIANGLE_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "LU", 90: "LD", 180: "RD", 270: "RU" };
+const SECTOR_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "RU", 90: "LU", 180: "LD", 270: "RD" };
 // Per-orientation stock on the shelf (matches the layout tool's inventory).
 const SHAPED_STOCK_PER_ORIENTATION = { TRIANGLE: 5, CURVED: 5 } as const;
 
@@ -587,6 +598,10 @@ const buildTransferPanels = (
 
 type SignalPortStat = {
   panels: number;
+  /** Pixels actually carried, each panel counted at its OWN resolution. */
+  pixels: number;
+  /** Those pixels as a percentage of the 650,000 a port can drive. */
+  utilisation: number;
   path: Cell[];
   firstKey: string | null;
   lastKey: string | null;
@@ -1370,6 +1385,12 @@ export type PanelMixEntry = {
  * Posters are counted as COMPLETE posters rather than sections: selecting one
  * pulls in all eight of its sections (see getSelectedIds), and reporting that
  * as "8 LED Poster" would be a count of something nobody stocks.
+ *
+ * Shaped panels are split by ORIENTATION as well - "MG9 Triangle LD" rather
+ * than "MG9 Triangle" - because each orientation is its own one-way physical
+ * part off its own shelf, which is how Stock Calculations counts them too. A
+ * selection of four triangles facing four ways is four different parts, and
+ * one line saying "4" would be the wrong pull every time.
  */
 export const panelTypeMix = (cells: Cell[]): PanelMixEntry[] => {
   const byKey = new Map<string, PanelMixEntry>();
@@ -1400,10 +1421,17 @@ export const panelTypeMix = (cells: Cell[]): PanelMixEntry[] => {
     }
     const variant = variantForType(type, cell.panelVariant) as PanelVariantKey;
     const short = PANEL_VARIANT_SHORT[variant];
+    // A shaped panel at an unreadable rotation (hand-edited, or spun to an odd
+    // angle) has no orientation bucket - it still counts, under the shape's
+    // own name, rather than being dropped or guessed into one.
+    const orientation = getShapeOrientation(variant, cell.rotation);
+    const suffix = short ? ` ${short}${orientation ? ` ${orientation}` : ""}` : "";
     const entry = entryFor(
-      `${type}:${variant}`,
-      short ? `${typeName} ${short}` : typeName,
-      variantLabelFor(type, variant),
+      `${type}:${variant}:${orientation ?? ""}`,
+      `${typeName}${suffix}`,
+      orientation
+        ? `${variantLabelFor(type, variant)} ${SHAPE_ORIENTATIONS[orientation].icon} ${SHAPE_ORIENTATIONS[orientation].label}`
+        : variantLabelFor(type, variant),
     );
     entry.count += 1;
     if (cell.isRemoved) entry.removed += 1;
@@ -3021,9 +3049,13 @@ export default function App() {
   // person reads off the drawing - and on a wall with panels half a module
   // out, the two are not the same thing (see panelGridRefs).
   const gridRefs = useMemo(() => panelGridRefs(activePanels, cellRect), [activePanels]);
+  // "R2 C37" for the PDF's signal/power chain tables. Front-referenced like
+  // every other reference number (see panelColLabel) - naming a chain's first
+  // panel by a column the layout page does not print would send somebody to
+  // the wrong end of the wall.
   const panelRefLabel = (cell: Cell) => {
     const ref = gridRefs.refs.get(cell.id);
-    return `R${gridRefLabel(ref?.rows)} C${gridRefLabel(ref?.cols)}`;
+    return `R${gridRefLabel(ref?.rows)} C${gridRefLabel(mirrorGridRef(ref?.cols, gridRefs.cols))}`;
   };
   const panelRefLabelById = (id: string | null | undefined) => {
     const cell = id ? findCellById(grid, id) : null;
@@ -3213,18 +3245,29 @@ export default function App() {
 
   const signalPortStats = useMemo(() => {
     const stats: Record<number, SignalPortStat> = Object.fromEntries(
-      signalPorts.map((port) => [port.id, { panels: 0, path: [], firstKey: null, lastKey: null }]),
+      signalPorts.map((port) => [port.id, { panels: 0, pixels: 0, utilisation: 0, path: [], firstKey: null, lastKey: null }]),
     );
 
     for (const cell of scopedGrid) {
       if (!isActiveCell(cell)) continue;
       if (!cell.assignedPort || !stats[cell.assignedPort]) continue;
+      const spec = PANEL_TYPES[cellPanelType(cell)];
       stats[cell.assignedPort].panels += 1;
+      stats[cell.assignedPort].pixels += spec.pixW * spec.pixH;
       stats[cell.assignedPort].path.push(cell);
     }
 
     signalPorts.forEach((port) => {
       const stat = stats[port.id];
+      // How full the port really is: its pixels against the 650,000 a port can
+      // drive. Deliberately NOT a count against the Panels per Signal Port box
+      // - that is a planning limit somebody typed in, so dropping it to 10
+      // used to paint a half-empty port red, and raising it painted a full one
+      // green. This is the port's own capacity, the same way the power tiles
+      // read amps against the 16A outlet rather than the panels-per-outlet
+      // box. It also counts a mixed port correctly: an MT panel is 16,384px
+      // against an MG9's 28,224, which no panel count can tell apart.
+      stat.utilisation = MAX_PIXELS_PER_PORT > 0 ? (stat.pixels / MAX_PIXELS_PER_PORT) * 100 : 0;
       stat.path.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
       const first = stat.path[0];
       const last = stat.path[stat.path.length - 1];
@@ -7312,21 +7355,44 @@ const exportJson = () => {
   // (this workspace's own Front/Back toggle doesn't flip these reference
   // numbers). A panel that straddles two rows reads as both of them
   // ("3 & 4") rather than being given a row of its own - see panelGridRefs.
+  // Row and column references, ALWAYS read from the front of the wall - the
+  // side you stand on to build it - whichever way the view happens to be
+  // facing. Columns are therefore mirrored out of the layout's own (back-view)
+  // geometry; rows need nothing, since flipping the wall left-to-right does
+  // not move a panel up or down.
+  //
+  // This is what the test pattern has always printed (see drawTestPattern's
+  // colLabel), so the number chalked on a panel, the number in the report and
+  // the number lit up on the wall are now the same number. They were not
+  // before: the workspace and the PDF counted columns from the back, so panel
+  // "1" here was panel "37" on the pattern.
   const panelRowLabel = (cell: Cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.rows);
-  const panelColLabel = (cell: Cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.cols);
-  // Where a panel sits measured from the TOP-LEFT CORNER OF THE WHOLE LAYOUT:
-  // its offset in mm, and the same offset in content pixels (each panel type
-  // has its own pitch, so the pixel figure uses that panel's own mm->px ratio -
-  // finalCanvasPositionOf, with the wall's own bounding box as the origin).
-  // Read off the layout's true, unmirrored geometry like the row/column
-  // reference numbers, so the Front/Back view toggle never renumbers a panel.
+  const panelColLabel = (cell: Cell) => gridRefLabel(mirrorGridRef(gridRefs.refs.get(cell.id)?.cols, gridRefs.cols));
+  // Where a panel sits measured from the TOP-LEFT CORNER OF THE WHOLE LAYOUT
+  // AS SEEN FROM THE FRONT: its offset in mm, and the same offset in content
+  // pixels (each panel type has its own pitch, so the pixel figure uses that
+  // panel's own mm->px ratio - finalCanvasPositionOf, with the wall's own
+  // bounding box as the origin).
+  //
+  // Mirrored, like the row/column references and like the test pattern, which
+  // is the whole point of the figure: it answers "which pixel of my content
+  // lands on this panel", and content is authored for the front. Read off the
+  // back it named the mirror-image pixel - the far end of the canvas - which
+  // is the one place a content op must not be sent. Fixed whichever way the
+  // view is facing, so the Front/Back toggle never renumbers a panel.
   const panelLayoutPosition = (cell: Cell) => {
     const rect = cellRect(cell);
+    const spec = PANEL_TYPES[cellPanelType(cell)];
     const px = finalCanvasPositionOf(cell, wallBBox, 0, 0);
+    // cellRect has already swapped the footprint for a quarter turn, so the
+    // panel's pixel width has to swap with it - otherwise a rotated panel
+    // mirrors about the wrong edge and lands a pixel block off.
+    const turned = Math.abs(rect.w - spec.w * 1000) > 1;
+    const pixW = turned ? spec.pixH : spec.pixW;
     return {
-      xMm: Math.round(rect.x - wallBBox.x),
+      xMm: Math.round(wallBBox.w - (rect.x - wallBBox.x) - rect.w),
       yMm: Math.round(rect.y - wallBBox.y),
-      xPx: px.x,
+      xPx: Math.max(0, wallPixelW - px.x - pixW),
       yPx: px.y,
     };
   };
@@ -8740,12 +8806,15 @@ const exportJson = () => {
         <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker collapsible>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Signal Patching</CardTitle>
-            <div className="mt-1 text-xs text-slate-300">Manual assignment follows the current Panels per Signal Port maximum.</div>
+            <div className="mt-1 text-xs text-slate-300">
+              Manual assignment follows the current Panels per Signal Port maximum; the bars show each port against its own
+              650,000px capacity.
+            </div>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-2 md:grid-cols-5 xl:grid-cols-10">
             {signalPorts.map((port) => {
               const stat = signalPortStats[port.id];
-              const loadPercent = safePanelsPerSignalPort > 0 ? (stat.panels / safePanelsPerSignalPort) * 100 : 0;
+              const loadPercent = stat.utilisation;
               const indicator = getStatusColor(loadPercent);
               // Reserved for the backup signal loop (the second half of the
               // port range, only when the loop is enabled) - not selectable
@@ -8777,6 +8846,10 @@ const exportJson = () => {
                   {isBackupPort ? (
                     <div className="text-[10px] text-slate-300">{`Backup for S${port.id - primarySignalPortCount}`}</div>
                   ) : null}
+                  {/* The figure behind the bar, the way the power tiles print
+                      their W / A - so the bar can be checked rather than taken
+                      on trust. */}
+                  <div className="mt-1 text-[11px]">{`${formatNumber(stat.pixels)} px`}</div>
                   <div className="mt-2 h-2 rounded border border-white/30 bg-black/30">
                     <div style={{ width: `${Math.min(loadPercent, 100)}%`, background: indicator, height: "100%" }} />
                   </div>

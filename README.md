@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.62.0`
+Version `0.64.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -26,7 +26,7 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. The **MP4 is written to fixed delivery settings** - constant frame rate, High profile at a level the wall actually fits, half-second keyframes, no B-frames, Rec.709 limited range, exactly one loop long - and the download dialog lists them, with the frame rate and bitrate editable to match your show. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
 - **Connectors are counted from the edges panels actually share** - one row per connector, per shared edge, with exposed edges adding nothing. Shape panels, corner panels and flat-laid corner panels each pull their own part, and a rotated panel's connectors move with its edges
 - An **MG9 Corner panel can be laid in flat**: the same part off the same shelf, drawn without the corner hatch, needing the flat connector instead of the corner one
-- Shaped panels (`MG12` triangle, `MG13` quarter circle) print the orientation code of the part they actually are - `LU` / `LD` / `RU` / `RD`, read from the front - so the drawing names the same stock line Stock Calculations counts
+- Shaped panels (`MG12` triangle, `MG13` quarter circle) print the orientation code of the part they actually are - `LU` / `LD` / `RU` / `RD`, read from the front - so the drawing names the same stock line Stock Calculations counts. Left/Right is the corner the right angle is drawn in; Up/Down is the shelf's own vertical sense, which runs the opposite way (see `TRIANGLE_ORIENTATION`)
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
@@ -75,13 +75,93 @@ command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
 
-## Recent Changes In v0.62.0
+## Recent Changes In v0.64.0
 
 **A standalone Test Pattern Generator**
 
 The planner's Output Canvas and Moving Test Pattern, opened up into their own
 page at `generator.html` for any output - no LED panels needed. See
 [Test Pattern Generator](#test-pattern-generator).
+
+## Recent Changes In v0.63.0
+
+**Every reference number is read from the front**
+
+Row and column numbers were counted off the layout's own geometry, which is
+the wall seen from the BACK. The test pattern already counted from the front,
+so the panel the workspace called `C1` lit up as `37` on the wall - the two
+numbers a crew actually compares were the two that disagreed.
+
+- The **↓ row → column** labels, the PDF's chain tables (`R2 C37`) and the test
+  pattern now all count columns **from the front**, the side you stand on to
+  build the wall. One panel, one number, wherever you read it
+- **Rows are untouched.** Flipping a wall left to right moves nothing up or
+  down
+- The number is fixed to the panel, so the Front/Back view toggle still never
+  renumbers anything - it just changes which end you are looking at
+
+**The hover readout is front-referenced too**
+
+Hovering a panel gives its offset from the top-left of the layout **as seen
+from the front**, in mm and in content pixels. That is the whole point of the
+figure: it answers "which pixel of my content lands on this panel", and content
+is authored for the front. Read off the back it named the mirror-image pixel -
+the far end of the canvas - which is the one place a content op must not be
+sent.
+
+The front-left panel one row down now reads exactly what it should:
+
+```
+X 0 mm · 0 px
+Y 500 mm · 168 px
+from layout top-left
+```
+
+and the column number on that panel is `1`, so the label and the position can
+no longer tell you different things.
+
+## Recent Changes In v0.62.0
+
+**Port bars show the port's own capacity, not your planning limit**
+
+A signal port's load bar was drawn against the **Panels per Signal Port** box.
+Typing a smaller number there painted a half-empty port red, and a bigger one
+painted a full port green - the bar moved when nothing about the wall had.
+
+- Each signal port now reads its **pixels against the 650,000 a port can
+  drive**, exactly the way the power tiles already read amps against the 16A
+  outlet. The px figure is printed under the panel count, so the bar can be
+  checked rather than taken on trust
+- It also counts a **mixed port** correctly: an MT panel is 16,384px against an
+  MG9's 28,224, which no panel count can tell apart
+- The **Panels per Signal Port** and **Panels per Power Outlet** boxes still do
+  what they always did - they cap manual and auto patching. They just no longer
+  decide what "full" looks like
+- Power needed no change: its tiles and the phase bars were already drawn
+  against the outlet and distro limits
+
+**Shaped panel orientation codes**
+
+`LU` / `LD` / `RU` / `RD` are read from the **front** of the wall. Left/Right is
+the corner the right angle is drawn in; **Up/Down follows the shelf's own
+vertical sense**, which runs the opposite way - a rotation-0 triangle draws its
+right angle at the bottom and is the part named `LU`. The labels, the stock
+lines and the pull sheet all go through one table, so they cannot disagree.
+
+| Rotation | Triangle | Quarter circle |
+| --- | --- | --- |
+| 0 | `LU` | `RU` |
+| 90 | `LD` | `LU` |
+| 180 | `RD` | `LD` |
+| 270 | `RU` | `RD` |
+
+**Selections name the exact shaped part**
+
+The selection chips split shaped panels by orientation - `2 x MG9 Triangle LU`,
+`1 x MG9 Curved RD` - because each orientation is its own one-way part off its
+own shelf, which is how Stock Calculations counts them. Four triangles facing
+four ways are four different parts, and one line saying "4" was the wrong pull
+every time.
 
 ## Recent Changes In v0.61.0
 
