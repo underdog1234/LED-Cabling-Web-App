@@ -12,6 +12,7 @@ import {
   bandPanelsByColumn,
   computeAnchorSnapDelta,
   gridRefLabel,
+  mirrorGridRef,
   panelFramePoint,
   panelGridRefs,
   panelLabelAnchor,
@@ -84,7 +85,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.62.0";
+const APP_VERSION = "0.63.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -3048,9 +3049,13 @@ export default function App() {
   // person reads off the drawing - and on a wall with panels half a module
   // out, the two are not the same thing (see panelGridRefs).
   const gridRefs = useMemo(() => panelGridRefs(activePanels, cellRect), [activePanels]);
+  // "R2 C37" for the PDF's signal/power chain tables. Front-referenced like
+  // every other reference number (see panelColLabel) - naming a chain's first
+  // panel by a column the layout page does not print would send somebody to
+  // the wrong end of the wall.
   const panelRefLabel = (cell: Cell) => {
     const ref = gridRefs.refs.get(cell.id);
-    return `R${gridRefLabel(ref?.rows)} C${gridRefLabel(ref?.cols)}`;
+    return `R${gridRefLabel(ref?.rows)} C${gridRefLabel(mirrorGridRef(ref?.cols, gridRefs.cols))}`;
   };
   const panelRefLabelById = (id: string | null | undefined) => {
     const cell = id ? findCellById(grid, id) : null;
@@ -7350,21 +7355,44 @@ const exportJson = () => {
   // (this workspace's own Front/Back toggle doesn't flip these reference
   // numbers). A panel that straddles two rows reads as both of them
   // ("3 & 4") rather than being given a row of its own - see panelGridRefs.
+  // Row and column references, ALWAYS read from the front of the wall - the
+  // side you stand on to build it - whichever way the view happens to be
+  // facing. Columns are therefore mirrored out of the layout's own (back-view)
+  // geometry; rows need nothing, since flipping the wall left-to-right does
+  // not move a panel up or down.
+  //
+  // This is what the test pattern has always printed (see drawTestPattern's
+  // colLabel), so the number chalked on a panel, the number in the report and
+  // the number lit up on the wall are now the same number. They were not
+  // before: the workspace and the PDF counted columns from the back, so panel
+  // "1" here was panel "37" on the pattern.
   const panelRowLabel = (cell: Cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.rows);
-  const panelColLabel = (cell: Cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.cols);
-  // Where a panel sits measured from the TOP-LEFT CORNER OF THE WHOLE LAYOUT:
-  // its offset in mm, and the same offset in content pixels (each panel type
-  // has its own pitch, so the pixel figure uses that panel's own mm->px ratio -
-  // finalCanvasPositionOf, with the wall's own bounding box as the origin).
-  // Read off the layout's true, unmirrored geometry like the row/column
-  // reference numbers, so the Front/Back view toggle never renumbers a panel.
+  const panelColLabel = (cell: Cell) => gridRefLabel(mirrorGridRef(gridRefs.refs.get(cell.id)?.cols, gridRefs.cols));
+  // Where a panel sits measured from the TOP-LEFT CORNER OF THE WHOLE LAYOUT
+  // AS SEEN FROM THE FRONT: its offset in mm, and the same offset in content
+  // pixels (each panel type has its own pitch, so the pixel figure uses that
+  // panel's own mm->px ratio - finalCanvasPositionOf, with the wall's own
+  // bounding box as the origin).
+  //
+  // Mirrored, like the row/column references and like the test pattern, which
+  // is the whole point of the figure: it answers "which pixel of my content
+  // lands on this panel", and content is authored for the front. Read off the
+  // back it named the mirror-image pixel - the far end of the canvas - which
+  // is the one place a content op must not be sent. Fixed whichever way the
+  // view is facing, so the Front/Back toggle never renumbers a panel.
   const panelLayoutPosition = (cell: Cell) => {
     const rect = cellRect(cell);
+    const spec = PANEL_TYPES[cellPanelType(cell)];
     const px = finalCanvasPositionOf(cell, wallBBox, 0, 0);
+    // cellRect has already swapped the footprint for a quarter turn, so the
+    // panel's pixel width has to swap with it - otherwise a rotated panel
+    // mirrors about the wrong edge and lands a pixel block off.
+    const turned = Math.abs(rect.w - spec.w * 1000) > 1;
+    const pixW = turned ? spec.pixH : spec.pixW;
     return {
-      xMm: Math.round(rect.x - wallBBox.x),
+      xMm: Math.round(wallBBox.w - (rect.x - wallBBox.x) - rect.w),
       yMm: Math.round(rect.y - wallBBox.y),
-      xPx: px.x,
+      xPx: Math.max(0, wallPixelW - px.x - pixW),
       yPx: px.y,
     };
   };

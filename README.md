@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.62.0`
+Version `0.63.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -72,6 +72,43 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.63.0
+
+**Every reference number is read from the front**
+
+Row and column numbers were counted off the layout's own geometry, which is
+the wall seen from the BACK. The test pattern already counted from the front,
+so the panel the workspace called `C1` lit up as `37` on the wall - the two
+numbers a crew actually compares were the two that disagreed.
+
+- The **↓ row → column** labels, the PDF's chain tables (`R2 C37`) and the test
+  pattern now all count columns **from the front**, the side you stand on to
+  build the wall. One panel, one number, wherever you read it
+- **Rows are untouched.** Flipping a wall left to right moves nothing up or
+  down
+- The number is fixed to the panel, so the Front/Back view toggle still never
+  renumbers anything - it just changes which end you are looking at
+
+**The hover readout is front-referenced too**
+
+Hovering a panel gives its offset from the top-left of the layout **as seen
+from the front**, in mm and in content pixels. That is the whole point of the
+figure: it answers "which pixel of my content lands on this panel", and content
+is authored for the front. Read off the back it named the mirror-image pixel -
+the far end of the canvas - which is the one place a content op must not be
+sent.
+
+The front-left panel one row down now reads exactly what it should:
+
+```
+X 0 mm · 0 px
+Y 500 mm · 168 px
+from layout top-left
+```
+
+and the column number on that panel is `1`, so the label and the position can
+no longer tell you different things.
 
 ## Recent Changes In v0.62.0
 
