@@ -19,7 +19,26 @@ export type OverlaySettings = {
   label: boolean;
   resolution: boolean;
   crosshair: boolean;
+  /** Analogue clock with a seconds hand, showing the time of day. */
+  clock: boolean;
 };
+
+export type MotionDirection = "none" | "left" | "right" | "up" | "down" | "diagonal";
+
+/** Scrolls the finished pattern across the screen, wrapping round, a whole number of times per loop. */
+export type MotionSettings = { direction: MotionDirection; passes: number };
+
+export const MOTION_DIRECTIONS: Array<{ value: MotionDirection; label: string }> = [
+  { value: "none", label: "Still" },
+  { value: "left", label: "Scroll left" },
+  { value: "right", label: "Scroll right" },
+  { value: "up", label: "Scroll up" },
+  { value: "down", label: "Scroll down" },
+  { value: "diagonal", label: "Scroll diagonally" },
+];
+
+/** Auto cycle: every screen steps through the whole pattern list on its own. */
+export type AutoCycleSettings = { enabled: boolean; seconds: number; stagger: boolean };
 
 /** Resolution derived from an LED panel grid - kept on the screen so the LED pattern can draw the real panel grid. */
 export type LedGrid = {
@@ -58,6 +77,7 @@ export type SubScreen = {
   /** Per-pattern settings, keyed by pattern id, so switching back restores what was set. */
   settings: Record<string, PatternSettings>;
   overlays: OverlaySettings;
+  motion: MotionSettings;
   color: string;
   locked: boolean;
   visible: boolean;
@@ -111,6 +131,7 @@ export type GeneratorConfig = {
   /** One loop of every animated pattern, in seconds. Videos are exactly this long. */
   loopSeconds: number;
   playlist: PlaylistStep[];
+  autoCycle: AutoCycleSettings;
   processor: ProcessorSettings;
 };
 
@@ -201,7 +222,11 @@ export const resizeWithAspect = (
   return edited === "w" ? { w: v, h: clampDimension(v / ratio) } : { w: clampDimension(v * ratio), h: v };
 };
 
-export const defaultOverlays = (): OverlaySettings => ({ border: true, label: true, resolution: true, crosshair: false });
+export const defaultOverlays = (): OverlaySettings => ({ border: true, label: true, resolution: true, crosshair: false, clock: false });
+
+export const defaultMotion = (): MotionSettings => ({ direction: "none", passes: 1 });
+
+export const defaultAutoCycle = (): AutoCycleSettings => ({ enabled: false, seconds: 5, stagger: false });
 
 export const makeScreen = (index: number, partial: Partial<SubScreen> = {}): SubScreen => ({
   id: newId(),
@@ -213,6 +238,7 @@ export const makeScreen = (index: number, partial: Partial<SubScreen> = {}): Sub
   pattern: "info",
   settings: {},
   overlays: defaultOverlays(),
+  motion: defaultMotion(),
   color: SCREEN_COLORS[index % SCREEN_COLORS.length],
   locked: false,
   visible: true,
@@ -250,6 +276,7 @@ export const defaultConfig = (): GeneratorConfig => ({
   nudge: { step: 1, shiftStep: 10 },
   loopSeconds: 10,
   playlist: [],
+  autoCycle: defaultAutoCycle(),
   processor: { model: "", inputMode: "perEntry", wholeInput: null },
 });
 
@@ -608,6 +635,12 @@ const normalizeLedLayout = (raw: unknown): LedLayoutSource | null => {
   };
 };
 
+const normalizeMotion = (raw: unknown): MotionSettings => {
+  const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const direction = MOTION_DIRECTIONS.some((d) => d.value === r.direction) ? (r.direction as MotionDirection) : "none";
+  return { direction, passes: Math.min(100, Math.max(1, Math.round(num(r.passes, 1)))) };
+};
+
 export const normalizeScreen = (raw: unknown, index: number): SubScreen => {
   const r = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const settings: Record<string, PatternSettings> = {};
@@ -632,7 +665,9 @@ export const normalizeScreen = (raw: unknown, index: number): SubScreen => {
       label: bool(ov.label, d.label),
       resolution: bool(ov.resolution, d.resolution),
       crosshair: bool(ov.crosshair, d.crosshair),
+      clock: bool(ov.clock, d.clock),
     },
+    motion: normalizeMotion(r.motion),
     color: color(r.color, SCREEN_COLORS[index % SCREEN_COLORS.length]),
     locked: bool(r.locked, false),
     visible: bool(r.visible, true),
@@ -703,6 +738,11 @@ export const normalizeConfig = (raw: unknown): GeneratorConfig => {
     nudge: { step: clampDimension(num(nudge.step, 1)), shiftStep: clampDimension(num(nudge.shiftStep, 10)) },
     loopSeconds: Math.min(600, Math.max(1, num(r.loopSeconds, base.loopSeconds))),
     playlist,
+    autoCycle: (() => {
+      const a = (r.autoCycle && typeof r.autoCycle === "object" ? r.autoCycle : {}) as Record<string, unknown>;
+      const d = defaultAutoCycle();
+      return { enabled: bool(a.enabled, d.enabled), seconds: Math.min(3600, Math.max(1, num(a.seconds, d.seconds))), stagger: bool(a.stagger, d.stagger) };
+    })(),
     processor: {
       model: proc.model === "VX1000_PRO" || proc.model === "VX2000_PRO" ? proc.model : "",
       inputMode: proc.inputMode === "whole" ? "whole" : "perEntry",
@@ -763,6 +803,57 @@ export const applyPlaylistStep = (config: GeneratorConfig, step: PlaylistStep | 
       const a = step.assignments[s.id];
       if (!a) return s;
       return { ...s, pattern: a.pattern, settings: { ...s.settings, [a.pattern]: { ...(s.settings[a.pattern] ?? {}), ...a.settings } } };
+    }),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Motion and auto cycle. Pure, so the editor, the output window and an export
+// all agree on where a pattern is at any moment.
+// ---------------------------------------------------------------------------
+
+/**
+ * How far the finished pattern has scrolled at `progress` (0..1 through the
+ * loop), in whole pixels, always within 0..w-1 and 0..h-1. A whole number of
+ * passes per loop means the last frame leads straight back into the first.
+ */
+export const motionOffset = (motion: MotionSettings, progress: number, w: number, h: number): { dx: number; dy: number } => {
+  if (motion.direction === "none") return { dx: 0, dy: 0 };
+  const f = (((progress * Math.max(1, Math.round(motion.passes))) % 1) + 1) % 1;
+  const along = (size: number) => Math.round(f * size) % size;
+  switch (motion.direction) {
+    case "left":
+      return { dx: (w - along(w)) % w, dy: 0 };
+    case "right":
+      return { dx: along(w), dy: 0 };
+    case "up":
+      return { dx: 0, dy: (h - along(h)) % h };
+    case "down":
+      return { dx: 0, dy: along(h) };
+    default:
+      return { dx: along(w), dy: along(h) };
+  }
+};
+
+/**
+ * The pattern a screen shows `time` seconds in under auto cycle: every
+ * `seconds` it moves to the next one in `ids`. With `offset` (the screen's
+ * place in the list, when staggered) neighbouring screens show different
+ * patterns at once.
+ */
+export const autoCyclePatternAt = (ids: string[], time: number, seconds: number, offset = 0): string | null => {
+  if (!ids.length) return null;
+  const step = Math.floor(Math.max(0, time) / Math.max(1, seconds));
+  return ids[(((step + offset) % ids.length) + ids.length) % ids.length];
+};
+
+export const applyAutoCycle = (config: GeneratorConfig, ids: string[], time: number): GeneratorConfig => {
+  if (!config.autoCycle.enabled || !ids.length) return config;
+  return {
+    ...config,
+    screens: config.screens.map((s, i) => {
+      const pattern = autoCyclePatternAt(ids, time, config.autoCycle.seconds, config.autoCycle.stagger ? i : 0);
+      return pattern && pattern !== s.pattern ? { ...s, pattern } : s;
     }),
   };
 };

@@ -14,6 +14,7 @@
 
 import type { LedGrid, PatternSettings } from "./model";
 import { drawFaces } from "./faces";
+import { drawPhotoFaces } from "./photoFaces";
 
 export type ParamDef =
   | { key: string; label: string; type: "number"; min: number; max: number; step?: number; default: number }
@@ -32,6 +33,9 @@ export type PatternInfo = {
   canvas: { w: number; h: number };
 };
 
+/** A tone the pattern makes at `at` seconds into its loop. */
+export type Beep = { at: number; freq: number; duration: number; gain?: number };
+
 export type PatternDef = {
   id: string;
   name: string;
@@ -39,6 +43,8 @@ export type PatternDef = {
   animated: boolean;
   params: ParamDef[];
   draw: (ctx: CanvasRenderingContext2D, w: number, h: number, s: Required<PatternSettings>, info: PatternInfo) => void;
+  /** Sync tones, for patterns that have them. */
+  beeps?: (s: Required<PatternSettings>, loopSeconds: number) => Beep[];
 };
 
 // --- helpers ----------------------------------------------------------------
@@ -551,6 +557,128 @@ const drawTimecode: PatternDef["draw"] = (ctx, w, h, s, info) => {
   ctx.fillText(`Frame ${frame + 1} / ${Math.round(info.loopSeconds * fps)} @ ${fps} fps`, w / 2, h / 2 + minD * 0.09);
 };
 
+// --- AV sync ---------------------------------------------------------------------
+// Flash and beep together, every interval, for lining up sound with picture
+// (lip sync) through a camera, a processor or a whole show system. Between
+// flashes a sweep counts round the circle one segment per frame, and the
+// frame ruler underneath lights the frame offset from the flash: film the
+// screen with sound, find the frame where the beep lands, and the lit cell
+// reads the error in frames.
+
+const avSyncTiming = (s: Required<PatternSettings>, loopTime: number) => {
+  const fps = Math.max(1, Math.round(Number(s.fps)));
+  const interval = Math.max(1, Math.round(Number(s.interval)));
+  const perInterval = fps * interval;
+  const frame = Math.floor(loopTime * fps + 1e-6);
+  const inInterval = frame % perInterval;
+  const flashFrames = Math.max(1, Math.min(perInterval, Math.round(Number(s.flashFrames))));
+  // Offset from the nearest flash, in frames: negative before it, positive after.
+  const half = Math.floor(perInterval / 2);
+  const offset = ((inInterval + half) % perInterval) - half;
+  return { fps, interval, perInterval, frame, inInterval, flashFrames, offset, flash: inInterval < flashFrames };
+};
+
+const drawAvSync: PatternDef["draw"] = (ctx, w, h, s, info) => {
+  const t = avSyncTiming(s, info.loopTime);
+  const minD = Math.min(w, h);
+  const cx = w / 2;
+  const cy = h * 0.42;
+  const r = Math.min(minD * 0.3, w * 0.3, h * 0.3);
+  const accent = String(s.color);
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, w, h);
+
+  // Flash: the whole border and four corner blocks, plus the centre disc below.
+  const box = Math.round(minD * 0.1);
+  ctx.fillStyle = t.flash ? accent : "#1f1f1f";
+  [[0, 0], [w - box, 0], [0, h - box], [w - box, h - box]].forEach(([x, y]) => ctx.fillRect(x, y, box, box));
+  if (t.flash) pixelFrame(ctx, 0, 0, w, h, Math.max(4, Math.round(minD * 0.012)));
+
+  // Countdown ring: one segment per frame of the interval.
+  const segs = t.perInterval;
+  const ringW = Math.max(4, r * 0.16);
+  const gapA = segs > 60 ? 0 : (Math.PI * 2) / segs * 0.18;
+  for (let i = 0; i < segs; i += 1) {
+    const a0 = -Math.PI / 2 + (i / segs) * Math.PI * 2 + gapA / 2;
+    const a1 = -Math.PI / 2 + ((i + 1) / segs) * Math.PI * 2 - gapA / 2;
+    ctx.strokeStyle = i === t.inInterval ? "#ffffff" : i < t.inInterval ? "#52525b" : "#27272a";
+    ctx.lineWidth = ringW;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r - ringW / 2, a0, a1);
+    ctx.stroke();
+  }
+  // Second ticks round the outside.
+  ctx.fillStyle = "#a1a1aa";
+  for (let i = 0; i < t.interval; i += 1) {
+    const a = -Math.PI / 2 + (i / t.interval) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(a) * (r + ringW * 0.6), cy + Math.sin(a) * (r + ringW * 0.6), Math.max(2, ringW * 0.22), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Centre disc: white on the flash, otherwise the frame count.
+  const inner = r - ringW * 1.6;
+  ctx.fillStyle = t.flash ? accent : "#0a0a0a";
+  ctx.beginPath();
+  ctx.arc(cx, cy, inner, 0, Math.PI * 2);
+  ctx.fill();
+  if (!t.flash) {
+    const label = String(t.inInterval);
+    fitFont(ctx, "00", inner * 1.3, inner * 0.9);
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, cx, cy + inner * 0.04);
+  }
+
+  // Frame ruler: offset from the flash, -N .. +N frames.
+  const n = Math.max(2, Math.min(12, Math.floor(t.perInterval / 2) - 1));
+  const cells = n * 2 + 1;
+  const rulerW = Math.min(w * 0.9, cells * minD * 0.08);
+  const cw = rulerW / cells;
+  const ch = Math.max(10, Math.min(cw * 1.1, h * 0.09));
+  const rx = (w - rulerW) / 2;
+  const ry = Math.min(h - ch - minD * 0.12, cy + r + minD * 0.06);
+  const labelPx = Math.max(8, Math.floor(Math.min(cw * 0.42, ch * 0.5)));
+  ctx.font = `bold ${labelPx}px ${fontFamily}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < cells; i += 1) {
+    const d = i - n;
+    const lit = d === t.offset;
+    const x = rx + i * cw;
+    ctx.fillStyle = lit ? (d === 0 ? accent : "#f59e0b") : d === 0 ? "#3f3f46" : "#18181b";
+    ctx.fillRect(Math.round(x + 1), Math.round(ry), Math.round(cw - 2), Math.round(ch));
+    ctx.fillStyle = lit ? "#000000" : "#a1a1aa";
+    ctx.fillText(d > 0 ? `+${d}` : String(d), x + cw / 2, ry + ch / 2);
+  }
+  const small = Math.max(10, Math.round(minD * 0.03));
+  ctx.font = `bold ${small}px ${fontFamily}`;
+  ctx.fillStyle = "#a1a1aa";
+  ctx.fillText("frames from flash", w / 2, ry + ch + small * 0.9);
+
+  // Timecode and settings, top centre.
+  const tc = timecode(info.loopTime, t.fps);
+  fitFont(ctx, "00:00:00:00", w * 0.4, minD * 0.07);
+  ctx.font = ctx.font.replace(fontFamily, "'Courier New', monospace");
+  ctx.fillStyle = "#ffffff";
+  ctx.textBaseline = "top";
+  ctx.fillText(tc, w / 2, Math.round(minD * 0.03));
+  ctx.font = `bold ${small}px ${fontFamily}`;
+  ctx.fillStyle = "#71717a";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(`AV SYNC · ${t.fps} fps · flash + ${Number(s.beepFreq)} Hz beep every ${t.interval} s`, w / 2, h - Math.round(minD * 0.03));
+};
+
+const avSyncBeeps: NonNullable<PatternDef["beeps"]> = (s, loopSeconds) => {
+  if (!s.beep) return [];
+  const fps = Math.max(1, Math.round(Number(s.fps)));
+  const interval = Math.max(1, Math.round(Number(s.interval)));
+  const flashFrames = Math.max(1, Math.round(Number(s.flashFrames)));
+  const out: Beep[] = [];
+  for (let at = 0; at < loopSeconds - 1e-6; at += interval) out.push({ at, freq: Number(s.beepFreq), duration: flashFrames / fps });
+  return out;
+};
+
 // --- pixel structure --------------------------------------------------------
 
 const drawPixel: PatternDef["draw"] = (ctx, w, h, s) => {
@@ -693,6 +821,8 @@ const levelOptions = [
   { value: "100", label: "100%" },
 ];
 
+const fpsOptions = ["24", "25", "30", "48", "50", "60"].map((v) => ({ value: v, label: `${v} fps` }));
+
 export const LED_LAYOUT_PATTERN_ID = "led-layout";
 
 export const PATTERNS: PatternDef[] = [
@@ -767,8 +897,18 @@ export const PATTERNS: PatternDef[] = [
     { key: "background", label: "Background", type: "color", default: "#000000" },
   ], draw: drawMovingBar },
   { id: "timecode", name: "Timecode & Sync Flash", category: "Motion", animated: true, params: [
-    { key: "fps", label: "Frame rate", type: "select", options: ["24", "25", "30", "50", "60"].map((v) => ({ value: v, label: `${v} fps` })), default: "25" },
-  ], draw: drawTimecode },
+    { key: "fps", label: "Frame rate", type: "select", options: fpsOptions, default: "25" },
+    { key: "beep", label: "Beep with the flash", type: "boolean", default: true },
+    { key: "beepFreq", label: "Beep pitch (Hz)", type: "number", min: 100, max: 8000, default: 1000 },
+  ], draw: drawTimecode, beeps: (s) => (s.beep ? [{ at: 0, freq: Number(s.beepFreq), duration: 1 / Math.max(1, Math.round(Number(s.fps))) }] : []) },
+  { id: "av-sync", name: "AV Sync Flash and Beep", category: "Motion", animated: true, params: [
+    { key: "fps", label: "Frame rate", type: "select", options: fpsOptions, default: "25" },
+    { key: "interval", label: "Flash every (s)", type: "number", min: 1, max: 60, default: 1 },
+    { key: "flashFrames", label: "Flash length (frames)", type: "number", min: 1, max: 30, default: 2 },
+    { key: "beep", label: "Beep", type: "boolean", default: true },
+    { key: "beepFreq", label: "Beep pitch (Hz)", type: "number", min: 100, max: 8000, default: 1000 },
+    { key: "color", label: "Flash colour", type: "color", default: "#ffffff" },
+  ], draw: drawAvSync, beeps: avSyncBeeps },
   { id: "pixel", name: "Pixel Structure", category: "Geometry", animated: false, params: [
     { key: "mode", label: "Mode", type: "select", options: [
       { value: "vertical", label: "Vertical lines" }, { value: "horizontal", label: "Horizontal lines" }, { value: "checker", label: "Pixel checker" }, { value: "dots", label: "Dots" },
@@ -785,6 +925,21 @@ export const PATTERNS: PatternDef[] = [
     { key: "toneStrip", label: "Skin-tone strip", type: "boolean", default: true },
     { key: "animate", label: "Blink", type: "boolean", default: true },
   ], draw: drawFacesPattern },
+  { id: "photo-faces", name: "Photo Faces", category: "Reference", animated: true, params: [
+    { key: "rows", label: "Faces down", type: "number", min: 1, max: 20, default: 3 },
+    { key: "seed", label: "Variation", type: "number", min: 1, max: 999, default: 1 },
+    { key: "gap", label: "Gap (px)", type: "number", min: 0, max: 200, default: 0 },
+    { key: "shuffles", label: "New faces per loop (0 = never)", type: "number", min: 0, max: 20, default: 0 },
+    { key: "background", label: "Fill colour", type: "color", default: "#7a7a7a" },
+  ], draw: (ctx, w, h, s, info) =>
+    drawPhotoFaces(ctx, w, h, {
+      rows: Number(s.rows),
+      seed: Math.round(Number(s.seed)),
+      gap: Number(s.gap),
+      shuffles: Math.max(0, Math.round(Number(s.shuffles))),
+      background: String(s.background),
+      progress: info.progress,
+    }) },
   { id: "led-moving", name: "LED Moving Pattern", category: "LED", animated: true, params: [
     { key: "panelPxW", label: "Panel width (px)", type: "number", min: 4, max: 4096, default: 168 },
     { key: "panelPxH", label: "Panel height (px)", type: "number", min: 4, max: 4096, default: 168 },
@@ -798,6 +953,9 @@ export const PATTERNS: PatternDef[] = [
 ];
 
 export const PATTERN_BY_ID = new Map(PATTERNS.map((p) => [p.id, p]));
+
+/** What auto cycle steps through: everything that draws on its own (not the imported LED layout, not plain black). */
+export const AUTO_CYCLE_IDS = PATTERNS.filter((p) => p.id !== LED_LAYOUT_PATTERN_ID && p.id !== "blank").map((p) => p.id);
 
 export const patternName = (id: string): string => PATTERN_BY_ID.get(id)?.name ?? id;
 

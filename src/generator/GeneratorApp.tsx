@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ScreenPickerModal from "../testPattern/ScreenPickerModal";
 import { isMultiScreenLikely, openWindowOnScreen, requestScreenDetails } from "../testPattern/screenPlacement";
 import CanvasEditor from "./CanvasEditor";
-import { Check, SelectField, SmallButton, TextField } from "./controls";
+import { Check, NumField, SelectField, SmallButton, TextField } from "./controls";
 import ExportDialog from "./ExportDialog";
 import { importPlannerProject, looksLikePlannerProject } from "./ledImport";
 import {
@@ -58,6 +58,7 @@ import {
   type SavedConfig,
 } from "./storage";
 import { downloadBlob } from "./exporters";
+import { useSyncSound } from "./useSyncSound";
 
 const HISTORY_LIMIT = 100;
 
@@ -175,21 +176,34 @@ export default function GeneratorApp() {
     const t = Date.now();
     return { config: effectiveConfig(configRef.current, p, t).config, time: playbackTime(p, t) };
   });
-  // Effective config caches per (config, step) so the preview can skip identical frames.
-  const effCache = useRef<{ base: GeneratorConfig | null; step: number | null; result: GeneratorConfig | null }>({ base: null, step: null, result: null });
+  // Effective config caches per (config, playlist step, auto-cycle step) so the preview can skip identical frames.
+  const effCache = useRef<{ base: GeneratorConfig | null; step: string | null; result: GeneratorConfig | null }>({ base: null, step: null, result: null });
   frameSource.current = () => {
     const p = playbackRef.current;
     const t = Date.now();
     const eff = effectiveConfig(configRef.current, p, t);
     const c = effCache.current;
-    if (c.base !== configRef.current || c.step !== eff.stepIndex) {
+    const step = `${eff.stepIndex}|${eff.cycleStep}`;
+    if (c.base !== configRef.current || c.step !== step) {
       c.base = configRef.current;
-      c.step = eff.stepIndex;
+      c.step = step;
       c.result = eff.config;
     }
     return { config: c.result!, time: playbackTime(p, t) };
   };
 
+  const inlineOutputRef = useRef(inlineOutput);
+  inlineOutputRef.current = inlineOutput;
+  const sound = useSyncSound(
+    () => {
+      // The inline fullscreen output plays its own tones.
+      if (inlineOutputRef.current) return null;
+      const f = frameSource.current();
+      return { config: f.config, screens: f.config.screens, time: f.time, playing: playbackRef.current.playing };
+    },
+    "testPatternGenerator:sound:editor",
+    true,
+  );
   const currentTime = playbackTime(playback, now);
   const activeStep = effectiveConfig(config, playback, now).stepIndex;
 
@@ -488,6 +502,42 @@ export default function GeneratorApp() {
             <span className="font-mono text-xs text-slate-300">
               {(currentTime % config.loopSeconds).toFixed(1)}s / {config.loopSeconds}s loop
             </span>
+            <span className="mx-1 h-5 w-px bg-slate-700" />
+            <Check checked={sound.enabled} onChange={sound.setEnabled} title="Play the timecode and AV sync beeps through this computer, in step with the flashes">
+              🔊 Sync beeps
+            </Check>
+            {sound.enabled ? (
+              <>
+                <NumField
+                  className="w-20"
+                  value={sound.offsetMs}
+                  min={-1000}
+                  max={1000}
+                  title="Audio offset in milliseconds: positive delays the beep, to match a display that shows the picture late"
+                  onCommit={sound.setOffsetMs}
+                />
+                <span className="text-xs text-slate-400">ms</span>
+                {sound.blocked && sound.active ? <span className="text-xs text-amber-300">Click anywhere to allow sound</span> : null}
+              </>
+            ) : null}
+            <span className="mx-1 h-5 w-px bg-slate-700" />
+            <Check
+              checked={config.autoCycle.enabled}
+              onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, enabled: v } }))}
+              title="Step every screen through all the test patterns in turn (a running playlist takes over while it plays)"
+            >
+              Auto cycle all patterns
+            </Check>
+            {config.autoCycle.enabled ? (
+              <>
+                <span className="text-xs text-slate-400">every</span>
+                <NumField className="w-16" value={config.autoCycle.seconds} min={1} max={3600} onCommit={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, seconds: v } }))} />
+                <span className="text-xs text-slate-400">s</span>
+                <Check checked={config.autoCycle.stagger} onChange={(v) => update((c) => ({ ...c, autoCycle: { ...c.autoCycle, stagger: v } }))} title="Each screen starts one pattern further on, so they all show something different">
+                  Different per screen
+                </Check>
+              </>
+            ) : null}
             {playback.playlist.active && activeStep !== null ? (
               <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-xs text-emerald-200">Playlist: {config.playlist[activeStep]?.name}</span>
             ) : null}

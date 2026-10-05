@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.64.0`
+Version `0.65.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -74,6 +74,27 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.65.0
+
+**Test Pattern Generator: sound, movement, auto cycle, clock and photo faces**
+
+- **AV Sync Flash and Beep**: a flash and a beep together every second (or
+  every few), a countdown ring that steps one segment per frame, and a frame
+  ruler that lights the offset from the flash, for checking lip sync through a
+  camera or a show system. **Timecode & Sync Flash** now beeps with its flash too
+- **Sync beeps** play live in the editor and the output window (each with its
+  own on/off and an offset in milliseconds) and go into WebM and MP4 downloads
+  as the soundtrack; in MP4 they sit on the exact flash frames
+- **Movement** for every pattern: scroll left, right, up, down or diagonally,
+  a whole number of passes per loop, wrapping round so the loop stays seamless
+- **Auto cycle all patterns** steps every screen through the whole pattern
+  list every few seconds, all together or a different one per screen
+- **Clock** overlay: an analogue clock with a seconds hand and the time in
+  digits, in the top-right of the screen
+- **Photo Faces**: 24 portraits on grey, picked at random to fill the screen in
+  square cells (faces down, gap, variation and reshuffles are settable). Faces
+  are never stretched; what the cells leave over is filled with grey
 
 ## Recent Changes In v0.64.0
 
@@ -1264,11 +1285,20 @@ project and no panels: start from a resolution.
 **Patterns**: Screen ID & Resolution, SMPTE and EBU bars, colour checker
 patches, grid / crosshatch, circles with safe areas and aspect frames,
 checkerboard, greyscale steps, gradient ramps, solid fields, colour field
-cycle, moving bar, timecode with sync flash, pixel structure, zone plate,
-fictional faces (illustrations from a seed, across twelve skin tones, each
-labelled fictional), the LED Moving Pattern, and the planner's own layout
-pattern for imported screens. Animated patterns all loop exactly on the
-canvas's loop length.
+cycle, moving bar, timecode with sync flash and beep, AV sync flash and beep,
+pixel structure, zone plate, fictional faces (illustrations from a seed,
+across twelve skin tones, each labelled fictional), photo faces (24 portraits
+filling the screen in square cells, grey round the edge, never stretched), the
+LED Moving Pattern, and the planner's own layout pattern for imported screens.
+Animated patterns all loop exactly on the canvas's loop length. Any pattern
+can also scroll (left, right, up, down or diagonally, a whole number of passes
+per loop), and **Auto cycle all patterns** steps every screen through the list.
+Overlays: border, name, resolution, centre crosshair and an analogue clock.
+
+**Sound**: the timecode and AV sync patterns beep with their flashes. The
+editor and the output window each have a Sync beeps switch and an offset in
+milliseconds (the output window starts with it off; press S). Video downloads
+carry the beeps as their soundtrack - in MP4 on the exact flash frames.
 
 **Output and playback**
 

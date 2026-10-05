@@ -130,7 +130,7 @@ export const h264LevelFor = (width: number, height: number, fps: number): string
  * decides what MediaRecorder tags its WebM as, and getting this wrong shifts
  * every value in a test pattern - the one file where the numbers are the point.
  */
-export const buildMp4Args = (settings: Mp4EncodeSettings, sourceIsFullRange: boolean): string[] => {
+export const buildMp4Args = (settings: Mp4EncodeSettings, sourceIsFullRange: boolean, withAudio = false): string[] => {
   const gop = keyframeIntervalFor(settings.fps);
   const level = h264LevelFor(settings.width, settings.height, settings.fps);
   const target = `${Math.round(settings.targetMbps * 1000)}k`;
@@ -140,7 +140,10 @@ export const buildMp4Args = (settings: Mp4EncodeSettings, sourceIsFullRange: boo
   const bufsize = `${Math.round(settings.maxMbps * 1000)}k`;
   return [
     "-i", "in.webm",
-    "-an",
+    // The test pattern generator's sync tones come as a WAV written sample
+    // by sample, so they sit exactly on the frames they belong to rather
+    // than wherever the browser's recorder happened to put them.
+    ...(withAudio ? ["-i", "audio.wav", "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "192k"] : ["-an"]),
     // Exactly one loop, cut from a recording made longer on purpose.
     "-t", String(settings.loopSeconds),
     // Constant frame rate, whatever the recording managed: a wall big enough
@@ -178,8 +181,8 @@ export const buildMp4Args = (settings: Mp4EncodeSettings, sourceIsFullRange: boo
 };
 
 /**
- * Transcodes a recorded WebM Blob into an MP4 Blob (the test pattern video has
- * no audio track). `onProgress` receives 0..1 and is only called once encoding
+ * Transcodes a recorded WebM Blob into an MP4 Blob. The recording's own audio
+ * is never used; a soundtrack, when there is one, comes in as `audioWav`. `onProgress` receives 0..1 and is only called once encoding
  * itself starts - loading the ~30MB ffmpeg-core WASM happens first and isn't
  * reflected in it.
  */
@@ -187,6 +190,8 @@ export const encodeWebmToMp4 = async (
   webmBlob: Blob,
   settings: Mp4EncodeSettings,
   onProgress?: (ratio: number) => void,
+  /** Optional soundtrack (a WAV file) laid under the video from its first frame. */
+  audioWav?: Uint8Array,
 ): Promise<Blob> => {
   const { fetchFile } = await import("@ffmpeg/util");
   const ffmpeg = await getFFmpeg();
@@ -205,10 +210,11 @@ export const encodeWebmToMp4 = async (
   ffmpeg.on("progress", onProgressEvent);
   try {
     await ffmpeg.writeFile("in.webm", await fetchFile(webmBlob));
+    if (audioWav) await ffmpeg.writeFile("audio.wav", audioWav);
     // A first pass over the input alone, purely to read its stream line - it
     // decodes nothing, so it costs a moment rather than an encode.
     await ffmpeg.exec(["-i", "in.webm", "-t", "0", "-f", "null", "-"]).catch(() => 0);
-    const code = await ffmpeg.exec(buildMp4Args(settings, sourceIsFullRange));
+    const code = await ffmpeg.exec(buildMp4Args(settings, sourceIsFullRange, !!audioWav));
     if (code !== 0) throw new Error(`ffmpeg exited with code ${code}`);
     const data = await ffmpeg.readFile("out.mp4");
     // DOM lib types Blob's BlobPart as ArrayBufferView<ArrayBuffer> specifically,
@@ -219,5 +225,6 @@ export const encodeWebmToMp4 = async (
     ffmpeg.off("log", onLog);
     await ffmpeg.deleteFile("in.webm").catch(() => {});
     await ffmpeg.deleteFile("out.mp4").catch(() => {});
+    if (audioWav) await ffmpeg.deleteFile("audio.wav").catch(() => {});
   }
 };

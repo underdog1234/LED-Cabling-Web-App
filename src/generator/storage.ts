@@ -8,7 +8,8 @@
 // BroadcastChannel.
 // ---------------------------------------------------------------------------
 
-import { applyPlaylistStep, normalizeConfig, normalizePresets, playlistStepAt, type GeneratorConfig, type ResolutionPreset } from "./model";
+import { AUTO_CYCLE_IDS } from "./patterns";
+import { applyAutoCycle, applyPlaylistStep, normalizeConfig, normalizePresets, playlistStepAt, type GeneratorConfig, type ResolutionPreset } from "./model";
 
 const AUTOSAVE_KEY = "testPatternGenerator:config:v1";
 const SAVED_KEY = "testPatternGenerator:saved:v1";
@@ -97,10 +98,17 @@ export const openChannel = (): BroadcastChannel | null => {
   }
 };
 
-/** The config as it should be shown at `now`: the editor's own, or with the current playlist step laid over it. */
-export const effectiveConfig = (config: GeneratorConfig, playback: Playback, now = Date.now()): { config: GeneratorConfig; stepIndex: number | null } => {
-  if (!playback.playlist.active || !config.playlist.length) return { config, stepIndex: null };
-  const at = playlistStepAt(config.playlist, playbackTime(playback, now) - playback.playlist.startTime, playback.playlist.loop);
-  if (!at) return { config, stepIndex: null };
-  return { config: applyPlaylistStep(config, config.playlist[at.index]), stepIndex: at.index };
+/**
+ * The config as it should be shown at `now`: the editor's own, with the
+ * current playlist step laid over it, or failing that every screen's place in
+ * the auto cycle.
+ */
+export const effectiveConfig = (config: GeneratorConfig, playback: Playback, now = Date.now()): { config: GeneratorConfig; stepIndex: number | null; cycleStep: number | null } => {
+  const time = playbackTime(playback, now);
+  if (playback.playlist.active && config.playlist.length) {
+    const at = playlistStepAt(config.playlist, time - playback.playlist.startTime, playback.playlist.loop);
+    if (at) return { config: applyPlaylistStep(config, config.playlist[at.index]), stepIndex: at.index, cycleStep: null };
+  }
+  if (!config.autoCycle.enabled) return { config, stepIndex: null, cycleStep: null };
+  return { config: applyAutoCycle(config, AUTO_CYCLE_IDS, time), stepIndex: null, cycleStep: Math.floor(Math.max(0, time) / Math.max(1, config.autoCycle.seconds)) };
 };

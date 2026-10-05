@@ -5,6 +5,7 @@ import { PROCESSOR_MODEL_IDS, PROCESSOR_SPECS } from "../novastar/processorModel
 import { Check, ColorField, Label, NumField, Panel, SelectField, SmallButton, TextField } from "./controls";
 import {
   LED_PANEL_PRESETS,
+  MOTION_DIRECTIONS,
   RESOLUTION_PRESETS,
   aspectLabel,
   clampDimension,
@@ -13,6 +14,7 @@ import {
   type ArrangeMode,
   type GeneratorConfig,
   type LayerMove,
+  type MotionDirection,
   type PatternSettings,
   type PlaylistStep,
   type ResolutionPreset,
@@ -311,7 +313,23 @@ export function Inspector({
             </div>
           ))}
         </div>
-        {def.animated ? (
+        <div className="grid grid-cols-2 gap-2">
+          <SelectField label="Movement" value={screen.motion.direction} onChange={(v) => onPatch({ motion: { ...screen.motion, direction: v as MotionDirection } })}>
+            {MOTION_DIRECTIONS.map((d) => (
+              <option key={d.value} value={d.value}>{d.label}</option>
+            ))}
+          </SelectField>
+          <NumField
+            label="Passes per loop"
+            value={screen.motion.passes}
+            min={1}
+            max={100}
+            disabled={screen.motion.direction === "none"}
+            title="How many times the pattern scrolls all the way across in one loop"
+            onCommit={(v) => onPatch({ motion: { ...screen.motion, passes: v } })}
+          />
+        </div>
+        {def.animated || screen.motion.direction !== "none" ? (
           <NumField label="Animation offset (seconds)" value={screen.phase} integer={false} step={0.1} min={-3600} max={3600} onCommit={(v) => onPatch({ phase: v })} />
         ) : null}
         {selectionCount > 1 ? <SmallButton onClick={onApplyPatternToSelection}>Use this pattern and settings on all {selectionCount} selected</SmallButton> : null}
@@ -324,6 +342,7 @@ export function Inspector({
           <Check checked={screen.overlays.label} onChange={(v) => onPatch({ overlays: { ...screen.overlays, label: v } })}>Name label</Check>
           <Check checked={screen.overlays.resolution} onChange={(v) => onPatch({ overlays: { ...screen.overlays, resolution: v } })}>Resolution & position</Check>
           <Check checked={screen.overlays.crosshair} onChange={(v) => onPatch({ overlays: { ...screen.overlays, crosshair: v } })}>Centre crosshair</Check>
+          <Check checked={screen.overlays.clock} onChange={(v) => onPatch({ overlays: { ...screen.overlays, clock: v } })} title="Analogue clock with a seconds hand and the time in digits, top right">Clock</Check>
         </div>
       </div>
 
