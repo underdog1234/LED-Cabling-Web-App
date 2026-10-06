@@ -39,6 +39,7 @@ import SubScreenPanel from "./subScreens/SubScreenPanel";
 import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
 import { finalCanvasPositionOf, resolutionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
+import { PNG_EXPORT_DPI, withPngDpi } from "./export/pngDpi";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
 import { type TestPatternLayout, type TestPatternProject, LOOP_SECONDS, computeTestPatternLayout, drawSurfaceBoundaries, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
 import { MP4_PROFILE, MP4_RECORD_MARGIN_SECONDS, h264LevelFor, keyframeIntervalFor } from "./testPattern/mp4Encode";
@@ -85,7 +86,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.67.0";
+const APP_VERSION = "0.68.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -4783,6 +4784,15 @@ const exportJson = () => {
       return canvas;
   };
 
+  // A canvas data URL back to the raw PNG bytes, so the file can be tagged
+  // before it is handed over (see withPngDpi).
+  const dataUrlToBytes = (dataUrl: string): Uint8Array => {
+    const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  };
+
   const exportTestPatternPngs = (selectedKeys: Set<string>) => {
     try {
       const chosen = testPatternSurfaces().filter((surface) => selectedKeys.has(surface.key));
@@ -4792,12 +4802,22 @@ const exportJson = () => {
         const safeName = (surface.key === FULL_WALL_PATTERN_KEY ? `${fileSafeProjectName}-${fileSafePanelType}-Full-Wall` : surface.name)
           .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
           .replace(/\s+/g, "-");
+        // Tagged PNG_EXPORT_DPI rather than left with no resolution at all,
+        // which is what canvas produces and which readers treat as 72. The
+        // pixels are untouched - a test pattern maps one-for-one onto the
+        // wall, so resampling it would destroy the thing it is for.
+        const raw = dataUrlToBytes(canvas.toDataURL("image/png"));
+        const blob = new Blob([withPngDpi(raw, PNG_EXPORT_DPI) as unknown as BlobPart], { type: "image/png" });
+        const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
-        link.href = canvas.toDataURL("image/png");
+        link.href = url;
         link.setAttribute("download", `${safeName}-Test-Pattern.png`);
         document.body.appendChild(link);
         link.click();
         link.remove();
+        // Revoked on the next tick - revoking immediately races the download
+        // in some browsers.
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
       });
     } catch (err) {
       console.error("PNG test pattern failed", err);
@@ -9005,7 +9025,7 @@ const exportJson = () => {
         {testPatternPicker ? (
           <ExportSectionsModal
             title="Test Pattern PNGs"
-            intro="One PNG per selected item, each at its own true output resolution."
+            intro={`One PNG per selected item, each at its own true output resolution, tagged ${PNG_EXPORT_DPI} DPI for print.`}
             sections={testPatternPicker}
             confirmLabel="Download PNGs"
             onClose={() => setTestPatternPicker(null)}

@@ -16,6 +16,7 @@ import { muxWebm, opusHead, type MuxPacket } from "./webmMux";
 import { patternName } from "./patterns";
 import { loadPhotoFaces } from "./photoFaces";
 import { canvasPatternLabel, renderComposite, renderScreen, type RenderContext } from "./render";
+import { PNG_EXPORT_DPI, withPngDpi } from "../export/pngDpi";
 
 export type ExportFormat = "png" | "webm" | "mp4";
 export type ExportScope = "canvas" | "screen" | "selected";
@@ -75,8 +76,16 @@ export const itemsFor = (config: GeneratorConfig, scope: ExportScope, screenId: 
   return config.screens.filter((s) => selectedIds.includes(s.id)).map((s) => screenItem(config, s));
 };
 
-const toBlob = (canvas: HTMLCanvasElement): Promise<Blob> =>
-  new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("PNG encoding failed"))), "image/png"));
+// Tagged PNG_EXPORT_DPI on the way out. Canvas writes no resolution at all,
+// which readers take as 72, so a still placed in a document came out about
+// four times too big. The pixels are untouched - see withPngDpi.
+const toBlob = async (canvas: HTMLCanvasElement): Promise<Blob> => {
+  const raw = await new Promise<Blob>((resolve, reject) =>
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("PNG encoding failed"))), "image/png"),
+  );
+  const tagged = withPngDpi(new Uint8Array(await raw.arrayBuffer()), PNG_EXPORT_DPI);
+  return new Blob([tagged as unknown as BlobPart], { type: "image/png" });
+};
 
 export const renderPng = async (item: ExportItem, time: number): Promise<Blob> => {
   const c = document.createElement("canvas");

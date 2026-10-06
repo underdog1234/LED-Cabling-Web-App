@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.67.0`
+Version `0.68.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -74,6 +74,60 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.68.0
+
+**Panels join on quarters and halves, and nothing else**
+
+Dragging a panel to sit **exactly half a module** down its neighbour never
+worked: it would land looking right and count as **not joined** - no connector
+ordered for it, and the two panels moved independently afterwards.
+
+The connector anchors sat at fractions of the edge - `±0.8, ±0.4, 0` - which on
+a 500mm edge put them every **100mm**. That is not a lattice any panel can be
+built on:
+
+| Offset | Is it a half or quarter? | Old | New |
+| --- | --- | --- | --- |
+| 100mm, 200mm, 300mm | no | joined | not joined |
+| 125mm (quarter) | yes | no anchor pair | joined |
+| 250mm (half) | yes | **no anchor pair** | joined |
+| 375mm (three quarters) | yes | no anchor pair | joined |
+
+- Anchors now sit every **125mm - a quarter module - measured in millimetres**,
+  not as a fraction of the edge. So an **MT panel's 1m edge carries the same
+  lattice as an MG9's 500mm one**, and the two can meet on a quarter; before,
+  they could not meet at all
+- A **brick bond** (half a module across, one row down) is a real join and is
+  counted as one. It was in the "what this does not count" list; it is not any
+  more
+- Dragging now always lands on a quarter, whether it snaps to a neighbour or
+  falls through to the 250mm grid
+- Two panels that only **touch at a corner** are still not joined. The anchors
+  now include the edge ends, and a corner belongs to two edges - left as two
+  entries it would have read as the two coincident anchors a join needs, so
+  they are de-duplicated
+
+On the 141-panel layout this was reported from, joined pairs go **210 → 214**:
+8 brick-bond joins found that were being missed, and 4 dropped that were
+offset 200mm or 300mm - the ones that had been dragged at a half and landed
+somewhere else.
+
+**Exported PNGs are tagged 300 DPI**
+
+A PNG says how big its pixels are meant to be on paper in a `pHYs` chunk.
+Canvas never writes one, so every test pattern this app exported arrived with
+**no resolution at all**, and a reader with nothing to go on assumes 72 DPI -
+placed in a document it came out about four times too big.
+
+- Exports now carry **300 DPI** - both the planner's test pattern PNGs and the
+  Test Pattern Generator's stills
+- **Not a single pixel changes.** A test pattern is mapped one-for-one onto the
+  wall's own resolution, so resampling it to "make it 300 DPI" would destroy
+  the thing it exists to show. The pixels are the pixels; the tag only says how
+  big they are meant to be on paper
+- The PDF's own layout image is unaffected - it is placed at an explicit size
+  on the page, and still rendered at 600 DPI for enlarged printing
 
 ## Recent Changes In v0.67.0
 
@@ -477,12 +531,12 @@ Each of these is pinned as a test in `src/connectors.test.ts`:
 - **MG9 Vertical Connector (12480)** is never chosen by a join rule for the
   same reason - it comes only from the Modular Frame Bottom Beam allowance, 4
   per 1m beam
-- **A brick bond is not seen as a join.** Anchors sit every 100mm along a 500mm
-  edge, so a neighbour offset 100mm or 200mm still lines up - but one offset
-  **half a panel (250mm)** lines up with nothing, and the pair reads as
-  unjoined. On a plain MG9 wall this costs nothing, since such a join needs no
-  connector anyway; it only under-counts where a corner or shaped panel sits on
-  a staggered join
+- **An offset that is not a quarter of a module is not a join.** Connector
+  anchors sit every **125mm** along every edge, so panels meet flush, a quarter
+  off, half off or three quarters off - and nowhere in between. There is no
+  connector for a wall built a tenth of a panel out, so there is no anchor pair
+  for one either. (Brick bonds and MT-to-MG9 joins used to fall in that gap;
+  they do not any more.)
 - **Panels turned to an odd angle** (45 degrees, say) are not seen as joined.
   Those joins are made with hardware outside this catalogue
 - **A triangle never joins along its hypotenuse**, nor a quarter circle along

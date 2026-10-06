@@ -10,6 +10,10 @@
 
 export const MODULE_MM = 500; // base 0.5 m module
 export const HALF_MODULE_MM = 250; // fine snap grid
+// The finest interval two panels may be joined on. Halves fall out of this for
+// free (two quarters), and nothing between a quarter and the next is reachable
+// - see edgeAnchorOffsets.
+export const QUARTER_MODULE_MM = 125;
 export const SNAP_DISTANCE_MM = 32; // edge-anchor snap radius (matches layout tool)
 export const JOIN_GAP_MM = 2; // max gap for two edges to count as joined
 export const JOIN_MIN_SHARED_MM = 100; // min shared edge length for a join
@@ -301,10 +305,32 @@ export const panelLabelBlockFits = (
   return panelLabelBlockFitsAt(r, shape, rotation, mirrorX, anchor.x, anchor.y, halfW, halfH);
 };
 
-// Anchor offsets along an edge, as fractions of the half extent. Every straight
-// edge uses the same pattern so flush edges (rect-rect, rect-to-shaped-leg) share
-// exact anchor positions and join cleanly.
-const EDGE_ANCHORS = [-0.8, -0.4, 0, 0.4, 0.8];
+/**
+ * Where the connector anchors sit along an edge, as offsets in mm from that
+ * edge's midpoint: every QUARTER_MODULE_MM out to the edge's ends, plus the
+ * two end corners themselves.
+ *
+ * These used to be fractions of the half extent - [-0.8, -0.4, 0, 0.4, 0.8] -
+ * which on a 500mm edge put them every 100mm. That is not a lattice any panel
+ * can be joined on: the offsets it allowed (100, 200, 300) are not halves or
+ * quarters of a module, and the ones that are (125, 250, 375) had no anchor
+ * pair at all. Dragging a panel to sit exactly half a module down therefore
+ * fell out of anchor range entirely, dropped through to the 250mm grid snap,
+ * and landed looking right while counting as NOT JOINED - no connector
+ * ordered for it, and the two panels moved independently afterwards.
+ *
+ * Measured in absolute mm rather than as a fraction so the lattice is the same
+ * on every panel size: an MT panel's 1000mm edge gets anchors every 125mm just
+ * like an MG9's 500mm one, so the two can join each other on a quarter.
+ */
+const edgeAnchorOffsets = (halfExtent: number): number[] => {
+  const offsets = new Set<number>([-halfExtent, 0, halfExtent]);
+  for (let d = QUARTER_MODULE_MM; d < halfExtent; d += QUARTER_MODULE_MM) {
+    offsets.add(-d);
+    offsets.add(d);
+  }
+  return [...offsets].sort((a, b) => a - b);
+};
 export const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
 
 // Local (centre-relative, unrotated) anchor points for a panel shape. Base
@@ -314,10 +340,12 @@ export const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
 // on their hypotenuse / curve, so those edges can never join.
 const localAnchors = (shape: PanelShape, halfW: number, halfH: number): Array<{ x: number; y: number }> => {
   const pts: Array<{ x: number; y: number }> = [];
-  const left = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: -halfW, y: t * halfH }));
-  const right = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: halfW, y: t * halfH }));
-  const top = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: t * halfW, y: -halfH }));
-  const bottom = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: t * halfW, y: halfH }));
+  const alongH = edgeAnchorOffsets(halfH);
+  const alongW = edgeAnchorOffsets(halfW);
+  const left = () => alongH.forEach((t) => pts.push({ x: -halfW, y: t }));
+  const right = () => alongH.forEach((t) => pts.push({ x: halfW, y: t }));
+  const top = () => alongW.forEach((t) => pts.push({ x: t, y: -halfH }));
+  const bottom = () => alongW.forEach((t) => pts.push({ x: t, y: halfH }));
   if (shape === "triangle") {
     left();
     bottom();
@@ -330,7 +358,17 @@ const localAnchors = (shape: PanelShape, halfW: number, halfH: number): Array<{ 
     left();
     right();
   }
-  return pts;
+  // A corner belongs to two edges, so it was pushed twice. Left as duplicates
+  // it would let two panels that merely TOUCH AT A CORNER report the two
+  // coincident anchors panelsAnchorJoined reads as a join - one point counted
+  // twice - and order connectors for an edge they do not share.
+  const seen = new Set<string>();
+  return pts.filter((p) => {
+    const key = `${p.x}|${p.y}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 };
 
 /**

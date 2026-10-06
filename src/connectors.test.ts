@@ -183,26 +183,36 @@ describe("joins that produce no connector at all", () => {
   const at = (cx: number, cy: number, rotation = 0, shape: PanelAnchorSpec["shape"] = "rect", halfW = 250, halfH = 250): PanelAnchorSpec =>
     ({ cx, cy, halfW, halfH, rotation, shape });
 
-  it("sees a flush join, and an offset of a whole anchor spacing", () => {
+  it("sees a flush join, and every quarter of a module off it", () => {
     expect(sharedEdgeOrientation(at(0, 0), at(500, 0))).toBe("vertical");
     expect(sharedEdgeOrientation(at(0, 0), at(0, 500))).toBe("horizontal");
-    // Anchors sit every 100mm along a 500mm edge, so these still line up.
-    expect(sharedEdgeOrientation(at(0, 0), at(100, 500))).toBe("horizontal");
-    expect(sharedEdgeOrientation(at(0, 0), at(200, 500))).toBe("horizontal");
+    // Anchors sit every 125mm - a quarter module - along a 500mm edge.
+    expect(sharedEdgeOrientation(at(0, 0), at(125, 500))).toBe("horizontal");
+    expect(sharedEdgeOrientation(at(0, 0), at(375, 500))).toBe("horizontal");
   });
 
-  it("does NOT see a brick bond - a neighbour offset half a panel", () => {
-    // 250mm falls between the anchors on both edges, so nothing coincides and
-    // the pair reads as unjoined. A brick-bonded wall therefore counts no
-    // connectors along its staggered joins.
-    expect(sharedEdgeOrientation(at(0, 0), at(250, 500))).toBeNull();
-    expect(sharedEdgeOrientation(at(0, 0), at(500, 250))).toBeNull();
+  it("does NOT see an offset that is not a quarter of a module", () => {
+    // There is no connector for a wall built a tenth of a panel out, so there
+    // is no anchor pair for one either. These used to be the offsets that DID
+    // line up, back when anchors sat every 100mm.
+    expect(sharedEdgeOrientation(at(0, 0), at(100, 500))).toBeNull();
+    expect(sharedEdgeOrientation(at(0, 0), at(200, 500))).toBeNull();
+    expect(sharedEdgeOrientation(at(0, 0), at(500, 300))).toBeNull();
   });
 
-  it("does NOT see an MT panel meeting an MG9 one", () => {
-    // Their anchor spacings differ (MT is 1m wide), so even before the MG9-only
-    // filter in App.tsx, no anchor of one lands on an anchor of the other.
-    expect(sharedEdgeOrientation(at(0, 0, 0, "rect", 500, 250), at(-250, 500))).toBeNull();
+  it("sees a brick bond - a neighbour offset half a panel", () => {
+    // Half a module is two quarters, so it lands on the lattice and the
+    // staggered joins of a brick-bonded wall are counted like any other.
+    expect(sharedEdgeOrientation(at(0, 0), at(250, 500))).toBe("horizontal");
+    expect(sharedEdgeOrientation(at(0, 0), at(500, 250))).toBe("vertical");
+  });
+
+  it("sees an MT panel meeting an MG9 one", () => {
+    // The lattice is measured in millimetres rather than as a fraction of the
+    // edge, so MT's 1m edge carries anchors at the same 125mm spacing as
+    // MG9's 500mm one and the two can meet. (App.tsx still filters the
+    // connector table itself down to MG9 - that is a separate rule.)
+    expect(sharedEdgeOrientation(at(0, 0, 0, "rect", 500, 250), at(-250, 500))).toBe("horizontal");
   });
 
   it("does NOT see panels turned to an odd angle", () => {
