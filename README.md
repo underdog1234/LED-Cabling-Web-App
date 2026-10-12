@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.69.0`
+Version `0.70.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -74,6 +74,63 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.70.0
+
+**15m PowerCON Cable was under-ordered**
+
+The cable count came off `ceil(panels / panels-per-outlet)` - the FEWEST
+outlets the wall could run on if every one were filled to the limit. The real
+patch also has to respect the 16A ceiling and keeps chains together, so it
+routinely sits on more outlets than that floor, and every extra outlet is a
+cable nobody ordered.
+
+On the report this was found in - 84 panels, a 21-panel outlet limit - the
+sheet asked for **4** cables while the patch was on **6 outlets**. Two short.
+
+- It is now **one cable per outlet actually patched**, which is the same
+  figure the weight page (`6 outlets in use x 3kg`) and the distro row were
+  already using. The report no longer disagrees with itself
+- Before anything is patched there are no real outlets to count, so the old
+  floor stands in as an estimate - and the row says which it is giving you
+- The Power summary now reads **Outlets in use: 6 (4 if filled to the limit)**
+  instead of `Circuits used: 4`, on screen and in the PDF. The old figure was
+  never a count of anything; it was a planning floor wearing the wrong label
+
+**Long project names no longer run over the page**
+
+A name like *7582 Investment Services Group Limited - Shaw and Partners
+Appreciation Event* ran the Panel Layout title **48mm off the right edge** of
+the page, and the `Project name:` line **57mm into the second column**, right
+through `Size: 7.5m x 3m`.
+
+Headings and that line are drawn at fixed positions in two columns, so there
+is nowhere to wrap to - a second line would land on the one below it. Text
+that will not fit is now **shrunk first, then clipped with an ellipsis**, with
+jsPDF's own font metrics deciding. The title above went 325mm → 271mm (18pt
+down to 15pt, nothing lost); the project line went 149mm → 91mm. Every page
+heading in the report goes through the same rule.
+
+**Drag slowness: it is the dev server, not the app**
+
+Profiled a drag on a 141-panel wall. **88% of the time was `jsxDEV`** -
+React's development-mode JSX factory, which validates every prop and builds a
+debug task per element. None of that exists in the production bundle.
+
+| | Median per mouse move |
+| --- | --- |
+| `vite` dev server | **1374 ms** |
+| Production build | **33 ms** |
+
+The deployed site has never been doing the slow thing. Earlier figures in this
+changelog's v0.69.0 notes were measured against the dev server and overstate
+the real cost by about 40x.
+
+One genuine inefficiency turned up and is fixed: `formatNumber` built a fresh
+`Intl.NumberFormat` on every call, from inside the render of every panel, port
+tile and table row. It is cached per digit count now. It was the top
+app-level cost in the dev profile, though it does not measurably move the
+production figure (still 33 ms) - the win was mostly dev-mode amplification.
 
 ## Recent Changes In v0.69.0
 

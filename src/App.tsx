@@ -86,7 +86,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.69.0";
+const APP_VERSION = "0.70.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1009,11 +1009,21 @@ const convertPanelTypeInList = (panels: Cell[], id: string, type: PanelTypeKey):
   return [...panels, filler];
 };
 
-const formatNumber = (value: number, digits = 0) =>
-  Number(value || 0).toLocaleString(undefined, {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: digits,
-  });
+// toLocaleString with an options object builds a fresh Intl.NumberFormat on
+// every call, and this is called from inside the render of every panel, port
+// tile and table row - it was the single most expensive app-level function in
+// a drag profile. One formatter per digit count instead; they are immutable
+// and there are only ever a handful.
+const numberFormatters = new Map<number, Intl.NumberFormat>();
+const formatNumber = (value: number, digits = 0) => {
+  let formatter = numberFormatters.get(digits);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    numberFormatters.set(digits, formatter);
+  }
+  // `value || 0` on purpose, as before: NaN, null and undefined all read 0.
+  return formatter.format(Number(value || 0));
+};
 
 // Rounds to at most 2 decimal places and trims trailing zeros (19.384... -> "19.38", 3.50 -> "3.5", 4.00 -> "4").
 const formatMeters = (value: number) => (Number(value) || 0).toFixed(2).replace(/\.?0+$/, "");
@@ -2044,6 +2054,43 @@ const PDF_TEXT_REPLACEMENTS: Array<[RegExp, string]> = [
   [/\u2264/g, "<="],
   [/\u2026/g, "..."],
 ];
+/**
+ * Fit a line of text into `maxWidth`: shrink it a little first, and only clip
+ * it with an ellipsis once it will not go any smaller.
+ *
+ * The PDF's headings are drawn at fixed positions in two columns, so a long
+ * project name had nowhere to go - it ran straight off the right edge of the
+ * page in the title, and straight across the second column in the summary
+ * block underneath. Wrapping is not an option there: the lines below sit at
+ * fixed y positions and a second line would land on top of one of them.
+ *
+ * `measure` reports the width of a string at a given size, so the caller can
+ * hand over whatever the PDF engine really thinks the font measures rather
+ * than an estimate from the character count.
+ */
+export const fitTextToWidth = (
+  text: string,
+  maxWidth: number,
+  baseSize: number,
+  minSize: number,
+  measure: (text: string, size: number) => number,
+): { text: string; size: number } => {
+  if (!text || maxWidth <= 0) return { text, size: baseSize };
+  if (measure(text, baseSize) <= maxWidth) return { text, size: baseSize };
+  // Half-point steps: small enough that the heading rarely looks shrunk, and
+  // few enough steps to stay cheap.
+  for (let size = baseSize - 0.5; size >= minSize; size -= 0.5) {
+    if (measure(text, size) <= maxWidth) return { text, size };
+  }
+  // Still too long at the smallest size it may be set in - cut it, keeping as
+  // much of the front as fits. Better a name that visibly stops than one that
+  // silently runs over whatever is beside it.
+  const ellipsis = "...";
+  let cut = text.length;
+  while (cut > 0 && measure(text.slice(0, cut) + ellipsis, minSize) > maxWidth) cut -= 1;
+  return { text: cut > 0 ? text.slice(0, cut).trimEnd() + ellipsis : ellipsis, size: minSize };
+};
+
 export const pdfSafeText = (value: string): string => {
   let out = value;
   PDF_TEXT_REPLACEMENTS.forEach(([from, to]) => {
@@ -3516,6 +3563,11 @@ export default function App() {
   };
   const vx1000Percent = (wallPixelW * wallPixelH / 6500000) * 100;
   const vx2000Percent = (wallPixelW * wallPixelH / 13000000) * 100;
+  // The FEWEST outlets the wall could run on - every outlet filled to the
+  // panels-per-outlet limit. A planning floor, not a count of anything: the
+  // real patch also has to respect the 16A ceiling and keeps chains together,
+  // so it routinely lands on more outlets than this. Named "max" for the load
+  // per outlet, not for the number of circuits.
   const circuitsUsedMax = Math.ceil(totalPanels / Math.max(safePanelsPerPowerOutlet, 1));
   const powerPerCircuitMaxW = safePanelsPerPowerOutlet * powerSpec.maxW;
   const powerPerCircuitMaxA = safePanelsPerPowerOutlet * powerSpec.maxA;
@@ -3534,7 +3586,18 @@ export default function App() {
   const signalCableBaseRequired = signalPortsUsed;
   const signalCableWithBackupRequired = backupSignalLoop ? signalCableBaseRequired * 2 : signalCableBaseRequired;
   const signalCableSpare = Math.ceil(signalCableWithBackupRequired * panel.defaults.signalSpareRatio);
-  const powerCableSpare = Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
+  // One 15m PowerCON per outlet ACTUALLY PATCHED, which is what gets loaded on
+  // the truck. This used to be circuitsUsedMax, the theoretical floor above,
+  // and under-ordered every time the patch spread wider than that floor - an
+  // 84-panel wall on a 21-panel outlet limit asked for 4 cables while the
+  // patch sat on 6 outlets, a shortfall of two the pull sheet never showed.
+  // The distro row and the weight page were already counting the real outlets
+  // (powerPortsUsed), so the same report disagreed with itself.
+  //
+  // Before anything is patched there are no real outlets to count, so the
+  // floor stands in as an estimate rather than printing a nonsense 0.
+  const powerCableRequired = powerPortsUsed > 0 ? powerPortsUsed : circuitsUsedMax;
+  const powerCableSpare = Math.ceil(powerCableRequired * panel.defaults.powerSpareRatio);
   const distroRequired = Math.max(1, Math.ceil(powerPortsUsed / distro.portCount));
 
   // Connectors, worked out from the edges panels actually share in this
@@ -3779,7 +3842,14 @@ export default function App() {
       method: "selected distro",
     });
 
-    pushBaseRow("12254", "15m PowerCON Cable", circuitsUsedMax, stock.powerCable15m ?? 0, `${circuitsUsedMax} + ${powerCableSpare} spare`, powerCableSpare);
+    pushBaseRow(
+      "12254",
+      "15m PowerCON Cable",
+      powerCableRequired,
+      stock.powerCable15m ?? 0,
+      `1 per outlet in use (${powerPortsUsed > 0 ? `${powerPortsUsed} patched` : `${circuitsUsedMax} estimated, nothing patched yet`}) + ${powerCableSpare} spare`,
+      powerCableSpare,
+    );
     pushBaseRow(
       "12263",
       "15m Signal Cable",
@@ -3886,7 +3956,7 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, connectorNeeds, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars, processorModel]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, connectorNeeds, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerCableRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars, processorModel]);
 
   // The on-screen table, PDF table and CSV export all list order/pull
   // quantities, not raw internal line items - a row whose real order
@@ -5316,6 +5386,25 @@ const exportJson = () => {
       pdf.text = ((value: unknown, ...rest: unknown[]) => rawText(scrub(value), ...(rest as [number, number]))) as typeof pdf.text;
       pdf.splitTextToSize = ((value: unknown, ...rest: unknown[]) => rawSplit(scrub(value), ...(rest as [number]))) as typeof pdf.splitTextToSize;
     }
+    /**
+     * Draw one line that must not overrun: shrunk, then ellipsised, to fit
+     * `maxWidth` (see fitTextToWidth). Restores the font size afterwards so a
+     * shrunk heading never silently resizes the body text below it.
+     */
+    const drawFitted = (text: string, x: number, y: number, maxWidth: number, baseSize: number, minSize: number) => {
+      const previous = pdf.getFontSize();
+      const fitted = fitTextToWidth(pdfSafeText(text), maxWidth, baseSize, minSize, (value, size) => {
+        pdf.setFontSize(size);
+        return pdf.getTextWidth(value);
+      });
+      pdf.setFontSize(fitted.size);
+      pdf.text(fitted.text, x, y);
+      pdf.setFontSize(previous);
+    };
+    /** Every page heading: same place, same rules, never off the edge. */
+    const drawPageTitle = (text: string, baseSize = 16) =>
+      drawFitted(text, 10, 12, pdf.internal.pageSize.getWidth() - 20, baseSize, 9);
+
     const printedAt = new Date().toLocaleString();
     const usedSignalPorts = signalPorts.filter((port) => signalPortStats[port.id].panels > 0);
     const usedPowerPorts = powerPorts.filter((port) => powerPortStats[port.id].panels > 0);
@@ -5464,7 +5553,7 @@ const exportJson = () => {
       const pageHeight = pdf.internal.pageSize.getHeight();
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(18);
-      pdf.text(`${safeProjectName} - Panel Layout - ${viewLabel}`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Panel Layout - ${viewLabel}`, 18);
 
       pdf.setFont("helvetica", "normal");
       // A page that shows only some of the wall says so on its own face - the
@@ -5479,7 +5568,8 @@ const exportJson = () => {
         pdf.setTextColor(15, 23, 42);
       }
       pdf.setFontSize(10);
-      pdf.text(`Project name: ${safeProjectName}`, 10, 20);
+      // Stops short of the second column, which starts at x=105.
+      drawFitted(`Project name: ${safeProjectName}`, 10, 20, 92, 10, 7);
       pdf.text(`Panel type: ${panelTypeSummary}`, 10, 26);
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
       pdf.text(`Panels: ${totalPanels} active across ${gridRefs.rows} row${gridRefs.rows === 1 ? "" : "s"} x ${gridRefs.cols} column${gridRefs.cols === 1 ? "" : "s"}`, 10, 38);
@@ -5586,13 +5676,13 @@ const exportJson = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Stock Summary`);
       let table = drawStockTable(startIndex, 22, 190);
       while (table.next < stockTableRows.length) {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Stock Summary continued`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Stock Summary continued`);
         table = drawStockTable(table.next, 22, 190);
       }
       drawStockEditNotes(table.y);
@@ -5634,7 +5724,7 @@ const exportJson = () => {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Stock Summary continued`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Stock Summary continued`);
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(8);
         noteY = 22;
@@ -5655,7 +5745,7 @@ const exportJson = () => {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Other Projects & Repairs${continued ? " (continued)" : ""}`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Other Projects & Repairs${continued ? " (continued)" : ""}`);
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(9);
         pdf.setTextColor(100, 116, 139);
@@ -5835,7 +5925,7 @@ const exportJson = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Output Canvas`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Output Canvas`);
 
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(11);
@@ -5968,7 +6058,7 @@ const exportJson = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Weight Breakdown`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Weight Breakdown`);
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(9);
       pdf.setTextColor(71, 85, 105);
@@ -6138,7 +6228,7 @@ const exportJson = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Sub-Screens`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Sub-Screens`);
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(10);
       pdf.text(`Output canvas: ${outputCanvasW} x ${outputCanvasH}px`, 10, 18);
@@ -6147,7 +6237,7 @@ const exportJson = () => {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Sub-Screens continued`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Sub-Screens continued`);
         nextIndex = drawSubScreensTable(nextIndex, 22, 190);
       }
     };
@@ -6162,7 +6252,7 @@ const exportJson = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Signal & Power Ports In Use`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Signal & Power Ports In Use`);
 
       const colW = 133;
       type PortColumn = { label: string; x: number; align?: "right" };
@@ -6245,7 +6335,7 @@ const exportJson = () => {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Spare Panels by Surface${continued ? " (continued)" : ""}`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Spare Panels by Surface${continued ? " (continued)" : ""}`);
         y = 24;
         if (!continued) {
           pdf.setFont("helvetica", "normal");
@@ -6332,7 +6422,9 @@ const exportJson = () => {
     drawInfoBox("Power", [
       `Max draw: ${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A`,
       `Average draw: ${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A`,
-      `Circuits used: ${circuitsUsedMax}`,
+      powerPortsUsed > 0
+        ? `Outlets in use: ${powerPortsUsed}${circuitsUsedMax !== powerPortsUsed ? ` (${circuitsUsedMax} if filled to the limit)` : ""}`
+        : `Outlets needed: ${circuitsUsedMax} if filled to the limit`,
       `Per outlet: ${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`,
       `Outlet limit: ${safePanelsPerPowerOutlet} panels`,
       `Unassigned power panels: ${unassignedPowerPanels}`,
@@ -8022,7 +8114,11 @@ const exportJson = () => {
                   <div className="mb-2 font-bold">Power</div>
                   <div>Max: {formatNumber(totalPowerMaxW, 0)} W / {formatNumber(totalPowerMaxA, 2)} A</div>
                   <div>Avg: {formatNumber(totalPowerAvgW, 0)} W / {formatNumber(totalPowerAvgA, 2)} A</div>
-                  <div>Circuits used (max): {circuitsUsedMax}</div>
+                  <div title="Power outlets the patch actually uses - one 15m PowerCON each. The figure in brackets is the fewest it could run on with every outlet filled to the panels-per-outlet limit.">
+                    {powerPortsUsed > 0
+                      ? `Outlets in use: ${powerPortsUsed}${circuitsUsedMax !== powerPortsUsed ? ` (${circuitsUsedMax} if filled to the limit)` : ""}`
+                      : `Outlets needed: ${circuitsUsedMax} if filled to the limit`}
+                  </div>
                   <div>Per outlet: {formatNumber(powerPerCircuitMaxW, 0)} W / {formatNumber(powerPerCircuitMaxA, 2)} A</div>
                   <div>Active support span: {activeColsCount} cols × {activeRowsCount} rows</div>
                 </div>
