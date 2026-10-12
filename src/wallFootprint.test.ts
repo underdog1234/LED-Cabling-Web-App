@@ -53,6 +53,60 @@ describe("wallFootprintResolutionOf", () => {
   });
 });
 
+// Wall Details quotes the LIT pixel count - every active panel's own
+// resolution added up - because the rectangle a wall stands in counts the
+// holes and the steps as if they were screen. These pin why that figure is a
+// straight sum rather than either of the two W x H spaces: neither of them
+// reliably leaves the black space out.
+describe("what a pixel count has to leave out", () => {
+  const MOD = MG9.w * 1000;
+  const activePixels = (panels: Cell[]) => panels.length * MG9.pixW * MG9.pixH;
+  const withHoles = (cols: number, rows: number, hole: (col: number, row: number) => boolean) =>
+    makeGridPanels(cols, rows, "MG9").filter((c) => !hole(Math.round(c.x / MOD), Math.round(c.y / MOD)));
+
+  it("agrees with both spaces on a full rectangle", () => {
+    const panels = makeGridPanels(15, 6, "MG9");
+    const box = wallFootprintResolutionOf(panels);
+    expect(box.w * box.h).toBe(activePixels(panels));
+    const packed = resolutionOf(panels);
+    expect(packed.w * packed.h).toBe(activePixels(panels));
+  });
+
+  it("is less than the rectangle the wall stands in, once there is a hole", () => {
+    // The reported job: 15x6 with 6 panels missing.
+    const panels = withHoles(15, 6, (c, r) => r === 5 && c >= 9);
+    expect(panels).toHaveLength(84);
+    const box = wallFootprintResolutionOf(panels);
+    expect(box.w * box.h).toBe(2520 * 1008);
+    expect(activePixels(panels)).toBe(2_370_816);
+    expect(box.w * box.h - activePixels(panels)).toBe(6 * MG9.pixW * MG9.pixH);
+  });
+
+  it("is why the packed space will not do either", () => {
+    // Packed only closes a gap up when EVERY row loses the same number of
+    // panels. Six holes in one row, or a stepped corner, pack to exactly the
+    // bounding box and keep every one of those black pixels - so a count
+    // taken from it would still be wrong, just less obviously.
+    const oneRowShort = withHoles(15, 6, (c, r) => r === 5 && c >= 9);
+    const steppedCorner = withHoles(15, 6, (c, r) => c >= 13 && r <= 2);
+    for (const panels of [oneRowShort, steppedCorner]) {
+      const packed = resolutionOf(panels);
+      expect(packed.w * packed.h).toBe(2520 * 1008);
+      expect(packed.w * packed.h).toBeGreaterThan(activePixels(panels));
+    }
+    // One per row is the case it does happen to get right - which is exactly
+    // why it cannot be relied on.
+    const onePerRow = withHoles(15, 6, (c, r) => c === r);
+    const packedEven = resolutionOf(onePerRow);
+    expect(packedEven.w * packedEven.h).toBe(activePixels(onePerRow));
+  });
+
+  it("counts an MT panel's own pixels, not an MG9's", () => {
+    const mt = makeGridPanels(3, 2, "MT");
+    expect(mt.length * PANEL_TYPES.MT.pixW * PANEL_TYPES.MT.pixH).toBe(6 * 256 * 64);
+  });
+});
+
 describe("subScreenResolutionOf", () => {
   // A sub-screen is a wall in its own right, so its quoted resolution is the
   // rectangle it stands in - the same figure the test pattern renders at.

@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.70.0`
+Version `0.71.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -74,6 +74,46 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.71.0
+
+**Wall Details counts lit pixels, not black space**
+
+The Resolution figure was the rectangle the wall stands in. On anything that
+is not a full rectangle that counts the holes and the steps as if they were
+screen. On a stepped 141-panel wall the bounding box is 6216 x 1344 =
+8,354,304px, of which **4,374,720px - more than half - is black**.
+
+- **Resolution** is now the lit pixel count: every active panel's own
+  resolution added up. That stepped wall reads **3,979,584 active px**
+- **Extent** sits right under it (`6216 x 1344 - 4,374,720 px of it black`),
+  because content is still authored to that rectangle and the test pattern
+  still renders at it. The black-space note only appears when there is some
+- **VX1000 / VX2000 use** and **Port capacity use** now measure against the
+  lit pixels too. A processor never drives an empty gap, and the old figures
+  said that stepped wall needed **128.5%** of a VX1000 when it really needs
+  **61.2%** - enough to push somebody onto a bigger processor for no reason
+
+| | Before | After |
+| --- | --- | --- |
+| Resolution | 6216 x 1344 | 3,979,584 active px |
+| VX1000 use | 128.5% | 61.2% |
+| VX2000 use | 64.3% | 30.6% |
+
+A note on how: a "packed" width and height - the holes closed up - sounds like
+the obvious answer, but it only works when **every row loses the same number
+of panels**. Six holes in one row, or a stepped corner, pack to exactly the
+bounding box and keep every one of those black pixels. A straight sum is the
+only figure that is right whatever the shape, which is why the headline is a
+pixel count rather than a width x height.
+
+Unchanged on purpose: the test pattern, sub-screen resolutions, the output
+canvas and the recommended content resolution all still use the full extent -
+content has to span the whole rectangle, gaps included (see v0.59.0).
+
+**Also:** the PDF's Wall box was already exactly full, so the extra line
+silently dropped `Reduced ratio` off the bottom - `drawInfoBox` clips without
+saying so. The four top-row boxes are a line taller now.
 
 ## Recent Changes In v0.70.0
 

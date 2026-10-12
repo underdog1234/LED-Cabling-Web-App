@@ -86,7 +86,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.70.0";
+const APP_VERSION = "0.71.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -3182,6 +3182,29 @@ export default function App() {
   // (canvasModel's resolutionOf), which packs panels together and leaves no
   // gap pixels - see that function for why the two are, and must stay, apart.
   const wallPixels = useMemo(() => wallFootprintResolutionOf(activePanels), [activePanels]);
+  /**
+   * Pixels that are actually LIT: every active panel's own resolution, added
+   * up. The wall's width x height is the rectangle it stands in, so on
+   * anything that is not a full rectangle it counts the holes and the steps as
+   * if they were screen - 6 missing panels on a 15x6 wall is 169,344px of
+   * black space in a figure that reads like a pixel count.
+   *
+   * Deliberately not the "packed" resolution either (canvasModel's
+   * resolutionOf). That only closes a gap up when EVERY row loses the same
+   * number of panels: holes in one row, or a stepped wall, pack to exactly the
+   * same width as the bounding box and keep every one of those black pixels.
+   * A straight sum is the only figure that is right whatever the shape.
+   *
+   * Rotation does not come into it - turning a panel moves its pixels, it does
+   * not change how many there are.
+   */
+  const activePixelCount = useMemo(
+    () => activePanels.reduce((sum, cell) => {
+      const spec = PANEL_TYPES[cellPanelType(cell)];
+      return sum + spec.pixW * spec.pixH;
+    }, 0),
+    [activePanels],
+  );
   const wallPixelW = wallPixels.w;
   const wallPixelH = wallPixels.h;
   const panelVariantCounts = useMemo(() => {
@@ -3335,13 +3358,22 @@ export default function App() {
   // plain "x" separators to match the PDF's existing text style; the JSX
   // Wall Summary card renders its own "×" version directly instead of
   // reusing this array, to match that card's existing style.
+  // How much black space the bounding box is carrying - nothing at all on a
+  // full rectangle, which is why the extent line only mentions it when there
+  // is some.
+  const blackSpacePixels = Math.max(0, wallPixelW * wallPixelH - activePixelCount);
+  // The lit pixel count leads; the rectangle it stands in follows, because
+  // content is still authored to that and the test pattern still renders at
+  // it. One line, so the three summary lines keep the three meanings every
+  // consumer already lays out room for.
+  const activeResolutionSummary = `${formatNumber(activePixelCount)} active px (${wallPixelW} x ${wallPixelH} extent)`;
   const wallResolutionSummaryLines = isMtOnlyWall
     ? [
-        `LED Wall Resolution: ${wallPixelW} x ${wallPixelH}`,
+        `LED Wall Resolution: ${activeResolutionSummary}`,
         `Recommended Content Resolution: ${contentPixelW} x ${contentPixelH}`,
         `Physical Aspect Ratio: ${physicalRatioLabel}`,
       ]
-    : [`Resolution: ${wallPixelW} x ${wallPixelH}`, `Aspect ratio: ${aspectRatio}`, `Reduced ratio: ${ratioLabel}`];
+    : [`Resolution: ${activeResolutionSummary}`, `Aspect ratio: ${aspectRatio}`, `Reduced ratio: ${ratioLabel}`];
 
   const signalPortStats = useMemo(() => {
     const stats: Record<number, SignalPortStat> = Object.fromEntries(
@@ -3561,8 +3593,11 @@ export default function App() {
     spareRounded: sparePanelSummary.grandTotal.spareRounded,
     total: sparePanelSummary.grandTotal.total,
   };
-  const vx1000Percent = (wallPixelW * wallPixelH / 6500000) * 100;
-  const vx2000Percent = (wallPixelW * wallPixelH / 13000000) * 100;
+  // Against the pixels a processor really drives. The bounding box counted the
+  // black space in a hole or a step as load the processor would have to carry,
+  // which it never does - a cabinet that is not there needs no bandwidth.
+  const vx1000Percent = (activePixelCount / 6500000) * 100;
+  const vx2000Percent = (activePixelCount / 13000000) * 100;
   // The FEWEST outlets the wall could run on - every outlet filled to the
   // panels-per-outlet limit. A planning floor, not a count of anything: the
   // real patch also has to respect the 16A ceiling and keeps chains together,
@@ -5576,9 +5611,8 @@ const exportJson = () => {
 
       pdf.text(`${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
-      pdf.text(wallResolutionSummaryLines[0], 105, 32);
-      pdf.text(wallResolutionSummaryLines[1], 105, 38);
-      pdf.text(wallResolutionSummaryLines[2], 105, 44);
+      // The Key starts at x=180, so these have 73mm and no more.
+      wallResolutionSummaryLines.forEach((line, i) => drawFitted(line, 105, 32 + i * 6, 73, 10, 6.5));
 
       drawLayoutKey(180, 16);
 
@@ -6417,7 +6451,7 @@ const exportJson = () => {
       `Panels: ${totalPanels} active across ${gridRefs.rows} row${gridRefs.rows === 1 ? "" : "s"} x ${gridRefs.cols} column${gridRefs.cols === 1 ? "" : "s"}`,
       `${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`,
       ...wallResolutionSummaryLines,
-    ], 10, 24, 66, 48);
+    ], 10, 24, 66, 52);
 
     drawInfoBox("Power", [
       `Max draw: ${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A`,
@@ -6428,7 +6462,7 @@ const exportJson = () => {
       `Per outlet: ${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`,
       `Outlet limit: ${safePanelsPerPowerOutlet} panels`,
       `Unassigned power panels: ${unassignedPowerPanels}`,
-    ], 80, 24, 66, 48);
+    ], 80, 24, 66, 52);
 
     drawInfoBox("Weight + Output", [
       `Total weight: ${totalWeight.toFixed(1)} kg`,
@@ -6437,7 +6471,7 @@ const exportJson = () => {
       `Best output: ${bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list"}`,
       `Signal limit: ${safePanelsPerSignalPort} panels / ${formatNumber(signalPortPixels)} px`,
       `Active support span: ${activeColsCount} cols x ${activeRowsCount} rows`,
-    ], 150, 24, 66, 48);
+    ], 150, 24, 66, 52);
 
     drawInfoBox("Panel Count", [
       `${PANEL_COUNT_LABELS.required}: ${formatNumber(panelCounts.required)}`,
@@ -6445,7 +6479,7 @@ const exportJson = () => {
       `${PANEL_COUNT_LABELS.spareRounded}: ${formatNumber(panelCounts.spareRounded)}`,
       `${PANEL_COUNT_LABELS.total}: ${formatNumber(panelCounts.total)}`,
       `Boxes: ${boxCount}`,
-    ], 220, 24, 66, 48);
+    ], 220, 24, 66, 52);
 
     drawInfoBox("Deployment", [
       `Backup signal loop: ${backupSignalLoop ? `Yes, effective signal ports ${effectiveSignalPortsUsed}` : "No"}`,
@@ -8051,15 +8085,25 @@ const exportJson = () => {
                   <div className="mb-2 font-bold">Wall Details</div>
                   <div>Panels: {totalPanels} active across {gridRefs.rows} row{gridRefs.rows === 1 ? "" : "s"} × {gridRefs.cols} column{gridRefs.cols === 1 ? "" : "s"}</div>
                   <div>{wallSizeLabel}: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
+                  {/* The lit pixels, not the rectangle they stand in. On
+                      anything that is not a full rectangle the bounding box
+                      counts the holes and the steps as screen - this is the
+                      figure that does not. The extent is kept right under it
+                      because content is still authored to that rectangle. */}
+                  <div title="Every active panel's own resolution, added up. Black space in a hole or a step is not counted.">
+                    {isMtOnlyWall ? "LED Wall Resolution" : "Resolution"}: {formatNumber(activePixelCount)} active px
+                  </div>
+                  <div className={blackSpacePixels > 0 ? "text-slate-400" : undefined}>
+                    Extent: {wallPixelW} × {wallPixelH}
+                    {blackSpacePixels > 0 ? ` · ${formatNumber(blackSpacePixels)} px of it black` : ""}
+                  </div>
                   {isMtOnlyWall ? (
                     <>
-                      <div>LED Wall Resolution: {wallPixelW} × {wallPixelH}</div>
                       <div>Recommended Content Resolution: {contentPixelW} × {contentPixelH}</div>
                       <div>Physical Aspect Ratio: {physicalRatioLabel}</div>
                     </>
                   ) : (
                     <>
-                      <div>Resolution: {wallPixelW} × {wallPixelH}</div>
                       <div>Aspect: {aspectRatio}</div>
                       <div>Ratio: {ratioLabel}</div>
                     </>
@@ -8078,7 +8122,7 @@ const exportJson = () => {
                   <div className="mb-2 font-bold">Signal + Output</div>
                   <div>Ports used: {effectiveSignalPortsUsed}{backupSignalLoop ? ` (${signalPortsUsed} main + ${signalPortsUsed} backup)` : ""}</div>
                   <div>Pixels per port: {formatNumber(panelPixels)}</div>
-                  <div>Port capacity use: {formatNumber((wallPixelW * wallPixelH) / Math.max(signalPortsUsed, 1), 0)} px avg</div>
+                  <div>Port capacity use: {formatNumber(activePixelCount / Math.max(signalPortsUsed, 1), 0)} px avg</div>
                   <div>VX1000 max use: {formatNumber(vx1000Percent, 1)}%</div>
                   <div>VX2000 max use: {formatNumber(vx2000Percent, 1)}%</div>
                 </div>
