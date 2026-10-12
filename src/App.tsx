@@ -86,7 +86,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.68.0";
+const APP_VERSION = "0.69.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -550,6 +550,10 @@ export const SUB_SCREEN_COLORS = [
   "#fb7185",
 ];
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+// The Auto Snake preview's own colour, for a run that belongs to no
+// sub-screen - violet, which no panel fill, cable or selection mark uses.
+export const SNAKE_PREVIEW_COLOR = "#c084fc";
+
 export const normalizeSubScreenColor = (raw: unknown, index: number): string =>
   typeof raw === "string" && HEX_COLOR.test(raw) ? raw.toLowerCase() : SUB_SCREEN_COLORS[index % SUB_SCREEN_COLORS.length];
 
@@ -1156,6 +1160,50 @@ const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAltern
       return out;
     }),
   ];
+};
+
+/**
+ * The panel order an Auto Snake would patch in, as one segment per run.
+ *
+ * ONE function behind both the preview and the button, deliberately: a
+ * preview that is drawn by its own copy of the walk is a preview of nothing.
+ *
+ * `perSubScreen` treats every sub-screen as its own wall. Without it the band
+ * finder sees the whole layout at once, so two screens sitting at the same
+ * height - touching or not - fall into the same row band and the snake runs
+ * straight from one into the other. Splitting the panels up FIRST, before any
+ * banding, is what keeps each path inside its own screen; nothing downstream
+ * has to know about sub-screens at all. Panels in no sub-screen are a group of
+ * their own, walked last, rather than being dropped or folded into a screen
+ * they are not part of.
+ *
+ * Each group's segments come back in the order its screens are listed, and
+ * each segment starts a fresh port where the caller honours that (see
+ * snakePatch) - which is what "separate entity" means on the patch sheet.
+ */
+export type SnakeOrderOptions = {
+  direction: string;
+  alternates: boolean;
+  perSubScreen: boolean;
+  /** Sub-screen ids, in the order their paths should run. */
+  subScreenIds: string[];
+};
+
+export const snakeOrderSegments = (panels: Cell[], options: SnakeOrderOptions): Cell[][] => {
+  const { direction, alternates, perSubScreen, subScreenIds } = options;
+  const walk = (group: Cell[]): Cell[][] =>
+    direction === "LETTERS"
+      ? orderPanelsForLetters(group)
+      : orderPanelsForSnake(group, direction, alternates).filter((segment) => segment.length > 0);
+  if (!perSubScreen || !subScreenIds.length) return walk(panels);
+  const segments: Cell[][] = [];
+  subScreenIds.forEach((id) => {
+    const group = panels.filter((cell) => cell.subScreenId === id);
+    if (group.length) segments.push(...walk(group));
+  });
+  const loose = panels.filter((cell) => !cell.subScreenId || !subScreenIds.includes(cell.subScreenId));
+  if (loose.length) segments.push(...walk(loose));
+  return segments;
 };
 
 // Mirror a mm rect horizontally inside the wall bbox (front view).
@@ -2506,6 +2554,10 @@ export default function App() {
   const [pendingTestPatternUrl, setPendingTestPatternUrl] = useState<string | null>(null);
   const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
+  // Walk each sub-screen as its own wall rather than letting a row band run
+  // from one screen into the next (see snakeOrderSegments).
+  const [snakePerSubScreen, setSnakePerSubScreen] = useState(true);
+  const [snakePreview, setSnakePreview] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
   const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
@@ -6911,6 +6963,67 @@ const exportJson = () => {
     });
   };
 
+  // One description of the walk, read by both the preview overlay and the
+  // Auto Snake button.
+  const snakeOrderOptions: SnakeOrderOptions = useMemo(
+    () => ({
+      direction: snakeDirection,
+      alternates: snakeAlternates,
+      perSubScreen: snakePerSubScreen,
+      subScreenIds: subScreens.map((screen) => screen.id),
+    }),
+    [snakeDirection, snakeAlternates, snakePerSubScreen, subScreens],
+  );
+
+  /**
+   * The path Auto Snake would patch right now: the panels, in order, grouped
+   * into the runs the button would make.
+   *
+   * Recomputed whenever an option or the layout changes, which is the point -
+   * the overlay has to answer "what will this button do" before it is pressed.
+   * Scoped exactly as the button is scoped, so previewing inside one open
+   * sub-screen shows that screen's path and nothing else.
+   *
+   * Deliberately holds CELLS, not screen positions, and deliberately does not
+   * depend on an in-flight drag. Letter patching walks the connected groups to
+   * find its letters, which costs ~200ms over a 141-panel wall; hanging that
+   * off the drag offset re-ran it on every mouse move and made dragging
+   * unusable in that mode. The positions are read at draw time instead, so the
+   * line still follows a panel being dragged - what it does not do is re-band
+   * the whole wall mid-gesture, which would have the path leaping about while
+   * somebody is only trying to place a panel. The order settles when the drag
+   * is committed to the grid.
+   */
+  const snakePreviewRuns = useMemo(() => {
+    if (!snakePreview) return [];
+    // The button's own scope helper, not a copy of it - a preview scoped by
+    // its own rule is a preview of a different button.
+    const scopeIds = currentScopeIds();
+    const scoped = (scopeIds ? grid.filter((c) => scopeIds.has(c.id)) : grid).filter((c) => isActiveCell(c));
+    if (!scoped.length) return [];
+    let order = 0;
+    return snakeOrderSegments(scoped, snakeOrderOptions).map((segment, segmentIndex) => ({
+      segmentIndex,
+      screenName: segment.length ? subScreens.find((sc) => sc.id === segment[0].subScreenId)?.name ?? null : null,
+      cells: segment.map((cell) => ({ cell, order: (order += 1) })),
+    }));
+  }, [snakePreview, snakeOrderOptions, grid, subScreens, resolvedActiveSubScreenId]);
+
+  /** The same runs with each panel's CURRENT screen position - cheap, so it can follow a drag. */
+  const snakePreviewSegments = useMemo(
+    () =>
+      snakePreviewRuns.map((run) => ({
+        ...run,
+        points: run.cells.map(({ cell, order }) => {
+          const rect = displayRectOf(cell);
+          return { id: cell.id, order, x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+        }),
+      })),
+    // displayRectOf reads the view flip and any in-flight drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [snakePreviewRuns, isFlippedView, moveDrag, wallBBox],
+  );
+
   const snakePatch = () => {
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -6925,9 +7038,9 @@ const exportJson = () => {
       // otherwise a single reading-order segment over row/column bands.
       const letterMode = snakeDirection === "LETTERS";
       const scopedForOrdering = scopeIds ? next.filter((c) => scopeIds.has(c.id)) : next;
-      const segments = letterMode
-        ? orderPanelsForLetters(scopedForOrdering)
-        : orderPanelsForSnake(scopedForOrdering, snakeDirection, snakeAlternates);
+      // The same call the preview overlay makes, so what was drawn is what
+      // gets patched.
+      const segments = snakeOrderSegments(scopedForOrdering, snakeOrderOptions);
 
       if (patchMode === "signal") {
         for (const cell of next) {
@@ -7800,7 +7913,31 @@ const exportJson = () => {
                   <input type="checkbox" checked={snakeAlternates} onChange={() => setSnakeAlternates((prev) => !prev)} />
                   <span>Snake / alternate</span>
                 </label>
+                {/* Only worth offering once there is more than one screen to
+                    keep apart. */}
+                {subScreens.length > 1 ? (
+                  <label
+                    className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                    title="Walk each sub-screen as its own wall. Without this a row of panels running across two screens is patched as one row, straight from one screen into the next."
+                  >
+                    <input type="checkbox" checked={snakePerSubScreen} onChange={() => setSnakePerSubScreen((prev) => !prev)} />
+                    <span>Each sub-screen separately</span>
+                  </label>
+                ) : null}
+                <label
+                  className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                  title="Draw the path Auto Snake would patch over the layout, with its start, direction and panel order"
+                >
+                  <input type="checkbox" checked={snakePreview} onChange={() => setSnakePreview((prev) => !prev)} />
+                  <span>Preview path</span>
+                </label>
                 <Button intent="primary" onClick={snakePatch}><Wand2 className="h-4 w-4" />Auto Snake</Button>
+                {snakePreview && snakePreviewSegments.length ? (
+                  <StatusChip tone="violet">
+                    {`Preview: ${snakePreviewSegments.reduce((sum, seg) => sum + seg.points.length, 0)} panels`}
+                    {snakePreviewSegments.length > 1 ? ` · ${snakePreviewSegments.length} runs` : ""}
+                  </StatusChip>
+                ) : null}
                 <Button intent="secondary" onClick={clearSelectedPortPatching}>
                   Clear Selected {patchMode === "signal" ? (activePort > 0 ? `Port ${activePort}` : "Port") : (activePowerPort > 0 ? `Plug ${activePowerPort}` : "Plug")}
                 </Button>
@@ -8559,6 +8696,99 @@ const exportJson = () => {
                   {cableHops.map((hop) => cableStrokeLayers(`line-${hop.key}`, hop.route.pts, hop.kind, 1))}
                   {cableHops.map((hop) => cableChevron(hop))}
                 </svg>
+
+                {/* Auto Snake preview: the path the button would patch, as it
+                    stands. Above the panel fills and the cable runs so it reads
+                    over a busy wall, below the selection marks so it never
+                    hides what is selected. Drawn from the SAME walk the button
+                    performs (snakePreviewSegments -> snakeOrderSegments), so
+                    this is the order, not an illustration of one. */}
+                {snakePreviewSegments.length ? (
+                  <svg className="pointer-events-none absolute inset-0 z-[38]" width={svgW} height={svgH}>
+                    {snakePreviewSegments.map((segment) => {
+                      const screenIndex = subScreens.findIndex((sc) => sc.name === segment.screenName);
+                      const color = segment.screenName
+                        ? normalizeSubScreenColor(subScreens[screenIndex]?.color, Math.max(screenIndex, 0))
+                        : SNAKE_PREVIEW_COLOR;
+                      const pts = segment.points.map((p) => ({ ...p, px: mmToPx(p.x - workspaceOrigin.x), py: mmToPx(p.y - workspaceOrigin.y) }));
+                      const first = pts[0];
+                      if (!first) return null;
+                      // Numbers need a panel's worth of room to be readable;
+                      // below that the line and its arrows carry the order on
+                      // their own rather than turning into a grey smear.
+                      const cellPx = mmToPx(MODULE_MM);
+                      const showNumbers = cellPx >= 46;
+                      const numberFont = Math.max(8, Math.min(13, Math.round(cellPx * 0.22)));
+                      return (
+                        <g key={`snake-${segment.segmentIndex}`}>
+                          <polyline
+                            points={pts.map((p) => `${p.px},${p.py}`).join(" ")}
+                            fill="none"
+                            stroke="#020617"
+                            strokeWidth={5}
+                            strokeOpacity={0.45}
+                            strokeLinejoin="round"
+                            strokeLinecap="round"
+                          />
+                          <polyline
+                            points={pts.map((p) => `${p.px},${p.py}`).join(" ")}
+                            fill="none"
+                            stroke={color}
+                            strokeWidth={2.5}
+                            strokeLinejoin="round"
+                            strokeLinecap="round"
+                          />
+                          {/* One arrowhead per hop, at its midpoint - which way
+                              the run travels, readable without following the
+                              whole line back to its start. */}
+                          {pts.slice(1).map((p, i) => {
+                            const prev = pts[i];
+                            const angle = (Math.atan2(p.py - prev.py, p.px - prev.px) * 180) / Math.PI;
+                            const mx = (prev.px + p.px) / 2;
+                            const my = (prev.py + p.py) / 2;
+                            return (
+                              <polygon
+                                key={`arrow-${p.id}`}
+                                points="-5,-4 6,0 -5,4"
+                                fill={color}
+                                stroke="#020617"
+                                strokeWidth={0.75}
+                                transform={`translate(${mx} ${my}) rotate(${angle})`}
+                              />
+                            );
+                          })}
+                          {showNumbers
+                            ? pts.map((p) => (
+                                <g key={`num-${p.id}`}>
+                                  <circle cx={p.px} cy={p.py} r={numberFont * 0.95} fill="#020617" fillOpacity={0.72} stroke={color} strokeWidth={1} />
+                                  <text x={p.px} y={p.py + numberFont * 0.36} textAnchor="middle" fontSize={numberFont} fontWeight="bold" fill="#f8fafc">
+                                    {p.order}
+                                  </text>
+                                </g>
+                              ))
+                            : null}
+                          {/* Where this run begins. */}
+                          <circle cx={first.px} cy={first.py} r={Math.max(9, numberFont * 1.5)} fill="none" stroke={color} strokeWidth={3} />
+                          <text
+                            x={first.px}
+                            y={first.py - Math.max(9, numberFont * 1.5) - 5}
+                            textAnchor="middle"
+                            fontSize={Math.max(9, numberFont)}
+                            fontWeight="bold"
+                            fill={color}
+                            stroke="#020617"
+                            strokeWidth={3}
+                            paintOrder="stroke"
+                          >
+                            {snakePreviewSegments.length > 1
+                              ? `START ${segment.segmentIndex + 1}${segment.screenName ? ` · ${segment.screenName}` : ""}`
+                              : "START"}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                ) : null}
 
                 {/* Panel TEXT + port-number badges, lifted out of the panel divs into
                     their own layer above the cable runs (z-[34]) so nothing a cable

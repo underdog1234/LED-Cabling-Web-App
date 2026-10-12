@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.68.0`
+Version `0.69.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -74,6 +74,47 @@ Verified by reading the produced file's own boxes rather than trusting the
 command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
 single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
 exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.69.0
+
+**Auto Snake: each sub-screen on its own, and a live preview**
+
+**Each sub-screen separately** walks every screen as its own wall. Without it
+the band finder sees the whole layout at once, so two screens sitting at the
+same height - touching or not - fall into one row band and the snake runs
+straight out of one screen and into the next. The panels are split up *before*
+any banding, which is what keeps each path inside its own screen, and each
+screen's run starts on a fresh port.
+
+On the two-screen layout this was built against, patching with the option on
+leaves **no port carrying panels from more than one screen**; with it off,
+**5 of the 7 ports** mix the two.
+
+- Screens are walked in the order the Sub-Screens list shows them
+- Panels in no sub-screen are a run of their own, walked last - not dropped,
+  and not folded into a screen they are not part of
+- The checkbox only appears once there is more than one screen to keep apart
+
+**Preview path** draws what Auto Snake would do, before it does it:
+
+- The **start** of each run is ringed and labelled - `START`, or
+  `START 1 · Left` when there is more than one
+- **Direction** from an arrowhead on every hop
+- **Panel order** as a numbered chip on each panel (hidden when zoomed out too
+  far to read, where the line and arrows carry it instead)
+- Each run is drawn in its **sub-screen's own colour**
+- It updates as the options change, and follows a panel being dragged
+
+The preview and the button are **one function** (`snakeOrderSegments`) - a
+preview drawn by its own copy of the walk is a preview of nothing. It is also
+scoped by the button's own scope helper, so previewing inside one open
+sub-screen shows that screen's path and nothing else.
+
+One performance note: Letter patching walks the connected groups to find its
+letters, which costs about 200ms over a 141-panel wall. The preview computes
+the *order* only when the layout or an option changes, and reads panel
+*positions* at draw time - so dragging a panel does not re-band the wall on
+every mouse move.
 
 ## Recent Changes In v0.68.0
 
