@@ -10,6 +10,10 @@
 
 export const MODULE_MM = 500; // base 0.5 m module
 export const HALF_MODULE_MM = 250; // fine snap grid
+// The finest interval two panels may be joined on. Halves fall out of this for
+// free (two quarters), and nothing between a quarter and the next is reachable
+// - see edgeAnchorOffsets.
+export const QUARTER_MODULE_MM = 125;
 export const SNAP_DISTANCE_MM = 32; // edge-anchor snap radius (matches layout tool)
 export const JOIN_GAP_MM = 2; // max gap for two edges to count as joined
 export const JOIN_MIN_SHARED_MM = 100; // min shared edge length for a join
@@ -175,11 +179,159 @@ export type PanelAnchorSpec = {
   shape: PanelShape;
 };
 
-// Anchor offsets along an edge, as fractions of the half extent. Every straight
-// edge uses the same pattern so flush edges (rect-rect, rect-to-shaped-leg) share
-// exact anchor positions and join cleanly.
-const EDGE_ANCHORS = [-0.8, -0.4, 0, 0.4, 0.8];
-const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
+// ---------------------------------------------------------------------------
+// Where a panel's own label goes, so that it lands on the lit part of the
+// panel and not in the empty corner beside it.
+//
+// A rectangle can take its label anywhere. A TRIANGLE or QUARTER CIRCLE
+// cannot: at rotation 0 the triangle's right angle is bottom-left and the
+// quarter circle's is bottom-right, so the opposite corner is empty and a
+// label placed there is cut away with the shape. These two helpers give a
+// point well inside the solid area, mapped through the panel's own rotation
+// and mirror, so the label follows the shape whichever way round it is.
+// ---------------------------------------------------------------------------
+
+/**
+ * A point deep inside a shape's solid area, in the panel's own unrotated
+ * 0..w / 0..h space. Chosen for room around it rather than exact centre of
+ * area, so a two-line label centred there still fits.
+ */
+export const panelShapeLabelPoint = (shape: PanelShape, w: number, h: number): { x: number; y: number } => {
+  if (shape === "triangle") return { x: w * 0.3, y: h * 0.7 };
+  if (shape === "curve") return { x: w * 0.58, y: h * 0.58 };
+  return { x: w / 2, y: h / 2 };
+};
+
+/** True when a shape's label has to be moved off the panel's corner. */
+export const panelShapeNeedsInsetLabel = (shape: PanelShape) => shape === "triangle" || shape === "curve";
+
+/**
+ * A point in a panel's own 0..w / 0..h space, mapped to where it lands on the
+ * canvas once the panel's rotation and any front-view mirror are applied -
+ * the same frame the panel's shape itself is drawn in, so a point inside the
+ * shape stays inside it.
+ */
+export const panelFramePoint = (
+  r: RectMm,
+  rotation: number,
+  mirrorX: boolean,
+  lx: number,
+  ly: number,
+): { x: number; y: number } => {
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const px = lx - r.w / 2;
+  const py = ly - r.h / 2;
+  // Rotate first, then mirror - the order the panel's own draw frame uses.
+  const rx = px * cos - py * sin;
+  const ry = px * sin + py * cos;
+  return { x: r.x + r.w / 2 + (mirrorX ? -rx : rx), y: r.y + r.h / 2 + ry };
+};
+
+/**
+ * Is a point inside the panel's own silhouette? Local 0..w / 0..h space, the
+ * same shapes tracePanelShapePath draws: the triangle's hypotenuse runs from
+ * the top-left corner to the bottom-right one, and the quarter circle's curve
+ * is the quadratic Bezier (w,0) - control (0,0) - (0,h), whose region is
+ * exactly sqrt(x/w) + sqrt(y/h) >= 1.
+ */
+export const pointInPanelShape = (shape: PanelShape, w: number, h: number, x: number, y: number): boolean => {
+  if (w <= 0 || h <= 0) return false;
+  if (x < 0 || y < 0 || x > w || y > h) return false;
+  if (shape === "triangle") return y * w >= x * h;
+  if (shape === "curve") return Math.sqrt(x / w) + Math.sqrt(y / h) >= 1;
+  return true;
+};
+
+/** panelFramePoint the other way round: canvas coordinates back to the panel's own space. */
+export const panelFrameInverse = (
+  r: RectMm,
+  rotation: number,
+  mirrorX: boolean,
+  x: number,
+  y: number,
+): { x: number; y: number } => {
+  const rad = (rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  let dx = x - (r.x + r.w / 2);
+  const dy = y - (r.y + r.h / 2);
+  if (mirrorX) dx = -dx;
+  // Undo the rotation (transpose of the rotation matrix).
+  const px = dx * cos + dy * sin;
+  const py = -dx * sin + dy * cos;
+  return { x: px + r.w / 2, y: py + r.h / 2 };
+};
+
+/** Where a panel's label block is centred, in canvas coordinates. */
+export const panelLabelAnchor = (r: RectMm, shape: PanelShape, rotation: number, mirrorX: boolean) => {
+  const local = panelShapeLabelPoint(shape, r.w, r.h);
+  return panelFramePoint(r, rotation, mirrorX, local.x, local.y);
+};
+
+/**
+ * Does an upright block of text centred at (cx, cy) sit wholly on the lit part
+ * of the panel? Checked corner by corner against the real silhouette, so it
+ * holds at any rotation and for a mirrored (front-view) panel alike.
+ */
+export const panelLabelBlockFitsAt = (
+  r: RectMm,
+  shape: PanelShape,
+  rotation: number,
+  mirrorX: boolean,
+  cx: number,
+  cy: number,
+  halfW: number,
+  halfH: number,
+): boolean => {
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]] as Array<[number, number]>) {
+    const local = panelFrameInverse(r, rotation, mirrorX, cx + sx * halfW, cy + sy * halfH);
+    if (!pointInPanelShape(shape, r.w, r.h, local.x, local.y)) return false;
+  }
+  return true;
+};
+
+/** The same test, for a block centred on the shape's own label point. */
+export const panelLabelBlockFits = (
+  r: RectMm,
+  shape: PanelShape,
+  rotation: number,
+  mirrorX: boolean,
+  halfW: number,
+  halfH: number,
+): boolean => {
+  const anchor = panelLabelAnchor(r, shape, rotation, mirrorX);
+  return panelLabelBlockFitsAt(r, shape, rotation, mirrorX, anchor.x, anchor.y, halfW, halfH);
+};
+
+/**
+ * Where the connector anchors sit along an edge, as offsets in mm from that
+ * edge's midpoint: every QUARTER_MODULE_MM out to the edge's ends, plus the
+ * two end corners themselves.
+ *
+ * These used to be fractions of the half extent - [-0.8, -0.4, 0, 0.4, 0.8] -
+ * which on a 500mm edge put them every 100mm. That is not a lattice any panel
+ * can be joined on: the offsets it allowed (100, 200, 300) are not halves or
+ * quarters of a module, and the ones that are (125, 250, 375) had no anchor
+ * pair at all. Dragging a panel to sit exactly half a module down therefore
+ * fell out of anchor range entirely, dropped through to the 250mm grid snap,
+ * and landed looking right while counting as NOT JOINED - no connector
+ * ordered for it, and the two panels moved independently afterwards.
+ *
+ * Measured in absolute mm rather than as a fraction so the lattice is the same
+ * on every panel size: an MT panel's 1000mm edge gets anchors every 125mm just
+ * like an MG9's 500mm one, so the two can join each other on a quarter.
+ */
+const edgeAnchorOffsets = (halfExtent: number): number[] => {
+  const offsets = new Set<number>([-halfExtent, 0, halfExtent]);
+  for (let d = QUARTER_MODULE_MM; d < halfExtent; d += QUARTER_MODULE_MM) {
+    offsets.add(-d);
+    offsets.add(d);
+  }
+  return [...offsets].sort((a, b) => a - b);
+};
+export const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
 
 // Local (centre-relative, unrotated) anchor points for a panel shape. Base
 // orientations match the layout tool: triangle right-angle bottom-left (legs =
@@ -188,10 +340,12 @@ const ANCHOR_JOIN_TOL = 4; // mm - anchors this close count as coincident
 // on their hypotenuse / curve, so those edges can never join.
 const localAnchors = (shape: PanelShape, halfW: number, halfH: number): Array<{ x: number; y: number }> => {
   const pts: Array<{ x: number; y: number }> = [];
-  const left = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: -halfW, y: t * halfH }));
-  const right = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: halfW, y: t * halfH }));
-  const top = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: t * halfW, y: -halfH }));
-  const bottom = () => EDGE_ANCHORS.forEach((t) => pts.push({ x: t * halfW, y: halfH }));
+  const alongH = edgeAnchorOffsets(halfH);
+  const alongW = edgeAnchorOffsets(halfW);
+  const left = () => alongH.forEach((t) => pts.push({ x: -halfW, y: t }));
+  const right = () => alongH.forEach((t) => pts.push({ x: halfW, y: t }));
+  const top = () => alongW.forEach((t) => pts.push({ x: t, y: -halfH }));
+  const bottom = () => alongW.forEach((t) => pts.push({ x: t, y: halfH }));
   if (shape === "triangle") {
     left();
     bottom();
@@ -204,7 +358,17 @@ const localAnchors = (shape: PanelShape, halfW: number, halfH: number): Array<{ 
     left();
     right();
   }
-  return pts;
+  // A corner belongs to two edges, so it was pushed twice. Left as duplicates
+  // it would let two panels that merely TOUCH AT A CORNER report the two
+  // coincident anchors panelsAnchorJoined reads as a join - one point counted
+  // twice - and order connectors for an edge they do not share.
+  const seen = new Set<string>();
+  return pts.filter((p) => {
+    const key = `${p.x}|${p.y}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 };
 
 /**
@@ -275,6 +439,46 @@ export const panelsAnchorJoined = (a: PanelAnchorSpec, b: PanelAnchorSpec): bool
     if (shared >= 2) return true;
   }
   return false;
+};
+
+/**
+ * Orientation of the LINE two joined panels meet along, in world space, or
+ * null when they do not meet at all.
+ *
+ * "horizontal" means the shared edge is a horizontal line, so one panel sits
+ * on top of the other; "vertical" means a vertical line, so they sit side by
+ * side. Taken from the panels' rotated world anchors rather than their
+ * unrotated footprints, so turning a panel turns the edges it joins along -
+ * and therefore the connectors that edge needs (see model/connectors.ts).
+ *
+ * A panel spun to something other than a quarter turn meets its neighbour on a
+ * slope; that is classified by whichever way the edge leans furthest, which is
+ * the connector a builder would reach for.
+ */
+export const sharedEdgeOrientation = (a: PanelAnchorSpec, b: PanelAnchorSpec): "horizontal" | "vertical" | null => {
+  const bw = panelWorldAnchors(b);
+  const shared = panelWorldAnchors(a).filter((pa) =>
+    bw.some((pb) => Math.abs(pa.x - pb.x) <= ANCHOR_JOIN_TOL && Math.abs(pa.y - pb.y) <= ANCHOR_JOIN_TOL),
+  );
+  if (shared.length < 2) return null;
+  // Every shared anchor lies on the one edge, so the two furthest apart span it.
+  let spanX = 0;
+  let spanY = 0;
+  let span = 0;
+  for (let i = 0; i < shared.length; i += 1) {
+    for (let j = i + 1; j < shared.length; j += 1) {
+      const dx = Math.abs(shared[i].x - shared[j].x);
+      const dy = Math.abs(shared[i].y - shared[j].y);
+      const d = Math.hypot(dx, dy);
+      if (d > span) {
+        span = d;
+        spanX = dx;
+        spanY = dy;
+      }
+    }
+  }
+  if (span <= ANCHOR_JOIN_TOL) return null;
+  return spanX >= spanY ? "horizontal" : "vertical";
 };
 
 /** Connected components over the anchor-join relation; id -> group index. */
@@ -398,6 +602,99 @@ export const findOverlaps = (
  * and panels within a band left→right. Used by snake ordering, pixel maths,
  * and the PNG test pattern.
  */
+/**
+ * Row / column reference for a panel: which cells of the wall's own module
+ * grid it stands in, 1-based and inclusive.
+ *
+ * Replaces clustering panels into rows by proximity, which cannot describe a
+ * wall whose panels are not all on the same lines: a panel dropped half a
+ * module down sits in neither of the rows around it, and the old clustering
+ * gave it a row of its own - so a three-high brick-bonded wall counted five
+ * rows and every number after the offset panel was wrong.
+ *
+ * Here the grid is fixed by the wall itself, so a panel that straddles two
+ * rows is simply IN both of them and says so ("3 & 4"), and every other panel
+ * keeps the number it always had.
+ */
+export type GridRef = { from: number; to: number };
+
+/**
+ * Cell size for the grid: the panel extent that occurs most often on that
+ * axis. That keeps one panel to one cell for whatever the wall is mostly
+ * built from - a wall of 1m-wide MT panels numbers them 1, 2, 3, not 1&2,
+ * 3&4 - while a panel of a different size on the same wall honestly spans
+ * the cells it covers.
+ */
+const commonExtent = (extents: number[]): number => {
+  const counts = new Map<number, number>();
+  extents.forEach((value) => {
+    const key = Math.round(value);
+    if (key > 0) counts.set(key, (counts.get(key) ?? 0) + 1);
+  });
+  let best = 0;
+  let bestCount = 0;
+  counts.forEach((count, key) => {
+    if (count > bestCount || (count === bestCount && key < best)) {
+      best = key;
+      bestCount = count;
+    }
+  });
+  return best || MODULE_MM;
+};
+
+// Fraction of a cell that a panel may poke into the next one before it counts
+// as being in it. Absorbs rounding, not a real offset.
+const GRID_REF_TOL = 0.12;
+
+const gridSpan = (offset: number, extent: number, step: number): GridRef => {
+  const from = Math.floor(offset / step + GRID_REF_TOL);
+  const to = Math.max(from, Math.ceil((offset + extent) / step - GRID_REF_TOL) - 1);
+  return { from: from + 1, to: to + 1 };
+};
+
+export type PanelGridRefs = {
+  /** id -> the rows and columns that panel stands in. */
+  refs: Map<string, { rows: GridRef; cols: GridRef }>;
+  /** How many grid cells the wall spans on each axis. */
+  rows: number;
+  cols: number;
+};
+
+export const panelGridRefs = (panels: PanelRecord[], rectOf: (p: PanelRecord) => RectMm): PanelGridRefs => {
+  const active = panels.filter((p) => !p.isRemoved);
+  const rects = active.map(rectOf);
+  const refs = new Map<string, { rows: GridRef; cols: GridRef }>();
+  if (!rects.length) return { refs, rows: 0, cols: 0 };
+  const bbox = activeBBox(rects);
+  const stepX = commonExtent(rects.map((r) => r.w));
+  const stepY = commonExtent(rects.map((r) => r.h));
+  let rows = 0;
+  let cols = 0;
+  active.forEach((panel, i) => {
+    const r = rects[i];
+    const ref = {
+      cols: gridSpan(r.x - bbox.x, r.w, stepX),
+      rows: gridSpan(r.y - bbox.y, r.h, stepY),
+    };
+    refs.set(panel.id, ref);
+    rows = Math.max(rows, ref.rows.to);
+    cols = Math.max(cols, ref.cols.to);
+  });
+  return { refs, rows, cols };
+};
+
+/** "3", or "3 & 4" for a panel straddling two, or "3-6" for a longer run. */
+export const gridRefLabel = (ref: GridRef | undefined): string => {
+  if (!ref) return "-";
+  if (ref.to <= ref.from) return String(ref.from);
+  if (ref.to === ref.from + 1) return `${ref.from} & ${ref.to}`;
+  return `${ref.from}-${ref.to}`;
+};
+
+/** The same reference read from the other side of the wall. */
+export const mirrorGridRef = (ref: GridRef | undefined, total: number): GridRef | undefined =>
+  ref ? { from: total + 1 - ref.to, to: total + 1 - ref.from } : undefined;
+
 export const bandPanels = (
   panels: PanelRecord[],
   rectOf: (p: PanelRecord) => RectMm,

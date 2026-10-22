@@ -2,7 +2,7 @@ import type { StockRow } from "../App";
 import type { LiveStockEntry } from "./rentmanClient";
 
 // Shaped panels (Triangle/Curved) emit one StockRow per rotation
-// orientation, coded `${baseCode}-${orientation}` (e.g. "12398-LU" for
+// orientation, coded `${baseCode}-${orientation}` (e.g. "12399-LU" for
 // Triangle Left-Up) - see stockRows in App.tsx. All orientations of the
 // same physical item share one Rentman equipment record, so lookups key
 // off the orientation-stripped base code.

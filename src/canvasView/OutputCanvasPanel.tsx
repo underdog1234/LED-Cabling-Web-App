@@ -11,7 +11,7 @@ import {
   cellRect,
 } from "../App";
 import { subScreenBBoxOf } from "../subScreens/subScreenModel";
-import { resolutionOf, subScreenResolutionOf } from "./canvasModel";
+import { subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasModel";
 import type { ProcessorInput } from "../novastar/processorModels";
 import type { InputMode } from "../novastar/exportBuilder";
 
@@ -104,7 +104,10 @@ export default function OutputCanvasPanel({
       });
     }
     const activePanels = grid.filter((cell) => !cell.isRemoved);
-    const wholeResolution = resolutionOf(activePanels);
+    // Footprint, matching the sub-screen entries above: this rectangle is
+    // canvas area, and the panels inside it are placed by their physical
+    // mm offsets (finalCanvasPositionOf).
+    const wholeResolution = wallFootprintResolutionOf(activePanels);
     return [
       {
         id: null,
@@ -113,6 +116,8 @@ export default function OutputCanvasPanel({
         canvasY: wholeLayoutCanvasY,
         bboxMm: activeBBox(activePanels.map(cellRect)),
         resolution: wholeResolution,
+        // The whole layout has no SubScreen record to hang a custom region
+        // on, so it is always the panels' own footprint.
         panelResolution: wholeResolution,
         isCustom: false,
       },
@@ -151,7 +156,9 @@ export default function OutputCanvasPanel({
   });
   overlaps.forEach(([a, b]) => warnings.push(`${a} and ${b} overlap on the output canvas.`));
   const layoutBBoxAll = activeBBox(grid.filter((c) => !c.isRemoved).map(cellRect));
-  const layoutRes = resolutionOf(grid);
+  // Quoted beside the layout's physical size in metres, so it is the wall's
+  // own Resolution - the same figure Wall Details and the test pattern give.
+  const layoutRes = wallFootprintResolutionOf(grid);
   if (entries.length > 1) {
     const minX = Math.min(...entries.map((e) => e.canvasX));
     const minY = Math.min(...entries.map((e) => e.canvasY));

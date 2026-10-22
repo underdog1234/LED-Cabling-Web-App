@@ -4,7 +4,7 @@
 // writes back into panel x/y. Physical layout and canvas position are, and
 // must stay, two separate coordinate systems (see App.tsx SubScreen/Cell
 // comments).
-import { type RectMm, bandPanels } from "../model/panels";
+import { type RectMm, activeBBox, bandPanels } from "../model/panels";
 import { type Cell, PANEL_TYPES, cellPanelType, cellRect } from "../App";
 
 export type CanvasResolution = { w: number; h: number };
@@ -35,9 +35,58 @@ export const resolutionOf = (panels: Cell[]): CanvasResolution => {
   return { w: pixelW, h: pixelH };
 };
 
-/** A sub-screen's own pixel resolution, derived from its member panels. */
+/**
+ * The pixel FOOTPRINT a panel set occupies: its physical bounding box in mm,
+ * converted with the finest pixel pitch on the wall.
+ *
+ * Deliberately NOT resolutionOf above. That one packs each row's panels
+ * together, which is right for the NovaStar cabinet topology (a processor has
+ * no such thing as an empty gap pixel) but under-reports the wall itself the
+ * moment the layout stops being a full rectangle: a stepped 18.5m wall whose
+ * longest row holds 35 panels reads 5,880px wide there, when the content
+ * mapped onto it has to span all 37 module columns - 6,216px. This is the
+ * figure the wall's own Resolution, aspect ratio and content size are quoted
+ * from, and for any rectangular wall the two agree exactly.
+ */
+export const wallFootprintResolutionOf = (panels: Cell[]): CanvasResolution => {
+  const active = panels.filter((cell) => !cell.isRemoved);
+  if (!active.length) return { w: 0, h: 0 };
+  const bbox = activeBBox(active.map(cellRect));
+  let pxPerMmX = 0;
+  let pxPerMmY = 0;
+  active.forEach((cell) => {
+    const spec = PANEL_TYPES[cellPanelType(cell)];
+    const rect = cellRect(cell);
+    // cellRect already swapped the panel's mm footprint for a quarter turn, so
+    // its pixel grid has to swap with it.
+    const turned = Math.abs(rect.w - spec.w * 1000) > 1;
+    const pixW = turned ? spec.pixH : spec.pixW;
+    const pixH = turned ? spec.pixW : spec.pixH;
+    if (rect.w > 0) pxPerMmX = Math.max(pxPerMmX, pixW / rect.w);
+    if (rect.h > 0) pxPerMmY = Math.max(pxPerMmY, pixH / rect.h);
+  });
+  return { w: Math.round(bbox.w * pxPerMmX), h: Math.round(bbox.h * pxPerMmY) };
+};
+
+/**
+ * A sub-screen's own pixel resolution: the FOOTPRINT its panels stand in, for
+ * exactly the reasons given above - a sub-screen is a wall in its own right,
+ * and the content mapped onto it has to span the whole rectangle.
+ *
+ * This used to be resolutionOf, the packed space, which lost a module column
+ * per gap: a 22-column sub-screen with a hole in each row was quoted as
+ * 3,528px wide on the Output Canvas and in the PDF, while the test pattern
+ * rendered the 3,696px the content really is. The packed figure is still the
+ * right one for the NovaStar cabinet topology - that is a different question,
+ * asked by exportBuilder, which goes to resolutionOf directly.
+ *
+ * It is also the only figure consistent with finalCanvasPositionOf, which
+ * places each panel on the canvas by its PHYSICAL mm offset within the
+ * sub-screen: with the packed figure, a sub-screen's own panels could sit
+ * outside the rectangle the canvas view drew around them.
+ */
 export const subScreenResolutionOf = (panels: Cell[], subScreenId: string): CanvasResolution =>
-  resolutionOf(panels.filter((cell) => cell.subScreenId === subScreenId));
+  wallFootprintResolutionOf(panels.filter((cell) => cell.subScreenId === subScreenId));
 
 /**
  * Each panel's tightly-packed pixel position within the wall's own native

@@ -1,7 +1,7 @@
 ﻿import { Wand2, Zap, Download, Upload, FileText } from "lucide-react";
 import React, { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { ImageDown, Video, LayoutGrid } from "lucide-react";
-import { HelpCircle, Redo2, Undo2 } from "lucide-react";
+import { HelpCircle, Redo2, Undo2, X } from "lucide-react";
 import { Button, Card, CardHeader, CardContent, CardTitle, Input, ControlGroup, StatusChip } from "./components/ui";
 import {
   type RectMm,
@@ -12,13 +12,29 @@ import {
   bandPanelsByColumn,
   computeAnchorSnapDelta,
   connectedGroups,
+  gridRefLabel,
+  mirrorGridRef,
+  panelFramePoint,
+  panelGridRefs,
+  panelLabelAnchor,
+  panelLabelBlockFits,
+  panelLabelBlockFitsAt,
+  panelShapeLabelPoint,
+  panelShapeNeedsInsetLabel,
   connectedGroupsByGeom,
   findOverlaps,
   joinedGroupIdsByGeom,
   panelsAnchorJoined,
   rectsJoined,
+  sharedEdgeOrientation,
   MODULE_MM,
 } from "./model/panels";
+import {
+  CONNECTOR_NAMES,
+  connectorForEdge,
+  type ConnectorKey,
+  type ConnectorPanelClass,
+} from "./model/connectors";
 import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
 import SubScreenPanel from "./subScreens/SubScreenPanel";
 import ObstructionsPanel from "./obstructions/ObstructionsPanel";
@@ -32,15 +48,31 @@ import { renderBasicLedMap } from "./exports/basicLedMap";
 import { drawObstructions } from "./obstructions/drawObstructions";
 import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
-import { finalCanvasPositionOf, subScreenResolutionOf } from "./canvasView/canvasModel";
+import { finalCanvasPositionOf, resolutionOf, subScreenResolutionOf, wallFootprintResolutionOf } from "./canvasView/canvasModel";
+import { PNG_EXPORT_DPI, withPngDpi } from "./export/pngDpi";
 import { subScreenPanelCount } from "./subScreens/subScreenModel";
-import { type TestPatternProject, LOOP_SECONDS, DRAW_FPS, computeTestPatternLayout, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
+import { type TestPatternLayout, type TestPatternProject, LOOP_SECONDS, computeTestPatternLayout, drawSurfaceBoundaries, drawTestPatternFrame, getContentPixelHeight } from "./testPattern/drawTestPattern";
+import { MP4_PROFILE, MP4_RECORD_MARGIN_SECONDS, h264LevelFor, keyframeIntervalFor } from "./testPattern/mp4Encode";
 import { isMultiScreenLikely, requestScreenDetails, openWindowOnScreen } from "./testPattern/screenPlacement";
 import ScreenPickerModal from "./testPattern/ScreenPickerModal";
 import { PROCESSOR_SPECS, PROCESSOR_MODEL_IDS, type ProcessorModelId } from "./novastar/processorModels";
 import { buildExportSummaryAndCabinets, buildNovaStarExport, WHOLE_LAYOUT_KEY, type CanvasEntryInput, type InputMode } from "./novastar/exportBuilder";
 import NovaStarExportPanel from "./novastar/NovaStarExportPanel";
 import { applyStockOverrides, baseCodeOf, buildStockComparison, loadStockOverrides, saveStockOverrides, type StockComparisonRow, type StockOverrides } from "./rentman/stockOverrides";
+import { isCancelledStatus, peakUsage } from "./rentman/availabilityPeak";
+import {
+  addedStockCodes,
+  applyStockEdits,
+  calculatedTotalOf,
+  normalizeStockEdits,
+  removedStockRows,
+  stockEditCount,
+  withStockAdded,
+  withStockQty,
+  withStockRemoved,
+  withStockRowReset,
+  type StockEdits,
+} from "./stock/stockEdits";
 import {
   fetchEquipmentStock,
   fetchEquipmentAvailability,
@@ -59,13 +91,13 @@ const GRID_GAP = 8;
 const MAX_PIXELS_PER_PORT = 650000;
 const VOLTAGE = 230;
 const MAX_OUTLET_AMPS = 16;
-const POWER_COLOR = "#f97316";
+export const POWER_COLOR = "#f97316";
 // Chain-start (and backup-loop end) indicator outlines drawn alongside the
 // existing panel borders. Blue = first panel of a signal chain (and the last
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.43.0";
+const APP_VERSION = "0.72.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -75,9 +107,21 @@ const APP_VERSION = "0.43.0";
 // canvas resolution with the wall's mm dimensions (as a flat multiplier
 // does) makes huge walls render at far more pixels - and file size - than
 // that fixed print area could ever show, with zero visible quality gain.
-const PDF_LAYOUT_IMAGE_DPI = 300;
+//
+// 600, not the 300 it was, because these pages get printed ENLARGED. The
+// report is A4, and a layout blown up to A3 is 1.41x bigger on paper from
+// the same pixels - 300 DPI became 212, and the panel text, which is only
+// about a millimetre tall to begin with, went to pieces. At 600 the same
+// A3 print lands at 424 DPI, and A2 still has 300 to work with.
+const PDF_LAYOUT_IMAGE_DPI = 600;
 const PDF_LAYOUT_USABLE_WIDTH_MM = 277; // matches drawLayoutPage's usableWidth (pageWidth - 20)
 const PDF_LAYOUT_USABLE_HEIGHT_MM = 152; // matches drawLayoutPage's usableHeight (pageHeight - 58)
+// Ceiling on one layout image, whatever the DPI above asks for. The print
+// area is fixed, so at 600 DPI the largest canvas this can ever produce is
+// about 6,500 x 3,600 (23MP) and this never bites; it is here so that
+// raising the DPI again cannot quietly hand the browser a canvas too big to
+// allocate, which fails by returning a BLANK image rather than by throwing.
+const PDF_LAYOUT_MAX_IMAGE_PIXELS = 40e6;
 
 export const PANEL_TYPES = {
   MG9: {
@@ -99,13 +143,14 @@ export const PANEL_TYPES = {
       slingWeight: 1.5,
     },
     stock: {
-      panels: 319,
+      panels: 320,
+      // Confirmed against Rentman (GET /equipment?code=12247,12353).
       vx1000: 2,
-      vx2000: 2,
+      vx2000: 3,
       distro32: 4,
       distro63: 4,
-      powerCable15m: 85,
-      signalCable15m: 53,
+      powerCable15m: 93,
+      signalCable15m: 57,
       hangingBar: 40,
       reinforcementPlate: 160,
       reinforcementScrew: 400,
@@ -131,10 +176,15 @@ export const PANEL_TYPES = {
     },
     stock: {
       panels: 100,
-      distro32: 0,
-      distro63: 0,
-      powerCable15m: 0,
-      signalCable15m: 0,
+      distro32: 4,
+      // 12246 / 12254 / 12263 are single stock lines for the business, not
+      // one shelf per panel type - an MT wall pulls the same distros and the
+      // same cables off the same shelf as an MG9 one, so these carry the same
+      // quantities. They read 0 here before, which reported every cable on an
+      // MT project as a full shortfall.
+      distro63: 4,
+      powerCable15m: 93,
+      signalCable15m: 57,
       hangingBar: 10,
       reinforcementPlate: 100,
       reinforcementScrew: 400,
@@ -211,8 +261,19 @@ const DEPLOYMENT_TYPES = {
   FLOOR: "Floor",
 } as const;
 
-const STOCK_CATALOG = {
+export const STOCK_CATALOG = {
   prodCase: { code: "12317", name: "LED Prod Case", stock: 1 },
+  // The processor the project is built around. Which of the two gets pulled
+  // follows the Processor Model selection, one per project (see stockRows) -
+  // "None selected" means manual port planning and no processor row at all.
+  // Shelf quantities are the MG9 catalogue's own vx1000/vx2000 figures, read
+  // from there rather than retyped so there is one number to keep current.
+  vx1000Pro: { code: "12247", name: "NovaStar VX1000 Pro LED Processor", stock: PANEL_TYPES.MG9.stock.vx1000 },
+  vx2000Pro: { code: "12353", name: "NovaStar VX2000 Pro LED Processor Rack", stock: PANEL_TYPES.MG9.stock.vx2000 },
+  // One assorted set, not a per-panel count - Rentman stocks exactly 1 of it.
+  // Goes out with anything that stands on the floor rather than hanging; see
+  // stockRows for the rule.
+  levellingPackers: { code: "12374", name: "Assorted Levelling Packers & Shims", stock: 1 },
   signalJoiner: { code: "12280", name: "SEETRONIC SE8FF-05 F/M - F/M Joiner", stock: 10 },
   signalJoinerCable: { code: "12312", name: "SEETRONIC F/M - F/M Cable", stock: 11 },
   modularFrameScrew: { code: "12253", name: "YES TECH Modular Frame Installation Screw", stock: 384 },
@@ -223,19 +284,58 @@ const STOCK_CATALOG = {
   modularFrame860: { code: "12269", name: "YES TECH Modular Frame 860mm x 500mm (Side Piece)", stock: 3 },
   bottomBeam1m: { code: "12270", name: "YES TECH Modular Frame Bottom Beam 1m", stock: 8 },
   connectingJoint: { code: "12273", name: "YES TECH Modular Frame Connecting Joint", stock: 192 },
-  danceFloorFeet: { code: "12276", name: "YES TECH Modular Frame Feet for Dance Floor Mode", stock: 384 },
-  floorReinforcementBar: { code: "12274", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 384 },
-  floorTaperPin: { code: "12275", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 1536 },
-  temperedGlass: { code: "12272", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 384 },
-  mg12Triangle: { code: "12398", name: "Triangle Panel", stock: 20 },
-  mg13Curved: { code: "12399", name: "1/4 Curved Panel", stock: 20 },
+  danceFloorFeet: { code: "12276", name: "YES TECH Modular Frame Feet for Dance Floor Mode", stock: 576 },
+  // These three carried 12274 / 12275 / 12272 until a Rentman stock check came
+  // back with someone else's name against each of them: those codes are the MT
+  // Corner Connecting Bracket, its Bolt, and the Patch F/M - F/M Signal Cable
+  // (all three now in this catalogue, below). The codes here are the confirmed
+  // ones. Their shelf quantities are the catalogue's own again - the figures
+  // that check returned belonged to the three items above, not to these.
+  floorReinforcementBar: { code: "12251", name: "YES TECH Modular Frame Floor Reinforcement Bar", stock: 384 },
+  floorTaperPin: { code: "12252", name: "YES TECH Modular Frame Floor Taper Mounting Pin", stock: 1536 },
+  temperedGlass: { code: "12250", name: "YES TECH 500mm x 500mm Tempered Glass Floor Cover", stock: 384 },
+  // Triangle is 12399 and quarter circle is 12398, the opposite way round to
+  // what the names suggest - confirmed against Rentman, where a check on the
+  // old codes returned each other's item. Do not "tidy" these back.
+  mg12Triangle: { code: "12399", name: "Triangle Panel", stock: 20 },
+  mg13Curved: { code: "12398", name: "1/4 Curved Panel", stock: 20 },
   mg9Corner: { code: "12225", name: "YES TECH MG9 P2.9 500mm x 500mm LED Corner Panel", stock: 80 },
-  cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 240 },
+  // The "150 Connector" of the connector rules (see model/connectors.ts) -
+  // one stock item, whichever rule asks for it.
+  cornerFlatConnector: { code: "12260", name: "YES TECH MG9 150 Corner Panels as Flat Connector", stock: 320 },
+  // The "MG9 Corner Connector". The connector brief gave this 12260 as well,
+  // the same code as the 150 Connector above; the catalogue has it as its own
+  // item on 12258, with its own shelf quantity, so that is what is used. Two
+  // rules pulling one code would have ordered the wrong part for half of them.
   cornerCornerConnector: { code: "12258", name: "YES TECH MG9 Corner Connector", stock: 160 },
+  // Shelf quantities below came from a Rentman stock check (see the stock
+  // figures note in README). mg9VerticalConnector was not in that return, so
+  // it stays at 0 and reads as a full shortfall until a stock check or an
+  // override fills it in - honest about what is not known, rather than a
+  // guess that quietly under-orders.
+  connector180: { code: "12476", name: "YES TECH MG9 180 Connector", stock: 80 },
+  horizontalConnector: { code: "12623", name: "YES TECH MG9 Horizontal Connector", stock: 1170 },
+  mg9VerticalConnector: { code: "12480", name: "YES TECH MG9 Vertical Connector", stock: 0 },
+  distro32Adaptor: { code: "6650", name: "32A 3\u03a6 PDL - 32A 3\u03a6 Ceeform Power Adaptor", stock: 10 },
   // Ballast for the temporary fencing around a ground-supported wall.
   // `code` is Rentman's equipment CODE (12357), not its internal record id
   // (28512) - every lookup in this app goes through the code, so the id would
   // silently resolve to nothing.
+  // The three items whose codes this catalogue used to have on its own floor
+  // parts and shaped panels. Nothing here works out a requirement for them -
+  // the deployment-hardware formulas cover MG9 only, and the signal count
+  // already has its own joiner and joiner cable - so they never appear on a
+  // stock list by themselves. They are here so they can be ADDED to one by
+  // hand (see "Add an item" under Stock Calculations), and so a Rentman stock
+  // check knows the codes.
+  patchSignalCable: { code: "12272", name: "YES TECH Patch F/M - F/M Signal Cable", stock: 14 },
+  mtCornerBracket: { code: "12274", name: "YES TECH MT Corner Connecting Bracket", stock: 100 },
+  mtCornerBracketBolt: { code: "12275", name: "YES TECH MT Corner Connecting Bracket Bolt", stock: 400 },
+  // The replaceable LED module inside an MT mesh panel. Never ordered as a
+  // build quantity - the modules arrive fitted in the panels - so its row is
+  // pure spare: a few to swap out on site when one fails. Shelf quantity
+  // confirmed against Rentman.
+  mtMeshModule: { code: "12626", name: "YES TECH MT P3.9-7.8 LED Mesh Module", stock: 20 },
   tempFencingWeight: { code: "12357", name: "Temporary Fencing Weight", stock: 51 },
   // Stocked and ordered as COMPLETE posters, never as the eight sections the
   // grid holds - so this row's quantity is poster count, not section count.
@@ -245,12 +345,60 @@ const STOCK_CATALOG = {
 // Ballast per metre of wall width for a ground-supported wall's fencing.
 const TEMP_FENCING_WEIGHTS_PER_METRE = 3;
 
+/**
+ * Spare MT mesh modules, as a fraction of the MT panels on the wall.
+ *
+ * MT panels themselves carry a 0% spare ratio (see PANEL_TYPES.MT.defaults) -
+ * nobody takes a spare mesh panel - because the part that gets swapped when
+ * something fails is the MODULE inside one. This is that spare, and the only
+ * reason the module ever appears on a stock list; it is never a build
+ * quantity, since the modules go out fitted in the panels.
+ */
+const MT_MESH_MODULE_SPARE_RATIO = 0.03;
+
+/**
+ * Which variants each panel type can be set to.
+ *
+ * The shaped variants are MG9 parts, so they are MG9-only. CORNER is the
+ * exception: an MT panel can be used as a corner too. It is the SAME MT panel
+ * off the same shelf - nothing changes in the panel count - it just needs
+ * corner hardware, which stockRows counts per corner panel (2 brackets and 8
+ * bolts each).
+ */
+export const PANEL_TYPE_VARIANTS: Record<string, string[]> = {
+  MG9: ["STANDARD", "TRIANGLE", "CURVED", "CORNER", "CORNER_FLAT"],
+  MT: ["STANDARD", "CORNER"],
+  POSTER: ["STANDARD"],
+};
+
 export const PANEL_VARIANTS = {
   STANDARD: { id: "STANDARD", label: "Standard MG9", symbol: "", stockItem: null, shape: "rect" },
   TRIANGLE: { id: "TRIANGLE", label: "MG12 Triangle Panel", symbol: "△", stockItem: STOCK_CATALOG.mg12Triangle, shape: "triangle" },
   CURVED: { id: "CURVED", label: "MG13 1/4 Curved Panel", symbol: "◜", stockItem: STOCK_CATALOG.mg13Curved, shape: "curve" },
   CORNER: { id: "CORNER", label: "MG9 LED Corner Panel", symbol: "Corner", stockItem: STOCK_CATALOG.mg9Corner, shape: "corner" },
+  // The same physical part as CORNER - same stock item, same shelf, same spare
+  // bucket - laid in flat instead of folded round a corner. Only the join it
+  // makes with its neighbour differs, and that is what decides the connector
+  // (see model/connectors.ts). Drawn without the corner hatch so which panels
+  // are actually turning a corner is readable at a glance.
+  CORNER_FLAT: { id: "CORNER_FLAT", label: "MG9 LED Corner Panel (flat)", symbol: "Corner flat", stockItem: STOCK_CATALOG.mg9Corner, shape: "rect" },
 } as const;
+
+/**
+ * The variant's name for a given panel type. The catalogue labels name MG9
+ * because that is the type they were written for; an MT panel used as a corner
+ * is the same variant and wants its own name on the picker, not "MG9".
+ */
+export const variantLabelFor = (panelType: string, variant: keyof typeof PANEL_VARIANTS): string => {
+  const label = PANEL_VARIANTS[variant].label;
+  return panelType === "MG9" ? label : label.replace(/MG9/g, PANEL_TYPES[panelType as PanelTypeKey]?.name ?? panelType);
+};
+
+/** A variant the panel type does not have falls back to standard - a hand-edited or older file can hold one. */
+export const variantForType = (panelType: string, variant: unknown): string =>
+  typeof variant === "string" && PANEL_VARIANTS[variant as keyof typeof PANEL_VARIANTS] && PANEL_TYPE_VARIANTS[panelType]?.includes(variant)
+    ? variant
+    : "STANDARD";
 
 // Shaped panels (MG12 triangle / MG13 quarter circle) are physical one-way
 // pieces: the location of the right-angle corner after rotation decides which
@@ -262,10 +410,20 @@ const SHAPE_ORIENTATIONS = {
   RD: { key: "RD", icon: "↘", label: "Right Down" },
 } as const;
 type ShapeOrientationKey = keyof typeof SHAPE_ORIENTATIONS;
-// Right-angle corner after clockwise rotation -> orientation bucket.
-// Base shapes (rotation 0): triangle corner bottom-left (LD); sector corner bottom-right (RD).
-const TRIANGLE_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "LD", 90: "LU", 180: "RU", 270: "RD" };
-const SECTOR_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "RD", 90: "LD", 180: "LU", 270: "RU" };
+// Which physical part a rotation calls for, as the shelf names it. Read from
+// the FRONT of the wall, which is the side you are standing on when you build
+// it.
+//
+// Left/Right is the corner the right angle is drawn in. Up/Down is the
+// SHELF's own vertical sense, which runs the opposite way to the drawn corner:
+// a rotation-0 triangle draws its right angle at the bottom and is the part
+// named "Up". That is not a slip - it is how the parts are labelled, confirmed
+// by the person who picks them, and the label has to name the part somebody
+// pulls rather than describe the picture. Do not "correct" these back to the
+// drawn corner; the stock list, the panel labels and the pull sheet all go
+// through here, so flipping them silently orders the wrong one-way part.
+const TRIANGLE_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "LU", 90: "LD", 180: "RD", 270: "RU" };
+const SECTOR_ORIENTATION: Record<number, ShapeOrientationKey> = { 0: "RU", 90: "LU", 180: "LD", 270: "RD" };
 // Per-orientation stock on the shelf (matches the layout tool's inventory).
 const SHAPED_STOCK_PER_ORIENTATION = { TRIANGLE: 5, CURVED: 5 } as const;
 
@@ -319,6 +477,12 @@ export type StockRow = {
   spareRounded?: number;
   /** TOTAL required = required + spareRounded. The real order/pull quantity, and what `net` is measured against. */
   rounded?: number;
+  /** Set when a manual edit replaced the order quantity - what the tool itself worked out, kept so every reader of this row can show both (see stock/stockEdits). */
+  calculated?: number;
+  /** True when this row's quantity was typed in by hand rather than calculated. */
+  edited?: boolean;
+  /** True when the row itself is on the list by hand - nothing calculated a requirement for it. */
+  manual?: boolean;
 };
 
 // A panel in the free workspace. x/y are the TOP-LEFT corner in workspace
@@ -434,6 +598,10 @@ export const SUB_SCREEN_COLORS = [
   "#fb7185",
 ];
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+// The Auto Snake preview's own colour, for a run that belongs to no
+// sub-screen - violet, which no panel fill, cable or selection mark uses.
+export const SNAKE_PREVIEW_COLOR = "#c084fc";
+
 export const normalizeSubScreenColor = (raw: unknown, index: number): string =>
   typeof raw === "string" && HEX_COLOR.test(raw) ? raw.toLowerCase() : SUB_SCREEN_COLORS[index % SUB_SCREEN_COLORS.length];
 
@@ -485,6 +653,10 @@ const buildTransferPanels = (
 
 type SignalPortStat = {
   panels: number;
+  /** Pixels actually carried, each panel counted at its OWN resolution. */
+  pixels: number;
+  /** Those pixels as a percentage of the 650,000 a port can drive. */
+  utilisation: number;
   path: Cell[];
   firstKey: string | null;
   lastKey: string | null;
@@ -549,6 +721,8 @@ type OpenJsonPayload = {
   outputCanvas?: { w?: number; h?: number };
   /** v3: whole-layout canvas position, used only when subScreens is empty. */
   wholeLayoutCanvasPos?: { x?: number; y?: number };
+  /** v7: manual changes to the stock list - a typed-over quantity or a row taken off it, keyed by stock code. */
+  stockEdits?: unknown;
   /** v4: selected NovaStar processor model, "" = none selected. */
   processorModel?: ProcessorModelId | "";
   /** v4: per-canvas-entry input assignment, keyed by sub-screen id (or the whole-layout sentinel). */
@@ -658,7 +832,7 @@ export const spareBucketOfCell = (cell: Cell): SpareBucketKey => {
   const variant = cell.panelVariant ?? "STANDARD";
   if (variant === "TRIANGLE") return "MG9_TRIANGLE";
   if (variant === "CURVED") return "MG9_CURVED";
-  if (variant === "CORNER") return "MG9_CORNER";
+  if (variant === "CORNER" || variant === "CORNER_FLAT") return "MG9_CORNER";
   return "MG9_STANDARD";
 };
 const SPARE_BUCKET_RATIO: Record<SpareBucketKey, number> = {
@@ -780,7 +954,10 @@ export const normalizePanels = (raw: unknown): Cell[] => {
       powerSequence: cell.powerSequence ?? null,
       powerManual: Boolean(cell.powerManual),
       isRemoved: Boolean(cell.isRemoved),
-      panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
+      panelVariant: variantForType(
+        cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
+        cell.panelVariant,
+      ) as PanelVariantKey,
       rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
       panelType: cell.panelType && PANEL_TYPES[cell.panelType] ? cell.panelType : "MG9",
       subScreenId: typeof cell.subScreenId === "string" ? cell.subScreenId : null,
@@ -848,7 +1025,7 @@ const gridCellsToPanels = (rawGrid: LegacyGridCell[][], legacyAllType: PanelType
         powerSequence: cell.powerSequence ?? null,
         powerManual: Boolean(cell.powerManual),
         isRemoved: Boolean(cell.isRemoved),
-        panelVariant: cell.panelVariant && PANEL_VARIANTS[cell.panelVariant] ? cell.panelVariant : "STANDARD",
+        panelVariant: variantForType(cellType, cell.panelVariant) as PanelVariantKey,
         rotation: Number.isFinite(cell.rotation) ? ((Number(cell.rotation) % 360) + 360) % 360 : 0,
         panelType: cellType,
         subScreenId: null,
@@ -887,11 +1064,21 @@ const convertPanelTypeInList = (panels: Cell[], id: string, type: PanelTypeKey):
   return [...panels, filler];
 };
 
-const formatNumber = (value: number, digits = 0) =>
-  Number(value || 0).toLocaleString(undefined, {
-    maximumFractionDigits: digits,
-    minimumFractionDigits: digits,
-  });
+// toLocaleString with an options object builds a fresh Intl.NumberFormat on
+// every call, and this is called from inside the render of every panel, port
+// tile and table row - it was the single most expensive app-level function in
+// a drag profile. One formatter per digit count instead; they are immutable
+// and there are only ever a handful.
+const numberFormatters = new Map<number, Intl.NumberFormat>();
+const formatNumber = (value: number, digits = 0) => {
+  let formatter = numberFormatters.get(digits);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    numberFormatters.set(digits, formatter);
+  }
+  // `value || 0` on purpose, as before: NaN, null and undefined all read 0.
+  return formatter.format(Number(value || 0));
+};
 
 // Rounds to at most 2 decimal places and trims trailing zeros (19.384... -> "19.38", 3.50 -> "3.5", 4.00 -> "4").
 const formatMeters = (value: number) => (Number(value) || 0).toFixed(2).replace(/\.?0+$/, "");
@@ -1040,6 +1227,50 @@ const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAltern
   ];
 };
 
+/**
+ * The panel order an Auto Snake would patch in, as one segment per run.
+ *
+ * ONE function behind both the preview and the button, deliberately: a
+ * preview that is drawn by its own copy of the walk is a preview of nothing.
+ *
+ * `perSubScreen` treats every sub-screen as its own wall. Without it the band
+ * finder sees the whole layout at once, so two screens sitting at the same
+ * height - touching or not - fall into the same row band and the snake runs
+ * straight from one into the other. Splitting the panels up FIRST, before any
+ * banding, is what keeps each path inside its own screen; nothing downstream
+ * has to know about sub-screens at all. Panels in no sub-screen are a group of
+ * their own, walked last, rather than being dropped or folded into a screen
+ * they are not part of.
+ *
+ * Each group's segments come back in the order its screens are listed, and
+ * each segment starts a fresh port where the caller honours that (see
+ * snakePatch) - which is what "separate entity" means on the patch sheet.
+ */
+export type SnakeOrderOptions = {
+  direction: string;
+  alternates: boolean;
+  perSubScreen: boolean;
+  /** Sub-screen ids, in the order their paths should run. */
+  subScreenIds: string[];
+};
+
+export const snakeOrderSegments = (panels: Cell[], options: SnakeOrderOptions): Cell[][] => {
+  const { direction, alternates, perSubScreen, subScreenIds } = options;
+  const walk = (group: Cell[]): Cell[][] =>
+    direction === "LETTERS"
+      ? orderPanelsForLetters(group)
+      : orderPanelsForSnake(group, direction, alternates).filter((segment) => segment.length > 0);
+  if (!perSubScreen || !subScreenIds.length) return walk(panels);
+  const segments: Cell[][] = [];
+  subScreenIds.forEach((id) => {
+    const group = panels.filter((cell) => cell.subScreenId === id);
+    if (group.length) segments.push(...walk(group));
+  });
+  const loose = panels.filter((cell) => !cell.subScreenId || !subScreenIds.includes(cell.subScreenId));
+  if (loose.length) segments.push(...walk(loose));
+  return segments;
+};
+
 // Mirror a mm rect horizontally inside the wall bbox (front view).
 export const mirrorRectX = (rect: RectMm, bbox: RectMm): RectMm => ({
   ...rect,
@@ -1134,6 +1365,29 @@ const orderPanelsForLetters = (panels: Cell[]): Cell[][] => {
 // spare or packaging rounding folded in - `rounded` (required +
 // spareRounded) is the real order/pull quantity, so `net` (shortfall) is
 // checked against THAT, not the bare required count.
+// The catalogue entry behind a stock code, for rows that are on a project's
+// list by hand alone - the name and shelf quantity are read here each time the
+// list is built, so they follow the catalogue rather than a stale copy saved
+// into the project file.
+export const stockCatalogLookup = (code: string): { name: string; stock: number } | null =>
+  Object.values(STOCK_CATALOG).find((item) => item.code === code) ?? null;
+
+/**
+ * Which sub-screens a Panel Layout page covers.
+ *
+ * `null` is the whole wall. Otherwise the page is limited to the named
+ * sub-screens, plus - when `unassigned` is set - the panels that belong to no
+ * sub-screen at all. A wall with no sub-screens never has one of these.
+ */
+/** Section keys for "which sub-screens do the Panel Layout pages draw". */
+const PDF_SCREEN_KEY_PREFIX = "screen:";
+const PDF_UNASSIGNED_SCREEN_KEY = "__unassigned__";
+
+export type LayoutScreenFilter = { ids: Set<string>; unassigned: boolean } | null;
+
+export const layoutScreenIncludes = (filter: NonNullable<LayoutScreenFilter>, cell: Cell): boolean =>
+  cell.subScreenId ? filter.ids.has(cell.subScreenId) : filter.unassigned;
+
 const makeStockRow = (
   item: { code: string; name: string; stock: number },
   required: number,
@@ -1213,6 +1467,101 @@ export const getSelectedIds = (selectedCells: Set<string>, selectedId: string | 
   return expanded;
 };
 
+/**
+ * Short name for a variant on a chip, where the catalogue's full label ("MG9
+ * LED Corner Panel") is too long to read at a glance. Empty for STANDARD,
+ * which is just the panel type's own name.
+ */
+const PANEL_VARIANT_SHORT: Record<PanelVariantKey, string> = {
+  STANDARD: "",
+  TRIANGLE: "Triangle",
+  CURVED: "Curved",
+  CORNER: "Corner",
+  CORNER_FLAT: "Corner (flat)",
+};
+
+export type PanelMixEntry = {
+  key: string;
+  /** Short name for the chip, e.g. "MG9", "MG9 Triangle", "MT Corner". */
+  label: string;
+  /** The catalogue's own name for the part, for the chip's tooltip. */
+  detail: string;
+  count: number;
+  /** How many of that count are removed (inactive) panels. */
+  removed: number;
+};
+
+/**
+ * What a set of panels is made of, one entry per distinct physical part -
+ * which is the same split Stock Calculations orders against, so a selection
+ * reads in the same terms as the pull sheet.
+ *
+ * Posters are counted as COMPLETE posters rather than sections: selecting one
+ * pulls in all eight of its sections (see getSelectedIds), and reporting that
+ * as "8 LED Poster" would be a count of something nobody stocks.
+ *
+ * Shaped panels are split by ORIENTATION as well - "MG9 Triangle LD" rather
+ * than "MG9 Triangle" - because each orientation is its own one-way physical
+ * part off its own shelf, which is how Stock Calculations counts them too. A
+ * selection of four triangles facing four ways is four different parts, and
+ * one line saying "4" would be the wrong pull every time.
+ */
+export const panelTypeMix = (cells: Cell[]): PanelMixEntry[] => {
+  const byKey = new Map<string, PanelMixEntry>();
+  const posterGroups = new Map<string, Set<string>>();
+  let posterUngrouped = 0;
+  let posterUngroupedRemoved = 0;
+  const entryFor = (key: string, label: string, detail: string) => {
+    let entry = byKey.get(key);
+    if (!entry) {
+      entry = { key, label, detail, count: 0, removed: 0 };
+      byKey.set(key, entry);
+    }
+    return entry;
+  };
+  cells.forEach((cell) => {
+    const type = cellPanelType(cell);
+    const typeName = PANEL_TYPES[type as PanelTypeKey]?.name ?? type;
+    if (type === "POSTER") {
+      if (cell.posterGroupId) {
+        const seen = posterGroups.get(cell.posterGroupId) ?? new Set<string>();
+        seen.add(cell.isRemoved ? "removed" : "active");
+        posterGroups.set(cell.posterGroupId, seen);
+      } else {
+        posterUngrouped += 1;
+        if (cell.isRemoved) posterUngroupedRemoved += 1;
+      }
+      return;
+    }
+    const variant = variantForType(type, cell.panelVariant) as PanelVariantKey;
+    const short = PANEL_VARIANT_SHORT[variant];
+    // A shaped panel at an unreadable rotation (hand-edited, or spun to an odd
+    // angle) has no orientation bucket - it still counts, under the shape's
+    // own name, rather than being dropped or guessed into one.
+    const orientation = getShapeOrientation(variant, cell.rotation);
+    const suffix = short ? ` ${short}${orientation ? ` ${orientation}` : ""}` : "";
+    const entry = entryFor(
+      `${type}:${variant}:${orientation ?? ""}`,
+      `${typeName}${suffix}`,
+      orientation
+        ? `${variantLabelFor(type, variant)} ${SHAPE_ORIENTATIONS[orientation].icon} ${SHAPE_ORIENTATIONS[orientation].label}`
+        : variantLabelFor(type, variant),
+    );
+    entry.count += 1;
+    if (cell.isRemoved) entry.removed += 1;
+  });
+  const posters = posterGroups.size + Math.ceil(posterUngrouped / POSTER_SECTIONS);
+  if (posters > 0) {
+    const entry = entryFor("POSTER:STANDARD", PANEL_TYPES.POSTER.name, `${PANEL_TYPES.POSTER.name} (${POSTER_SECTIONS} sections each)`);
+    entry.count = posters;
+    // A poster counts as removed only when every section of it is.
+    entry.removed =
+      [...posterGroups.values()].filter((states) => !states.has("active")).length +
+      Math.ceil(posterUngroupedRemoved / POSTER_SECTIONS);
+  }
+  return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+};
+
 /** The POSTER_COLS x POSTER_ROWS sections of one complete LED poster, sharing a group id. */
 export const makePosterAt = (xMm: number, yMm: number, subScreenId: string | null = null): Cell[] => {
   const groupId = newCellId();
@@ -1277,79 +1626,341 @@ const variantOutlineSvgPath = (shape: string): string => {
   return "M0 0 H100 V100 H0 Z";
 };
 
-const getPanelSymbol = (cell: Cell) => {
-  const variant = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"];
+export const getPanelSymbol = (cell: Cell) => {
+  const variantKey = cell.panelVariant ?? "STANDARD";
+  const variant = PANEL_VARIANTS[variantKey];
   const parts = [];
   if (variant.symbol) parts.push(variant.symbol);
-  if (cell.rotation) parts.push("🔄");
+  // A shaped panel (MG12 triangle / MG13 quarter circle) is a one-way piece:
+  // where its rotation puts the right-angle corner decides which physical part
+  // it is, and each of LU / LD / RU / RD is its own stock line. Print that code
+  // on the panel so the drawing names the same part Stock Calculations counts -
+  // read from the front, exactly as the layout tool's inventory lists them.
+  const orientation = getShapeOrientation(variantKey, cell.rotation);
+  if (orientation) parts.push(orientation);
+  else if (cell.rotation) parts.push("🔄");
   return parts.join(" ");
 };
 
-// Cabling endpoints between two panel rects (px space). Side-by-side panels
-// connect edge to edge at the middle of their vertical overlap; stacked panels
-// connect at the middle of their horizontal overlap; anything else runs
-// centre to centre.
-const getLineEndpointsPx = (a: RectMm, b: RectMm, offsetY = 0) => {
-  const vOverlapLo = Math.max(a.y, b.y);
-  const vOverlapHi = Math.min(a.y + a.h, b.y + b.h);
-  const hOverlapLo = Math.max(a.x, b.x);
-  const hOverlapHi = Math.min(a.x + a.w, b.x + b.w);
+// --- Cable routing ---------------------------------------------------------
+// Cable runs are drawn ON TOP of the panels, so the route itself is what keeps
+// a panel's text readable: it is never allowed to cross the label block.
+//
+// Every panel prints its labels centred and stacked upward from its bottom
+// edge, which leaves exactly two clear bands to cross it by - the strip above
+// the topmost label (`across`) and the narrow margin beside the centred text
+// (`beside`). Each panel therefore gets ONE anchor point, where those two
+// bands meet, and every hop is a straight line (or a single 90-degree step)
+// between two anchors. Corners meet exactly, so a chain reads as one
+// continuous cable rather than a string of jogs.
+//
+// The numbers come from the worst case: a panel is 78px across in the PDF and
+// at 100% zoom on screen, and its widest label ("🔌 P20 (999)") takes about
+// 59px of that, stacked four lines deep on a rotated or shaped panel.
+//
+// `beside` used to be 0.04, which put the signal run about 0.9px from the
+// panel's left edge - close enough that its casing actually overhung the edge
+// and the run read as if it were drawn on the panel boundary rather than on
+// the panel. It is 0.12 now, the same inset as `across`, so both lanes sit a
+// clear eighth of the way in and a vertical run reads as belonging to the
+// panel it is crossing.
+//
+// That inset is paid for ONCE rather than twice, because the label block is
+// centred on the space LEFT OVER beside the lanes rather than on the panel
+// (see panelLabelCentreX). Centring on the panel would have meant reserving
+// the same band on the right as well, purely to keep the block symmetrical,
+// and that second band is what used to force the text smaller. Nothing here
+// changes any label size - a full panel still prints at 10px in the PDF and
+// 9px on screen, and a poster section still gets its 6px.
+export const CABLE_LANE = { across: 0.12, beside: 0.12 } as const;
 
-  if (vOverlapHi - vOverlapLo > 4) {
-    const y = (vOverlapLo + vOverlapHi) / 2 + offsetY;
-    if (b.x >= a.x + a.w - 1) return { x1: a.x + a.w - 1, y1: y, x2: b.x + 1, y2: y };
-    if (a.x >= b.x + b.w - 1) return { x1: a.x + 1, y1: y, x2: b.x + b.w - 1, y2: y };
-  }
-  if (hOverlapHi - hOverlapLo > 4) {
-    const x = (hOverlapLo + hOverlapHi) / 2 + offsetY; // offset separates signal/power runs
-    if (b.y >= a.y + a.h - 1) return { x1: x, y1: a.y + a.h - 1, x2: x, y2: b.y + 1 };
-    if (a.y >= b.y + b.h - 1) return { x1: x, y1: a.y + 1, x2: x, y2: b.y + b.h - 1 };
-  }
-  return {
-    x1: a.x + a.w / 2 + offsetY,
-    y1: a.y + a.h / 2 + offsetY,
-    x2: b.x + b.w / 2 + offsetY,
-    y2: b.y + b.h / 2 + offsetY,
+// How far signal and power are pulled apart when they do NOT share a run. The
+// shift is the same in x and y, so a run that turns a corner still meets the
+// next run exactly, whichever way each of them travels.
+export const CABLE_SEPARATION = 2.25;
+
+// Cable stroke: a pale casing with the cable's own colour running down the
+// middle of it. White is what makes a run read everywhere it has to - over a
+// mid-tone panel fill, over the workspace's dark background where a run
+// crosses open space, and on the PDF's white paper, where the casing simply
+// disappears and leaves the coloured core.
+export const CABLE_STROKE = { casing: 4.5, core: 2.5, chevron: 8 } as const;
+export const CABLE_CASING_COLOR = "#f8fafc";
+
+// Signal is ALWAYS this blue, whatever port it belongs to - the port is
+// already named by the panel fill and by the numbered badge on the chain's
+// first panel, and one colour per service is what makes a busy wall readable.
+// It is the same blue as the signal chain-start badge.
+export const SIGNAL_CABLE_COLOR = SIGNAL_START_COLOR;
+
+export type CableKind = "signal" | "power" | "both";
+export type CablePoint = { x: number; y: number };
+export type CableRoute = {
+  /** Orthogonal polyline for the hop, in the same px space as the rects. */
+  pts: CablePoint[];
+  /** Where the run crosses into the destination panel, and its heading there. */
+  entry: { x: number; y: number; angle: number } | null;
+};
+
+// How a run of each kind is stroked, outermost first. A hop that carries signal
+// AND power is drawn as ONE cable rather than a parallel pair: blue with the
+// power orange dashed over it, so a single line still says "both services run
+// here", and it gets a single direction mark instead of two.
+export const cableStrokes = (kind: CableKind, scale = 1): Array<{ color: string; width: number; dash?: number[] }> => [
+  { color: CABLE_CASING_COLOR, width: CABLE_STROKE.casing * scale },
+  { color: kind === "power" ? POWER_COLOR : SIGNAL_CABLE_COLOR, width: CABLE_STROKE.core * scale },
+  ...(kind === "both"
+    ? [{ color: POWER_COLOR, width: CABLE_STROKE.core * scale, dash: [6 * scale, 6 * scale] }]
+    : []),
+];
+
+// The one point on a panel every run of this kind starts and ends at.
+const cableAnchor = (r: RectMm, kind: CableKind): CablePoint => {
+  const shift = kind === "signal" ? -CABLE_SEPARATION : kind === "power" ? CABLE_SEPARATION : 0;
+  return { x: r.x + r.w * CABLE_LANE.beside + shift, y: r.y + r.h * CABLE_LANE.across + shift };
+};
+
+// Furthest a run of any kind reaches from its lane, including its direction
+// mark - what the label block has to stay clear of. See panelLabelFontPx.
+const CABLE_REACH = CABLE_SEPARATION + CABLE_STROKE.chevron * 0.71 + CABLE_STROKE.casing / 2;
+
+// How far a label block has to sit off its panel's bottom edge. An entry mark
+// straddles the edge it crosses, so it reaches this far back into the panel
+// the run is leaving - and that panel's own labels finish right about there.
+export const PANEL_LABEL_BOTTOM_PX = Math.ceil(CABLE_STROKE.chevron * 0.36 + CABLE_STROKE.casing / 2) + 1;
+
+// How much of a panel's left edge the vertical cable lanes claim: the lane
+// itself, the signal/power separation either side of it, and half a casing so
+// the outer run's edge is included. Nothing is drawn beyond this, so this is
+// where a label is free to start.
+export const cableLaneClearPx = (w: number) => w * CABLE_LANE.beside + CABLE_SEPARATION + CABLE_STROKE.casing / 2;
+
+// A hair of margin on the far side, so the longest label stops short of the
+// panel's own edge instead of touching it.
+export const PANEL_LABEL_SIDE_PAD = CABLE_STROKE.casing / 2;
+
+/**
+ * Where a panel's label block centres, measured from the panel's left edge.
+ *
+ * NOT the panel's own centre: the vertical cable lanes run down the left-hand
+ * side, so the block is centred on what is left beside them. A centred block
+ * would have had to clear that band twice over - once on the left where the
+ * runs actually are, and once on the right to stay symmetrical - and it was
+ * that second, empty reservation that decided how big the text could be.
+ */
+export const panelLabelCentreX = (w: number) => (cableLaneClearPx(w) + (w - PANEL_LABEL_SIDE_PAD)) / 2;
+
+// Largest label font (px) that still leaves a panel's label block clear of the
+// cable lanes. A panel can carry four lines (row/column, signal, power and a
+// shape/rotation symbol), stacked up from the bottom edge, so the block is
+// bounded in both directions:
+//   - vertically it has to finish below the power lane and its entry mark, and
+//     a line costs `stackPerFont` px of font size on top of the block's fixed
+//     `stackFixed` padding and leading;
+//   - horizontally the widest label ("🔌 P20 (999)", about 5.9x the font size)
+//     has to fit between the vertical lanes and the panel's far edge.
+// Each renderer passes its own natural size and stack metrics, so a standard
+// panel at 100% zoom (and every panel in the PDF) keeps exactly the text size
+// it has always had; only panels too small for it - a zoomed-out workspace, a
+// narrow LED poster section - step down. Returns 0 when nothing readable is
+// left to fit, and the caller then draws no label text at all rather than
+// spilling it over the panel, its neighbours and the cabling.
+export const PANEL_LABEL_MIN_PX = 6;
+export const panelLabelFontPx = (w: number, h: number, max: number, stackPerFont: number, stackFixed: number) => {
+  const byHeight = (h * (1 - CABLE_LANE.across) - CABLE_REACH - stackFixed) / stackPerFont;
+  const byWidth = (w - cableLaneClearPx(w) - PANEL_LABEL_SIDE_PAD) / 5.9;
+  const px = Math.floor(Math.min(max, byHeight, byWidth));
+  return px >= PANEL_LABEL_MIN_PX ? px : 0;
+};
+
+// One shared measuring canvas for label text that is laid out by hand rather
+// than by the browser (the workspace's shaped panels). Cached per font+string:
+// the workspace re-renders on every drag frame, and measuring 141 panels'
+// labels from scratch each time is work for nothing.
+const labelMeasureCache = new Map<string, number>();
+let labelMeasureCtx: CanvasRenderingContext2D | null = null;
+export const measureLabelWidthPx = (text: string, fontPx: number, font = "600 %spx ui-sans-serif, system-ui, sans-serif"): number => {
+  const key = `${fontPx}|${text}`;
+  const hit = labelMeasureCache.get(key);
+  if (hit !== undefined) return hit;
+  if (!labelMeasureCtx) labelMeasureCtx = document.createElement("canvas").getContext("2d");
+  if (!labelMeasureCtx) return text.length * fontPx * 0.6;
+  labelMeasureCtx.font = font.replace("%s", String(fontPx));
+  const width = labelMeasureCtx.measureText(text).width;
+  labelMeasureCache.set(key, width);
+  return width;
+};
+
+/**
+ * Where a panel's stack of label lines goes, for a renderer that positions the
+ * lines itself.
+ *
+ * The foot of the panel is the first choice everywhere - it is the band the
+ * cable router leaves clear (see PANEL_LABEL_BOTTOM_PX), so moving the text
+ * off it only to dodge the silhouette would walk it into a cable run. A
+ * triangle or quarter circle whose foot is its empty corner has nothing to sit
+ * on there, so those fall back to a point inside the shape, after trying
+ * smaller text at the foot first. Identical rule to the PDF's own label
+ * placement, so the workspace, the PNG exports and the report agree.
+ */
+export type PanelLabelPlacement = { fontPx: number; centre: { x: number; y: number } | null };
+export const panelLabelPlacement = (
+  rectW: number,
+  rectH: number,
+  shape: PanelShape,
+  rotation: number,
+  mirrorX: boolean,
+  lines: string[],
+  basePx: number,
+  bottomPad: number,
+  lineRatio: number,
+): PanelLabelPlacement => {
+  if (!basePx || !lines.length || !panelShapeNeedsInsetLabel(shape)) return { fontPx: basePx, centre: null };
+  const r: RectMm = { x: 0, y: 0, w: rectW, h: rectH };
+  // A little wider than measured: the measuring font is not byte-for-byte the
+  // one the browser lays the div out in, and text spilling off the shape is a
+  // worse miss than text one pixel smaller than it had to be.
+  const halfSize = (px: number) => ({
+    halfW: (Math.max(...lines.map((line) => measureLabelWidthPx(line, px))) * 1.06) / 2,
+    halfH: (lines.length * px * lineRatio) / 2,
+  });
+  const fitsAtFoot = (px: number) => {
+    const { halfW, halfH } = halfSize(px);
+    // Beside the cable lanes, not on the panel's own centre - the same place
+    // the block is actually drawn (see panelLabelCentreX).
+    return panelLabelBlockFitsAt(r, shape, rotation, mirrorX, panelLabelCentreX(rectW), rectH - bottomPad - halfH, halfW, halfH);
   };
+  if (fitsAtFoot(basePx)) return { fontPx: basePx, centre: null };
+  let fontPx = basePx;
+  while (fontPx > PANEL_LABEL_MIN_PX && !fitsAtFoot(fontPx)) fontPx -= 1;
+  if (fitsAtFoot(fontPx)) return { fontPx, centre: null };
+  fontPx = basePx;
+  const fitsInside = (px: number) => {
+    const { halfW, halfH } = halfSize(px);
+    return panelLabelBlockFits(r, shape, rotation, mirrorX, halfW, halfH);
+  };
+  while (fontPx > PANEL_LABEL_MIN_PX && !fitsInside(fontPx)) fontPx -= 1;
+  return { fontPx, centre: panelLabelAnchor(r, shape, rotation, mirrorX) };
 };
 
-// Do two panel rects share an edge (touching, with real overlap)? Used to
-// decide when a cable may run straight between panels vs route around.
-const rectsAdjacentPx = (a: RectMm, b: RectMm, tol = 3) => {
-  const vOverlap = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
-  const hOverlap = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
-  const touchV = Math.abs(a.x + a.w - b.x) <= tol || Math.abs(b.x + b.w - a.x) <= tol;
-  const touchH = Math.abs(a.y + a.h - b.y) <= tol || Math.abs(b.y + b.h - a.y) <= tol;
-  return (touchV && vOverlap > tol) || (touchH && hOverlap > tol);
+const pointInRect = (p: CablePoint, r: RectMm, tol = 0.01) =>
+  p.x >= r.x - tol && p.x <= r.x + r.w + tol && p.y >= r.y - tol && p.y <= r.y + r.h + tol;
+
+// Where a route first crosses into `r` and which way it is heading at that
+// moment. This is the anchor for the run's single "enters here" mark, so it
+// has to be the boundary crossing rather than the segment's end point.
+const cableEntryInto = (pts: CablePoint[], r: RectMm): CableRoute["entry"] => {
+  if (pts.length < 2) return null;
+  for (let i = 1; i < pts.length; i += 1) {
+    const from = pts[i - 1];
+    const to = pts[i];
+    const angle = Math.atan2(to.y - from.y, to.x - from.x);
+    if (pointInRect(from, r)) return { x: from.x, y: from.y, angle };
+    if (!pointInRect(to, r)) continue;
+    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, Math.min(lo, hi)), Math.max(lo, hi));
+    // Every segment is axis-aligned, so the crossing is just the facing edge
+    // of `r` clamped back into the segment's own span.
+    if (Math.abs(to.y - from.y) < 0.01) {
+      return { x: clamp(to.x > from.x ? r.x : r.x + r.w, from.x, to.x), y: to.y, angle };
+    }
+    return { x: to.x, y: clamp(to.y > from.y ? r.y : r.y + r.h, from.y, to.y), angle };
+  }
+  return null;
 };
 
-// Orthogonal (Manhattan) cable route between two panel rects in px space.
-// Returns a polyline with only horizontal/vertical segments and 90-degree
-// corners. Adjacent panels connect straight through their shared edge; other
-// panels leave the facing edge and turn in the gap between them (never
-// through a panel centre). `offset` shifts the run so signal/power don't overlap.
-const routeCablePx = (a: RectMm, b: RectMm, offset = 0): Array<{ x: number; y: number }> => {
+// Orthogonal (Manhattan) cable route between two panel rects in px space,
+// anchor to anchor. Panels in line with each other give a single straight
+// segment; anything else turns once, in the gap between the two panels, which
+// is the one place a step crosses no label.
+export const routeCablePx = (a: RectMm, b: RectMm, kind: CableKind): CableRoute => {
+  const from = cableAnchor(a, kind);
+  const to = cableAnchor(b, kind);
   const aC = { x: a.x + a.w / 2, y: a.y + a.h / 2 };
   const bC = { x: b.x + b.w / 2, y: b.y + b.h / 2 };
-  const horizontal = Math.abs(bC.x - aC.x) >= Math.abs(bC.y - aC.y);
-  if (horizontal) {
-    const rightward = bC.x >= aC.x;
-    const ax = rightward ? a.x + a.w : a.x;
-    const bx = rightward ? b.x : b.x + b.w;
-    const ay = aC.y + offset;
-    const by = bC.y + offset;
-    if (Math.abs(ay - by) < 1) return [{ x: ax, y: ay }, { x: bx, y: by }];
-    const midX = (ax + bx) / 2; // in the horizontal gap between the facing edges
-    return [{ x: ax, y: ay }, { x: midX, y: ay }, { x: midX, y: by }, { x: bx, y: by }];
+  let pts: CablePoint[];
+  if (Math.abs(bC.x - aC.x) >= Math.abs(bC.y - aC.y)) {
+    if (Math.abs(from.y - to.y) < 0.5) {
+      pts = [from, { x: to.x, y: from.y }];
+    } else {
+      const rightward = bC.x >= aC.x;
+      const midX = ((rightward ? a.x + a.w : a.x) + (rightward ? b.x : b.x + b.w)) / 2;
+      pts = [from, { x: midX, y: from.y }, { x: midX, y: to.y }, to];
+    }
+  } else if (Math.abs(from.x - to.x) < 0.5) {
+    pts = [from, { x: from.x, y: to.y }];
+  } else {
+    const downward = bC.y >= aC.y;
+    const midY = ((downward ? a.y + a.h : a.y) + (downward ? b.y : b.y + b.h)) / 2;
+    pts = [from, { x: from.x, y: midY }, { x: to.x, y: midY }, to];
   }
-  const downward = bC.y >= aC.y;
-  const ay = downward ? a.y + a.h : a.y;
-  const by = downward ? b.y : b.y + b.h;
-  const ax = aC.x + offset;
-  const bx = bC.x + offset;
-  if (Math.abs(ax - bx) < 1) return [{ x: ax, y: ay }, { x: bx, y: by }];
-  const midY = (ay + by) / 2;
-  return [{ x: ax, y: ay }, { x: ax, y: midY }, { x: bx, y: midY }, { x: bx, y: by }];
+  pts = pts.filter((p, i) => i === 0 || Math.abs(p.x - pts[i - 1].x) > 0.01 || Math.abs(p.y - pts[i - 1].y) > 0.01);
+  return { pts, entry: cableEntryInto(pts, b) };
+};
+
+// A run's axis-aligned segments, as (axis, fixed coordinate, span) - enough to
+// tell when two runs are about to be drawn on top of each other.
+type CableSegment = { horiz: boolean; fixed: number; lo: number; hi: number };
+const cableSegments = (pts: CablePoint[]): CableSegment[] => {
+  const segs: CableSegment[] = [];
+  for (let i = 1; i < pts.length; i += 1) {
+    const a = pts[i - 1];
+    const b = pts[i];
+    const horiz = Math.abs(a.y - b.y) < 0.01;
+    if (!horiz && Math.abs(a.x - b.x) >= 0.01) continue;
+    segs.push(
+      horiz
+        ? { horiz, fixed: a.y, lo: Math.min(a.x, b.x), hi: Math.max(a.x, b.x) }
+        : { horiz, fixed: a.x, lo: Math.min(a.y, b.y), hi: Math.max(a.y, b.y) },
+    );
+  }
+  return segs;
+};
+
+/** Would these two runs be drawn one on top of the other anywhere? */
+export const cableRunsClash = (a: CableSegment[], b: CableSegment[], tol = CABLE_STROKE.casing) =>
+  a.some((s) =>
+    b.some((t) => s.horiz === t.horiz && Math.abs(s.fixed - t.fixed) < tol && Math.min(s.hi, t.hi) - Math.max(s.lo, t.lo) > tol),
+  );
+
+// Push a run off its lane so it no longer hides under the one already there -
+// a chain doubling back on itself, or a return leg retracing an earlier one,
+// which would otherwise look like a single cable with two arrows stacked on
+// it. The run keeps its true end points and steps aside in between, so it
+// still meets the hops either side of it and reads as two cables sharing a
+// route rather than one.
+//
+// `off` is always NEGATIVE: up for a run travelling across a panel, left for
+// one travelling down it. That is away from the centred label block in both
+// cases, so a nudged run can never eat into the clearance the label size was
+// worked out against (see panelLabelFontPx).
+export const spreadCableRun = (route: CableRoute, dest: RectMm, off: number): CableRoute => {
+  if (!off || route.pts.length < 2) return route;
+  const stepped = route.pts.map((p) => ({ x: p.x + off, y: p.y + off }));
+  // Short stubs at each end put the run back on its true anchors. The entry
+  // mark is measured on the stepped run alone - that is the orthogonal part,
+  // and it is where the arrow has to sit for the run it belongs to.
+  const pts = [route.pts[0], ...stepped, route.pts[route.pts.length - 1]];
+  return { pts, entry: cableEntryInto(stepped, dest) };
+};
+
+// The three points of the outline ">" that marks where a run enters a panel:
+// apex just past the panel's edge, both legs trailing back across it, so the
+// mark straddles the crossing rather than sitting wholly inside either panel -
+// which is what keeps its corners off BOTH panels' labels, each of which
+// reaches close to the shared edge. Always stroked open, never filled - one per
+// panel entered, and one for a "both" run rather than one per service.
+export const cableChevronPoints = (entry: NonNullable<CableRoute["entry"]>, size: number): CablePoint[] => {
+  const spread = Math.PI / 4;
+  const back = entry.angle + Math.PI;
+  const apex = {
+    x: entry.x + size * Math.cos(entry.angle) * 0.35,
+    y: entry.y + size * Math.sin(entry.angle) * 0.35,
+  };
+  return [
+    { x: apex.x + size * Math.cos(back - spread), y: apex.y + size * Math.sin(back - spread) },
+    apex,
+    { x: apex.x + size * Math.cos(back + spread), y: apex.y + size * Math.sin(back + spread) },
+  ];
 };
 
 // Trace a panel's true outline (triangle / quarter-circle / rectangle) in the
@@ -1429,8 +2040,8 @@ const drawPanelShape = (
   ctx.restore();
 
   // Chain-start indicator rings that FOLLOW the panel shape - shown together
-  // with the port-number badges below (both requested). Blue = signal chain
-  // start (and backup-loop end, when the backup badge below applies), orange
+  // with the port-number badges (drawPanelBadges, both requested). Blue =
+  // signal chain start (and backup-loop end, when that badge applies), orange
   // = power chain start. Clipping to the shape and stroking the outline
   // gives a constant-thickness outline that hugs the true edge; when both
   // apply the wider (power) band is drawn first and the signal band sits on
@@ -1457,73 +2068,150 @@ const drawPanelShape = (
     }
     ctx.restore();
   }
-
-  // Port-number badges: small filled circles with the port number, all in
-  // the panel's own top-left corner, side by side (signal first, then
-  // power) - a single neatly-spaced, non-overlapping row. Deliberately
-  // drawn in absolute (x,y,w,h) space, OUTSIDE the panel's rotate/mirror
-  // frame (applyFrame, used above only for the fill/outline) - the digit
-  // always stays upright and legible even on a rotated panel, and
-  // "top-left" always means the panel's own unrotated footprint corner. A
-  // chain's first panel gets its primary signal port number; when the
-  // backup signal loop is enabled, the chain's last panel also gets a
-  // second signal badge with the backup port number (see
-  // getPanelIndicators) - if a chain is a single panel, both land on it.
-  const signalBadges = options.signalBadges ?? [];
-  const cornerBadges: Array<{ color: string; text: string }> = signalBadges.map((portNum) => ({ color: SIGNAL_START_COLOR, text: String(portNum) }));
-  if (options.powerBadge) cornerBadges.push({ color: POWER_START_COLOR, text: String(options.powerBadge) });
-  if (cornerBadges.length) {
-    const badgeR = Math.max(6, Math.round(Math.min(w, h) * 0.15));
-    const pad = Math.max(2, Math.round(badgeR * 0.35));
-    const fontPx = Math.round(badgeR * 1.15);
-    const drawBadge = (cx: number, cy: number, color: string, text: string) => {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(cx, cy, badgeR, 0, Math.PI * 2);
-      ctx.fillStyle = color;
-      ctx.fill();
-      ctx.strokeStyle = "#0f172a";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.fillStyle = "#ffffff";
-      ctx.font = `bold ${fontPx}px Arial`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(text, cx, cy + 0.5);
-      ctx.restore();
-    };
-    cornerBadges.forEach((b, i) => {
-      drawBadge(x + pad + badgeR + i * (badgeR * 2 + pad), y + pad + badgeR, b.color, b.text);
-    });
-  }
 };
 
-const drawCanvasArrowHead = (
-  ctx: CanvasRenderingContext2D,
-  x1: number,
-  y1: number,
-  x2: number,
-  y2: number,
-  color: string,
-  size = 16,
-) => {
-  const angle = Math.atan2(y2 - y1, x2 - x1);
-  const baseX1 = x2 - size * Math.cos(angle - Math.PI / 6);
-  const baseY1 = y2 - size * Math.sin(angle - Math.PI / 6);
-  const baseX2 = x2 - size * Math.cos(angle + Math.PI / 6);
-  const baseY2 = y2 - size * Math.sin(angle + Math.PI / 6);
+// Port-number badges: small filled circles with the port number, all in the
+// panel's own top-left corner, side by side (signal first, then power) - a
+// single neatly-spaced, non-overlapping row. Deliberately drawn in absolute
+// (x,y,w,h) space, OUTSIDE the panel's rotate/mirror frame (applyPanelFrame,
+// used by drawPanelShape only for the fill/outline) - the digit always stays
+// upright and legible even on a rotated panel, and "top-left" always means the
+// panel's own unrotated footprint corner. A chain's first panel gets its
+// primary signal port number; when the backup signal loop is enabled, the
+// chain's last panel also gets a second signal badge with the backup port
+// number (see getPanelIndicators) - if a chain is a single panel, both land on
+// it.
+//
+// Kept apart from drawPanelShape so the caller can paint the cable runs in
+// between the two: cables go over the panel graphics, the numbered badges go
+// back over the cables, and neither ends up unreadable.
+// jsPDF's built-in fonts are WinAnsi only. Hand one a character outside that -
+// the Greek phi in "3\u03a6", an arrow, an emoji someone typed into a screen
+// name - and jsPDF silently switches to a wide encoding: the line comes out as
+// spaced-out nonsense, and on some strings it throws outright and takes the
+// whole export with it.
+//
+// Every string in the report comes either from the stock catalogue or from
+// something the user typed, so this is applied at the ONE boundary they all
+// cross (see the pdf.text wrapper in generatePdf) rather than being remembered
+// at each of the hundred call sites.
+const PDF_TEXT_REPLACEMENTS: Array<[RegExp, string]> = [
+  [/[\u03a6\u03c6]/g, "Ph"], // 3\u03a6 -> 3Ph, the usual way to write three-phase
+  [/[\u00d7\u2715\u2716]/g, "x"],
+  [/[\u2013\u2014]/g, "-"],
+  [/[\u2018\u2019]/g, "'"],
+  [/[\u201c\u201d]/g, '"'],
+  [/\u2192/g, "->"],
+  [/\u2190/g, "<-"],
+  [/\u2193/g, "v"],
+  [/\u2191/g, "^"],
+  [/\u2265/g, ">="],
+  [/\u2264/g, "<="],
+  [/\u2026/g, "..."],
+];
+/**
+ * Fit a line of text into `maxWidth`: shrink it a little first, and only clip
+ * it with an ellipsis once it will not go any smaller.
+ *
+ * The PDF's headings are drawn at fixed positions in two columns, so a long
+ * project name had nowhere to go - it ran straight off the right edge of the
+ * page in the title, and straight across the second column in the summary
+ * block underneath. Wrapping is not an option there: the lines below sit at
+ * fixed y positions and a second line would land on top of one of them.
+ *
+ * `measure` reports the width of a string at a given size, so the caller can
+ * hand over whatever the PDF engine really thinks the font measures rather
+ * than an estimate from the character count.
+ */
+export const fitTextToWidth = (
+  text: string,
+  maxWidth: number,
+  baseSize: number,
+  minSize: number,
+  measure: (text: string, size: number) => number,
+): { text: string; size: number } => {
+  if (!text || maxWidth <= 0) return { text, size: baseSize };
+  if (measure(text, baseSize) <= maxWidth) return { text, size: baseSize };
+  // Half-point steps: small enough that the heading rarely looks shrunk, and
+  // few enough steps to stay cheap.
+  for (let size = baseSize - 0.5; size >= minSize; size -= 0.5) {
+    if (measure(text, size) <= maxWidth) return { text, size };
+  }
+  // Still too long at the smallest size it may be set in - cut it, keeping as
+  // much of the front as fits. Better a name that visibly stops than one that
+  // silently runs over whatever is beside it.
+  const ellipsis = "...";
+  let cut = text.length;
+  while (cut > 0 && measure(text.slice(0, cut) + ellipsis, minSize) > maxWidth) cut -= 1;
+  return { text: cut > 0 ? text.slice(0, cut).trimEnd() + ellipsis : ellipsis, size: minSize };
+};
+
+export const pdfSafeText = (value: string): string => {
+  let out = value;
+  PDF_TEXT_REPLACEMENTS.forEach(([from, to]) => {
+    out = out.replace(from, to);
+  });
+  // Whatever is left outside WinAnsi would only render as noise, so it goes
+  // rather than corrupting the line it is sitting in.
+  return out.replace(/[^\u0020-\u00ff]/g, "").replace(/ {2,}/g, " ").trim();
+};
+
+// Draw text with a thin white casing behind it, so a label stays readable
+// wherever it lands - over a panel fill, over a cable run, over the gap
+// between them. The outline is STROKED FIRST and the fill goes over the top,
+// so the character shapes stay sharp instead of being eaten into from the
+// outside, and it is deliberately light (about a sixth of the font size,
+// capped) - enough to lift the text off what is behind it without small print
+// closing up.
+//
+// The caller sets font, colour and alignment as usual; only the casing is
+// added here.
+const drawOutlinedText = (ctx: CanvasRenderingContext2D, text: string, x: number, y: number, fontPx: number) => {
+  const casing = Math.min(2.5, Math.max(1, fontPx / 6));
   ctx.save();
-  ctx.strokeStyle = "#020617";
-  ctx.lineWidth = 2;
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.moveTo(x2, y2);
-  ctx.lineTo(baseX1, baseY1);
-  ctx.lineTo(baseX2, baseY2);
-  ctx.closePath();
-  ctx.stroke();
-  ctx.fill();
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = casing;
+  ctx.lineJoin = "round";
+  ctx.miterLimit = 2;
+  ctx.strokeText(text, x, y);
   ctx.restore();
+  ctx.fillText(text, x, y);
+};
+
+const drawPanelBadges = (
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  signalBadges: number[],
+  powerBadge: number | null,
+) => {
+  const cornerBadges: Array<{ color: string; text: string }> = signalBadges.map((portNum) => ({ color: SIGNAL_START_COLOR, text: String(portNum) }));
+  if (powerBadge) cornerBadges.push({ color: POWER_START_COLOR, text: String(powerBadge) });
+  if (!cornerBadges.length) return;
+  const badgeR = Math.max(6, Math.round(Math.min(w, h) * 0.15));
+  const pad = Math.max(2, Math.round(badgeR * 0.35));
+  const fontPx = Math.round(badgeR * 1.15);
+  const drawBadge = (cx: number, cy: number, color: string, text: string) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, badgeR, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "#0f172a";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `bold ${fontPx}px Arial`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, cx, cy + 0.5);
+    ctx.restore();
+  };
+  cornerBadges.forEach((b, i) => {
+    drawBadge(x + pad + badgeR + i * (badgeR * 2 + pad), y + pad + badgeR, b.color, b.text);
+  });
 };
 
 function UtilBar({ percent }: { percent: number }) {
@@ -1615,17 +2303,54 @@ function GridSizeConfirmModal({ onConfirm, onCancel }: { onConfirm: () => void; 
   );
 }
 
+/**
+ * Format and delivery settings for the recorded Moving Test Pattern.
+ *
+ * The MP4 is a file that goes on a media server, so the settings it will be
+ * written with are listed here rather than left to be discovered in a player:
+ * the two that are worth changing per show - frame rate and bitrate - are
+ * fields, and the rest are stated as what they are. The H.264 level shown is
+ * the one this wall will actually get, which is not always the 4.2 asked for
+ * (see h264LevelFor).
+ */
 function DownloadFormatModal({
   format,
   onFormatChange,
+  fps,
+  onFpsChange,
+  targetMbps,
+  onTargetMbpsChange,
+  maxMbps,
+  onMaxMbpsChange,
+  encodedWidth,
+  encodedHeight,
   onDownload,
   onCancel,
 }: {
   format: "webm" | "mp4";
   onFormatChange: (format: "webm" | "mp4") => void;
+  fps: number;
+  onFpsChange: (fps: number) => void;
+  targetMbps: number;
+  onTargetMbpsChange: (mbps: number) => void;
+  maxMbps: number;
+  onMaxMbpsChange: (mbps: number) => void;
+  encodedWidth: number;
+  encodedHeight: number;
   onDownload: () => void;
   onCancel: () => void;
 }) {
+  const level = h264LevelFor(encodedWidth, encodedHeight, fps);
+  const gop = keyframeIntervalFor(fps);
+  const settingRow = (label: string, value: string, note?: string) => (
+    <div className="flex items-baseline justify-between gap-3 py-0.5" key={label}>
+      <span className="text-slate-400">{label}</span>
+      <span className="text-right">
+        {value}
+        {note ? <span className="text-slate-500"> {note}</span> : null}
+      </span>
+    </div>
+  );
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 no-print" onMouseDown={onCancel}>
       <div className="w-full max-w-md rounded-xl border border-slate-600 bg-slate-900 p-5 text-white shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
@@ -1647,6 +2372,62 @@ function DownloadFormatModal({
             </span>
           </label>
         </div>
+        <div className="mb-3 flex flex-wrap items-end gap-3 rounded-lg border border-slate-700 bg-slate-800/60 p-3">
+          <label className="space-y-1">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Frame rate</div>
+            <select
+              className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black"
+              value={String(fps)}
+              onChange={(e) => onFpsChange(Number(e.target.value))}
+            >
+              {[24, 25, 30, 50, 60].map((option) => (
+                <option key={option} value={option}>{option} fps</option>
+              ))}
+            </select>
+          </label>
+          {format === "mp4" ? (
+            <>
+              <label className="space-y-1">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Target Mbps</div>
+                <Input
+                  type="number"
+                  min={1}
+                  className="w-24 text-right"
+                  value={String(targetMbps)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => onTargetMbpsChange(Number(e.target.value) || 0)}
+                />
+              </label>
+              <label className="space-y-1">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Max Mbps</div>
+                <Input
+                  type="number"
+                  min={1}
+                  className="w-24 text-right"
+                  value={String(maxMbps)}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) => onMaxMbpsChange(Number(e.target.value) || 0)}
+                />
+              </label>
+            </>
+          ) : null}
+          <div className="text-xs text-slate-400">
+            Set the frame rate to match your show output - it is what the pattern is recorded at.
+          </div>
+        </div>
+        {format === "mp4" ? (
+          <div className="mb-3 space-y-1 rounded-lg border border-slate-700 bg-slate-900 p-3 text-xs">
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">The file you will get</div>
+            {settingRow("Format", MP4_PROFILE.container)}
+            {settingRow("Resolution", `${formatNumber(encodedWidth)} x ${formatNumber(encodedHeight)}`, "- this project's own")}
+            {settingRow("Frame rate", `Constant ${fps} fps`)}
+            {settingRow("Profile / level", `${MP4_PROFILE.profile} / ${level}`, level === MP4_PROFILE.preferredLevel ? undefined : `- ${MP4_PROFILE.preferredLevel} cannot carry this wall`)}
+            {settingRow("Pixel format", MP4_PROFILE.pixelFormat)}
+            {settingRow("Scan", MP4_PROFILE.scan)}
+            {settingRow("Keyframes", `Every ${gop} frames`, `- ${MP4_PROFILE.keyframeSeconds}s`)}
+            {settingRow("B-frames", String(MP4_PROFILE.bFrames), "- easier seeking")}
+            {settingRow("Bitrate", `${targetMbps} Mbps target, ${Math.max(targetMbps, maxMbps)} Mbps max`)}
+            {settingRow("Colour", MP4_PROFILE.colour)}
+          </div>
+        ) : null}
         {format === "mp4" ? (
           <div className="mb-3 rounded-lg border border-amber-400 bg-amber-500/15 p-2 text-xs text-amber-200">
             ⚠ MP4 requires an extra encoding pass after recording and can take significantly longer than WebM, especially for larger walls.
@@ -1813,6 +2594,8 @@ export default function App() {
   const [dragVisited, setDragVisited] = useState<Set<string>>(() => new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(() => new Set());
+  // Panel the pointer is currently over, for the X/Y position readout.
+  const [hoveredPanelId, setHoveredPanelId] = useState<string | null>(null);
   // Workspace editor mode: patch (default click-to-patch), select (click/marquee
   // selection), move (free drag repositioning).
   const [editMode, setEditMode] = useState<"patch" | "select" | "move">("patch");
@@ -1857,10 +2640,19 @@ export default function App() {
   const [pasteAnchor, setPasteAnchor] = useState<{ x: number; y: number } | null>(null);
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
   const [videoRecordSeconds, setVideoRecordSeconds] = useState(0);
+  // How long THIS recording runs for - one loop, plus the margin the MP4 is
+  // cut back from (see MP4_RECORD_MARGIN_SECONDS).
+  const [videoRecordTotal, setVideoRecordTotal] = useState(LOOP_SECONDS);
   const [isEncodingMp4, setIsEncodingMp4] = useState(false);
   const [mp4EncodeProgress, setMp4EncodeProgress] = useState(0);
   const [showDownloadFormatModal, setShowDownloadFormatModal] = useState(false);
   const [downloadFormat, setDownloadFormat] = useState<"webm" | "mp4">("webm");
+  // Delivery settings for the recorded video. The frame rate is the show's -
+  // it drives the recording itself, so it applies to both formats - while the
+  // bitrates are the MP4's rate control (see testPattern/mp4Encode).
+  const [videoFps, setVideoFps] = useState<number>(MP4_PROFILE.defaultFps);
+  const [mp4TargetMbps, setMp4TargetMbps] = useState<number>(MP4_PROFILE.defaultTargetMbps);
+  const [mp4MaxMbps, setMp4MaxMbps] = useState<number>(MP4_PROFILE.defaultMaxMbps);
   // Moving Test Pattern multi-display launch (see screenPlacement.ts) - only
   // populated while the picker is actually showing (2+ secondary screens,
   // no remembered match); the URL is held here so the picker's choice can
@@ -1869,6 +2661,10 @@ export default function App() {
   const [pendingTestPatternUrl, setPendingTestPatternUrl] = useState<string | null>(null);
   const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
+  // Walk each sub-screen as its own wall rather than letting a row band run
+  // from one screen into the next (see snakeOrderSegments).
+  const [snakePerSubScreen, setSnakePerSubScreen] = useState(true);
+  const [snakePreview, setSnakePreview] = useState(true);
   const [isFlippedView, setIsFlippedView] = useState(false);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
   const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
@@ -1939,6 +2735,12 @@ export default function App() {
   // The surface chosen for a download, held while the format modal is up.
   const [movingPatternSurfaceKey, setMovingPatternSurfaceKey] = useState<string | null>(null);
   const [stockOverrides, setStockOverrides] = useState<StockOverrides>(() => loadStockOverrides());
+  // Manual changes to this project's stock list - a typed-over quantity or a
+  // row taken off it. Project state, saved with the project (see stockEdits).
+  const [stockEdits, setStockEdits] = useState<StockEdits>({});
+  // The "Add an item" picker's own state - which catalogue item, how many.
+  const [stockAddCode, setStockAddCode] = useState("");
+  const [stockAddQty, setStockAddQty] = useState("1");
   const [stockChecking, setStockChecking] = useState(false);
   const [stockCheckError, setStockCheckError] = useState<string | null>(null);
   const [lastStockCheckedAt, setLastStockCheckedAt] = useState<Date | null>(null);
@@ -1993,6 +2795,13 @@ export default function App() {
   const selectedPanel = findCellById(grid, selectedId);
   const activeSelectedKeys = getSelectedIds(selectedCells, selectedId, grid);
   const selectedCount = activeSelectedKeys.size;
+  // What the selection is actually made of, split the same way the stock list
+  // is - so "24 selected" can be read as the parts it would order.
+  const selectedMix = useMemo(
+    () => panelTypeMix(grid.filter((cell) => activeSelectedKeys.has(cell.id))),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [grid, selectedCount, selectedId, selectedCells],
+  );
   const isPatchTargetActive = patchMode === "signal" ? activePort > 0 : activePowerPort > 0;
 
   // A dangling activeSubScreenId (e.g. left pointing at a sub-screen an undo
@@ -2161,9 +2970,9 @@ export default function App() {
   // inside downloadMovingTestPatternVideo).
   useEffect(() => {
     if (!isRecordingVideo) return;
-    const id = window.setInterval(() => setVideoRecordSeconds((s) => Math.min(LOOP_SECONDS, s + 0.25)), 250);
+    const id = window.setInterval(() => setVideoRecordSeconds((s) => Math.min(videoRecordTotal, s + 0.25)), 250);
     return () => window.clearInterval(id);
-  }, [isRecordingVideo]);
+  }, [isRecordingVideo, videoRecordTotal]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2368,23 +3177,6 @@ export default function App() {
     });
     return map;
   }, [grid, subScreens]);
-  // Bbox of the FULL active grid (not scope-filtered), used as the "local mm
-  // origin" for panels not assigned to any sub-screen when computing their
-  // final output-canvas position against the whole-layout canvas placement.
-  const fullGridActiveBBox = useMemo(() => activeBBox(grid.filter((c) => !c.isRemoved).map(cellRect)), [grid]);
-  // A panel's final position on the output canvas: its own sub-screen's
-  // canvas X/Y plus its mm offset within that sub-screen (converted to
-  // canvas pixels), or the whole-layout canvas position for panels that
-  // aren't assigned to any sub-screen. Never writes back into panel x/y -
-  // purely a derived, exported value (see canvasModel.ts).
-  const getFinalCanvasPositionOf = (cell: Cell) => {
-    if (cell.subScreenId) {
-      const screen = subScreens.find((s) => s.id === cell.subScreenId);
-      const bbox = subScreenBBoxes.get(cell.subScreenId);
-      if (screen && bbox) return finalCanvasPositionOf(cell, bbox, screen.canvasX, screen.canvasY);
-    }
-    return finalCanvasPositionOf(cell, fullGridActiveBBox, wholeLayoutCanvasX, wholeLayoutCanvasY);
-  };
   // Wall size = bounding box of all active panels (free layouts included).
   const wallBBox = useMemo(() => activeBBox(activePanels.map(cellRect)), [activePanels]);
   const wallWidthM = wallBBox.w / 1000;
@@ -2411,30 +3203,27 @@ export default function App() {
       return [{ id: screen.id, name: screen.name, color: normalizeSubScreenColor(screen.color, index), bbox }];
     });
   }, [subScreens, activePanels]);
-  // Visual row bands (top->bottom, left->right) drive snake order, pixel maths,
-  // the PNG test pattern, and row labels for non-uniform layouts.
+  // Visual row bands (top->bottom, left->right) drive snake order and pixel
+  // maths. They are NOT what the row/column labels count - see gridRefs.
   const panelBands = useMemo(() => bandPanels(activePanels, cellRect) as Cell[][], [activePanels]);
-  const bandIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    panelBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
-    return map;
-  }, [panelBands]);
-  // Visual column bands (left->right, top->bottom) for panelColLabel - see
-  // bandPanelsByColumn's own comment for why this replaced dividing raw
-  // x-position by the fixed 500mm MODULE_MM (silently counted each
-  // 1000mm-wide MT panel as 2 columns instead of 1).
-  const columnBands = useMemo(() => bandPanelsByColumn(activePanels, cellRect) as Cell[][], [activePanels]);
-  const columnIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    columnBands.forEach((band, index) => band.forEach((cell) => map.set(cell.id, index)));
-    return map;
-  }, [columnBands]);
   // The panel reference shown on the panel itself in the workspace, the PNG
   // test pattern and the PDF layout pages ("row 3, column 5"), as one short
   // string. Exports that need to name a specific panel use THIS - never the
   // internal cell id, which means nothing to anyone reading a report.
-  const panelRefLabel = (cell: Cell) =>
-    `R${(bandIndexById.get(cell.id) ?? 0) + 1} C${(columnIndexById.get(cell.id) ?? 0) + 1}`;
+  // Where each panel stands on the wall's own module grid. Kept apart from
+  // the bands above: those pack panels together for the processor's cabinet
+  // topology and must stay that way, while these are the reference numbers a
+  // person reads off the drawing - and on a wall with panels half a module
+  // out, the two are not the same thing (see panelGridRefs).
+  const gridRefs = useMemo(() => panelGridRefs(activePanels, cellRect), [activePanels]);
+  // "R2 C37" for the PDF's signal/power chain tables. Front-referenced like
+  // every other reference number (see panelColLabel) - naming a chain's first
+  // panel by a column the layout page does not print would send somebody to
+  // the wrong end of the wall.
+  const panelRefLabel = (cell: Cell) => {
+    const ref = gridRefs.refs.get(cell.id);
+    return `R${gridRefLabel(ref?.rows)} C${gridRefLabel(mirrorGridRef(ref?.cols, gridRefs.cols))}`;
+  };
   const panelRefLabelById = (id: string | null | undefined) => {
     const cell = id ? findCellById(grid, id) : null;
     return cell ? panelRefLabel(cell) : "-";
@@ -2448,27 +3237,43 @@ export default function App() {
     });
     return counts;
   }, [activePanels]);
-  // Pixel resolution uses each panel's native pixels. Because MG9 (168x168) and
-  // MT (256x64) have different pitches, a mixed wall isn't a single clean raster:
-  // width is the widest band's pixels, height sums each band's tallest panel.
-  const wallPixels = useMemo(() => {
-    let pixelW = 0;
-    let pixelH = 0;
-    panelBands.forEach((band) => {
-      let rowPixelW = 0;
-      let rowPixelH = 0;
-      band.forEach((cell) => {
-        const p = PANEL_TYPES[cellPanelType(cell)];
-        rowPixelW += p.pixW;
-        rowPixelH = Math.max(rowPixelH, p.pixH);
-      });
-      pixelW = Math.max(pixelW, rowPixelW);
-      pixelH += rowPixelH;
-    });
-    return { pixelW, pixelH };
-  }, [panelBands]);
-  const wallPixelW = wallPixels.pixelW;
-  const wallPixelH = wallPixels.pixelH;
+  // The wall's own pixel resolution: the FOOTPRINT its panels occupy, taken
+  // from their physical bounding box at the finest pixel pitch on the wall
+  // (see wallFootprintResolutionOf). Content has to span the whole rectangle
+  // the wall stands in, so a stepped or L-shaped layout is quoted across all
+  // of its module columns, not just the columns its longest row happens to
+  // fill. For a rectangular wall this is exactly the sum of its panels'
+  // pixels, so nothing changes there.
+  //
+  // NOT the same figure as the NovaStar export's own cabinet-topology space
+  // (canvasModel's resolutionOf), which packs panels together and leaves no
+  // gap pixels - see that function for why the two are, and must stay, apart.
+  const wallPixels = useMemo(() => wallFootprintResolutionOf(activePanels), [activePanels]);
+  /**
+   * Pixels that are actually LIT: every active panel's own resolution, added
+   * up. The wall's width x height is the rectangle it stands in, so on
+   * anything that is not a full rectangle it counts the holes and the steps as
+   * if they were screen - 6 missing panels on a 15x6 wall is 169,344px of
+   * black space in a figure that reads like a pixel count.
+   *
+   * Deliberately not the "packed" resolution either (canvasModel's
+   * resolutionOf). That only closes a gap up when EVERY row loses the same
+   * number of panels: holes in one row, or a stepped wall, pack to exactly the
+   * same width as the bounding box and keep every one of those black pixels.
+   * A straight sum is the only figure that is right whatever the shape.
+   *
+   * Rotation does not come into it - turning a panel moves its pixels, it does
+   * not change how many there are.
+   */
+  const activePixelCount = useMemo(
+    () => activePanels.reduce((sum, cell) => {
+      const spec = PANEL_TYPES[cellPanelType(cell)];
+      return sum + spec.pixW * spec.pixH;
+    }, 0),
+    [activePanels],
+  );
+  const wallPixelW = wallPixels.w;
+  const wallPixelH = wallPixels.h;
   const panelVariantCounts = useMemo(() => {
     const counts = Object.fromEntries(Object.keys(PANEL_VARIANTS).map((key) => [key, 0])) as Record<PanelVariantKey, number>;
     activePanels.forEach((cell) => {
@@ -2563,7 +3368,16 @@ export default function App() {
     });
     return occupied.size;
   }, [activePanels, wallBBox]);
-  const activeRowsCount = panelBands.length;
+  const activeRowsCount = useMemo(() => {
+    const occupied = new Set<number>();
+    activePanels.forEach((cell) => {
+      const r = cellRect(cell);
+      const first = Math.floor((r.y - wallBBox.y) / MODULE_MM);
+      const last = Math.ceil((r.y + r.h - wallBBox.y) / MODULE_MM) - 1;
+      for (let i = first; i <= last; i += 1) occupied.add(i);
+    });
+    return occupied.size;
+  }, [activePanels, wallBBox]);
   const activeWallWidthM = wallBBox.w / 1000;
   const activeWallHeightM = wallBBox.h / 1000;
   // Per-type totals: each panel contributes its own weight and power draw.
@@ -2611,28 +3425,48 @@ export default function App() {
   // plain "x" separators to match the PDF's existing text style; the JSX
   // Wall Summary card renders its own "×" version directly instead of
   // reusing this array, to match that card's existing style.
+  // How much black space the bounding box is carrying - nothing at all on a
+  // full rectangle, which is why the extent line only mentions it when there
+  // is some.
+  const blackSpacePixels = Math.max(0, wallPixelW * wallPixelH - activePixelCount);
+  // The lit pixel count leads; the rectangle it stands in follows, because
+  // content is still authored to that and the test pattern still renders at
+  // it. One line, so the three summary lines keep the three meanings every
+  // consumer already lays out room for.
+  const activeResolutionSummary = `${formatNumber(activePixelCount)} active px (${wallPixelW} x ${wallPixelH} extent)`;
   const wallResolutionSummaryLines = isMtOnlyWall
     ? [
-        `LED Wall Resolution: ${wallPixelW} x ${wallPixelH}`,
+        `LED Wall Resolution: ${activeResolutionSummary}`,
         `Recommended Content Resolution: ${contentPixelW} x ${contentPixelH}`,
         `Physical Aspect Ratio: ${physicalRatioLabel}`,
       ]
-    : [`Resolution: ${wallPixelW} x ${wallPixelH}`, `Aspect ratio: ${aspectRatio}`, `Reduced ratio: ${ratioLabel}`];
+    : [`Resolution: ${activeResolutionSummary}`, `Aspect ratio: ${aspectRatio}`, `Reduced ratio: ${ratioLabel}`];
 
   const signalPortStats = useMemo(() => {
     const stats: Record<number, SignalPortStat> = Object.fromEntries(
-      signalPorts.map((port) => [port.id, { panels: 0, path: [], firstKey: null, lastKey: null }]),
+      signalPorts.map((port) => [port.id, { panels: 0, pixels: 0, utilisation: 0, path: [], firstKey: null, lastKey: null }]),
     );
 
     for (const cell of scopedGrid) {
       if (!isActiveCell(cell)) continue;
       if (!cell.assignedPort || !stats[cell.assignedPort]) continue;
+      const spec = PANEL_TYPES[cellPanelType(cell)];
       stats[cell.assignedPort].panels += 1;
+      stats[cell.assignedPort].pixels += spec.pixW * spec.pixH;
       stats[cell.assignedPort].path.push(cell);
     }
 
     signalPorts.forEach((port) => {
       const stat = stats[port.id];
+      // How full the port really is: its pixels against the 650,000 a port can
+      // drive. Deliberately NOT a count against the Panels per Signal Port box
+      // - that is a planning limit somebody typed in, so dropping it to 10
+      // used to paint a half-empty port red, and raising it painted a full one
+      // green. This is the port's own capacity, the same way the power tiles
+      // read amps against the 16A outlet rather than the panels-per-outlet
+      // box. It also counts a mixed port correctly: an MT panel is 16,384px
+      // against an MG9's 28,224, which no panel count can tell apart.
+      stat.utilisation = MAX_PIXELS_PER_PORT > 0 ? (stat.pixels / MAX_PIXELS_PER_PORT) * 100 : 0;
       stat.path.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
       const first = stat.path[0];
       const last = stat.path[stat.path.length - 1];
@@ -2826,8 +3660,16 @@ export default function App() {
     spareRounded: sparePanelSummary.grandTotal.spareRounded,
     total: sparePanelSummary.grandTotal.total,
   };
-  const vx1000Percent = (wallPixelW * wallPixelH / 6500000) * 100;
-  const vx2000Percent = (wallPixelW * wallPixelH / 13000000) * 100;
+  // Against the pixels a processor really drives. The bounding box counted the
+  // black space in a hole or a step as load the processor would have to carry,
+  // which it never does - a cabinet that is not there needs no bandwidth.
+  const vx1000Percent = (activePixelCount / 6500000) * 100;
+  const vx2000Percent = (activePixelCount / 13000000) * 100;
+  // The FEWEST outlets the wall could run on - every outlet filled to the
+  // panels-per-outlet limit. A planning floor, not a count of anything: the
+  // real patch also has to respect the 16A ceiling and keeps chains together,
+  // so it routinely lands on more outlets than this. Named "max" for the load
+  // per outlet, not for the number of circuits.
   const circuitsUsedMax = Math.ceil(totalPanels / Math.max(safePanelsPerPowerOutlet, 1));
   const powerPerCircuitMaxW = safePanelsPerPowerOutlet * powerSpec.maxW;
   const powerPerCircuitMaxA = safePanelsPerPowerOutlet * powerSpec.maxA;
@@ -2846,30 +3688,59 @@ export default function App() {
   const signalCableBaseRequired = signalPortsUsed;
   const signalCableWithBackupRequired = backupSignalLoop ? signalCableBaseRequired * 2 : signalCableBaseRequired;
   const signalCableSpare = Math.ceil(signalCableWithBackupRequired * panel.defaults.signalSpareRatio);
-  const powerCableSpare = Math.ceil(circuitsUsedMax * panel.defaults.powerSpareRatio);
+  // One 15m PowerCON per outlet ACTUALLY PATCHED, which is what gets loaded on
+  // the truck. This used to be circuitsUsedMax, the theoretical floor above,
+  // and under-ordered every time the patch spread wider than that floor - an
+  // 84-panel wall on a 21-panel outlet limit asked for 4 cables while the
+  // patch sat on 6 outlets, a shortfall of two the pull sheet never showed.
+  // The distro row and the weight page were already counting the real outlets
+  // (powerPortsUsed), so the same report disagreed with itself.
+  //
+  // Before anything is patched there are no real outlets to count, so the
+  // floor stands in as an estimate rather than printing a nonsense 0.
+  const powerCableRequired = powerPortsUsed > 0 ? powerPortsUsed : circuitsUsedMax;
+  const powerCableSpare = Math.ceil(powerCableRequired * panel.defaults.powerSpareRatio);
   const distroRequired = Math.max(1, Math.ceil(powerPortsUsed / distro.portCount));
 
-  const cornerJoinStats = useMemo(() => {
-    // Corner-panel joins = flush shared edges with neighbours (position-based,
-    // works for free layouts too). Corner-to-corner pairs counted once.
-    let cornerToFlat = 0;
-    let cornerToCorner = 0;
-    const corners = activeCells.filter((cell) => cell.panelVariant === "CORNER");
-    corners.forEach((cell) => {
-      const geom = cellGeom(cell);
-      activeCells.forEach((other) => {
-        if (other.id === cell.id) return;
-        if (!panelsAnchorJoined(geom, cellGeom(other))) return;
-        if (other.panelVariant === "CORNER") {
-          if (other.id > cell.id) cornerToCorner += 1;
-        } else {
-          cornerToFlat += 1;
-        }
-      });
-    });
-
-    return { cornerToFlat, cornerToCorner };
-  }, [activeCells, grid]);
+  // Connectors, worked out from the edges panels actually share in this
+  // layout - flush joins found from panel positions, so free-form layouts and
+  // rotated panels are handled the same as a plain grid.
+  //
+  // Every pair is visited once (j starts after i), so a SHARED edge is counted
+  // once rather than once per panel, and an exposed edge - one with nothing on
+  // the other side of it - is never counted at all. Which connector, and how
+  // many, is model/connectors.ts; this only finds the edges and adds them up.
+  //
+  // MG9-family panels only: MT and poster panels are a different build system
+  // and none of these rules is written for them.
+  const connectorNeeds = useMemo(() => {
+    const classOf = (cell: Cell): ConnectorPanelClass | null => {
+      if (cellPanelType(cell) !== "MG9") return null;
+      const variant = cell.panelVariant ?? "STANDARD";
+      if (variant === "TRIANGLE" || variant === "CURVED") return "shape";
+      if (variant === "CORNER") return "corner";
+      if (variant === "CORNER_FLAT") return "cornerFlat";
+      return "mg9";
+    };
+    const tally = new Map<ConnectorKey, { qty: number; rules: Map<string, { edges: number; per: number }> }>();
+    const cells = activeCells.filter((cell) => classOf(cell) !== null);
+    const geoms = cells.map(cellGeom);
+    for (let i = 0; i < cells.length; i += 1) {
+      for (let j = i + 1; j < cells.length; j += 1) {
+        const edge = sharedEdgeOrientation(geoms[i], geoms[j]);
+        if (!edge) continue;
+        const need = connectorForEdge(classOf(cells[i])!, classOf(cells[j])!, edge);
+        if (!need) continue;
+        const entry = tally.get(need.connector) ?? { qty: 0, rules: new Map() };
+        entry.qty += need.qty;
+        const rule = entry.rules.get(need.rule) ?? { edges: 0, per: need.qty };
+        rule.edges += 1;
+        entry.rules.set(need.rule, rule);
+        tally.set(need.connector, entry);
+      }
+    }
+    return tally;
+  }, [activeCells]);
 
   const deploymentWarning = useMemo(() => {
     if ((deploymentType === DEPLOYMENT_TYPES.GROUND || deploymentType === DEPLOYMENT_TYPES.FLOOR) && mtCount > 0) {
@@ -2948,9 +3819,12 @@ export default function App() {
       });
 
       // Corner panels are orientation-free; keep the original single line.
+      // A corner panel laid in flat is the same physical part off the same
+      // shelf, so it belongs on this line too - only the connector it needs
+      // differs (see model/connectors.ts).
       {
         const item = PANEL_VARIANTS.CORNER.stockItem;
-        const count = panelVariantCounts.CORNER;
+        const count = panelVariantCounts.CORNER + panelVariantCounts.CORNER_FLAT;
         if (item && count > 0) {
           const { spare, spareRounded, total } = spareForBucket(count, "MG9_CORNER");
           rowsOut.push(
@@ -2993,7 +3867,50 @@ export default function App() {
       );
     }
 
+    // Spare mesh modules for an MT wall. Required is deliberately 0: the
+    // modules are already in the panels counted above, and what goes on the
+    // truck is a handful of spares to swap a dead one out on site. Always at
+    // least 1 wherever there is any MT at all - ceil(3%) of even a single
+    // panel is one module, which is the point of carrying them.
+    if (mtCount > 0) {
+      const meshSpare = Math.ceil(mtCount * MT_MESH_MODULE_SPARE_RATIO);
+      rowsOut.push(
+        makeStockRow(
+          STOCK_CATALOG.mtMeshModule,
+          0,
+          `spares only - ${Math.round(MT_MESH_MODULE_SPARE_RATIO * 100)}% of ${mtCount} MT panel${mtCount === 1 ? "" : "s"}, rounded up`,
+          meshSpare,
+        ),
+      );
+    }
+
+    if (powerDistro === "32A") {
+      rowsOut.push(makeStockRow(STOCK_CATALOG.distro32Adaptor, distroRequired, `1 per 32A distro across ${distroRequired} distro${distroRequired === 1 ? "" : "s"}`));
+    }
+
     rowsOut.push(makeStockRow(STOCK_CATALOG.prodCase, 1, "always 1 per project"));
+
+    // The selected processor, 1 per project. The capacity readout and the
+    // NovaStar validation already say when a wall is too big for the model
+    // picked, so this is deliberately not "one per 13.1MP" - it is the unit
+    // the project is actually built on. No processor selected (manual port
+    // planning) means no processor row.
+    if (processorModel) {
+      const processorItem = processorModel === "VX2000_PRO" ? STOCK_CATALOG.vx2000Pro : STOCK_CATALOG.vx1000Pro;
+      rowsOut.push(makeStockRow(processorItem, 1, `1 per project (${PROCESSOR_SPECS[processorModel].label} selected)`));
+    }
+
+    // Packers and shims level a wall that stands on the floor. A flown wall
+    // hangs off the bar and has nothing to pack, so this is every deployment
+    // EXCEPT Flown - ground support, floor and no-support walls all sit on
+    // whatever the venue's floor happens to be doing.
+    // No deployment chosen yet is not an answer either way, so it stays off
+    // the list until one is - same as every other deployment-driven row.
+    if (deploymentType && deploymentType !== DEPLOYMENT_TYPES.FLOWN) {
+      rowsOut.push(
+        makeStockRow(STOCK_CATALOG.levellingPackers, 1, `1 assorted set - ${deploymentType} deployment, not flown`),
+      );
+    }
 
     if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
       if (topRowBars.mg9 > 0) {
@@ -3027,7 +3944,14 @@ export default function App() {
       method: "selected distro",
     });
 
-    pushBaseRow("12254", "15m PowerCON Cable", circuitsUsedMax, stock.powerCable15m ?? 0, `${circuitsUsedMax} + ${powerCableSpare} spare`, powerCableSpare);
+    pushBaseRow(
+      "12254",
+      "15m PowerCON Cable",
+      powerCableRequired,
+      stock.powerCable15m ?? 0,
+      `1 per outlet in use (${powerPortsUsed > 0 ? `${powerPortsUsed} patched` : `${circuitsUsedMax} estimated, nothing patched yet`}) + ${powerCableSpare} spare`,
+      powerCableSpare,
+    );
     pushBaseRow(
       "12263",
       "15m Signal Cable",
@@ -3048,16 +3972,42 @@ export default function App() {
       }
     }
 
-    if (mg9Count > 0) {
-      const flatConnectorRequired = cornerJoinStats.cornerToFlat * 3;
-      const cornerConnectorRequired = cornerJoinStats.cornerToCorner * 3;
-      if (flatConnectorRequired > 0) {
-        rowsOut.push(makeStockRow(STOCK_CATALOG.cornerFlatConnector, flatConnectorRequired, `3 per corner-to-flat join across ${cornerJoinStats.cornerToFlat} joins`));
-      }
-      if (cornerConnectorRequired > 0) {
-        rowsOut.push(makeStockRow(STOCK_CATALOG.cornerCornerConnector, cornerConnectorRequired, `3 per corner-to-corner join across ${cornerJoinStats.cornerToCorner} joins`));
-      }
+    // MT corners. An MT corner is the same MT panel off the same shelf - it is
+    // already in the panel count above - so what a corner adds is hardware
+    // only: 2 brackets and 8 bolts each. Counted PER CORNER PANEL, not per
+    // joined edge, which is how the part is actually fitted; MT joins
+    // otherwise need no connector at all, which is why MT is left out of the
+    // connector table in model/connectors.ts.
+    const mtCorners = activePanels.filter(
+      (cell) => cellPanelType(cell) === "MT" && (cell.panelVariant ?? "STANDARD") === "CORNER",
+    ).length;
+    if (mtCorners > 0) {
+      rowsOut.push(
+        makeStockRow(STOCK_CATALOG.mtCornerBracket, mtCorners * 2, `2 per MT corner panel across ${mtCorners} corner${mtCorners === 1 ? "" : "s"}`),
+      );
+      rowsOut.push(
+        makeStockRow(STOCK_CATALOG.mtCornerBracketBolt, mtCorners * 8, `8 per MT corner panel across ${mtCorners} corner${mtCorners === 1 ? "" : "s"}`),
+      );
     }
+
+    // Panel-to-panel connectors, one row per stock item however many rules
+    // asked for it - several do share an item, and two rows on one code would
+    // read as a duplicate requirement and break the Rentman stock comparison.
+    // The method text names the connector each rule wanted, so a flat join and
+    // a corner join can still be told apart on the pull sheet.
+    ([
+      ["connector150", STOCK_CATALOG.cornerFlatConnector],
+      ["cornerConnector", STOCK_CATALOG.cornerCornerConnector],
+      ["connector180", STOCK_CATALOG.connector180],
+      ["horizontalConnector", STOCK_CATALOG.horizontalConnector],
+    ] as Array<[ConnectorKey, { code: string; name: string; stock: number }]>).forEach(([key, item]) => {
+      const entry = connectorNeeds.get(key);
+      if (!entry || entry.qty <= 0) return;
+      const detail = [...entry.rules.entries()]
+        .map(([rule, { edges, per }]) => `${edges} ${rule}${edges === 1 ? "" : "s"} at ${per} each`)
+        .join(", ");
+      rowsOut.push(makeStockRow(item, entry.qty, `${CONNECTOR_NAMES[key]}: ${detail}`));
+    });
 
     if (mg9Count > 0 && includeReinforcementPlate) {
       pushBaseRow("12264", "MG9 Reinforcement Plate", Math.ceil(mg9Count * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor (MG9 panels)");
@@ -3090,6 +4040,7 @@ export default function App() {
       const horizontalScrewCount = horizontalFramePieces * 4;
       rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrame950, modularFrameCount, `${verticalFrames} vertical + ${backBraces} back brace + ${horizontalFramePieces} horizontal`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.bottomBeam1m, widthUnits, `${widthUnits} full 1m bottom beams`));
+      rowsOut.push(makeStockRow(STOCK_CATALOG.mg9VerticalConnector, widthUnits * 4, `4 per 1m bottom beam across ${widthUnits} beam${widthUnits === 1 ? "" : "s"}`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameScrew, verticalScrewCount + horizontalScrewCount, `${verticalScrewCount} vertical/back brace + ${horizontalScrewCount} horizontal screws`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.modularFrameUCoupler, verticalFrames * 2, `2 per vertical frame across ${verticalFrames} frames`));
       rowsOut.push(makeStockRow(STOCK_CATALOG.connectingJoint, verticalJoinCount * 2, `2 per vertical join across ${verticalJoinCount} joins`));
@@ -3107,7 +4058,7 @@ export default function App() {
     }
 
     return rowsOut;
-  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, cornerJoinStats, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars]);
+  }, [activeColsCount, activeRowsCount, activeWallWidthM, backupSignalLoop, circuitsUsedMax, connectorNeeds, deploymentType, distroRequired, includeReinforcementPlate, panelVariantCounts, shapedOrientationCounts, powerCableSpare, powerCableRequired, powerDistro, signalCableBaseRequired, signalCableSpare, signalCableWithBackupRequired, signalPortsUsed, powerPortsUsed, distro.portCount, mg9Count, mtCount, mg9Spare, mtSpare, mg9Boxes, mtBoxes, mg9Defaults, mtDefaults, topRowBars, processorModel]);
 
   // The on-screen table, PDF table and CSV export all list order/pull
   // quantities, not raw internal line items - a row whose real order
@@ -3120,25 +4071,64 @@ export default function App() {
   // free. An empty stockOverrides map makes applyStockOverrides a full
   // no-op, so this is a zero-behaviour-change default until you actually
   // apply a Get Current Stock result.
-  const visibleStockRows = useMemo(
+  //
+  // Manual edits go on LAST, over the Rentman figures, for the same reason:
+  // a quantity somebody typed in is the final word on what gets pulled, and
+  // every consumer of visibleStockRows gets it without asking.
+  const calculatedStockRows = useMemo(
     () => applyStockOverrides(stockRows.filter((row) => (row.rounded ?? row.required) > 0), stockOverrides),
     [stockRows, stockOverrides],
   );
+  const visibleStockRows = useMemo(
+    () => applyStockEdits(calculatedStockRows, stockEdits, stockCatalogLookup),
+    [calculatedStockRows, stockEdits],
+  );
+  const stockRowsRemoved = useMemo(() => removedStockRows(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
+  const stockEditsApplied = useMemo(() => stockEditCount(calculatedStockRows, stockEdits), [calculatedStockRows, stockEdits]);
+  // Edits are keyed by stock code and are deliberately NOT pruned when their
+  // row stops appearing: switching deployment type or emptying the layout
+  // takes whole rows out of the list, and a note quietly dropped there would
+  // not come back when the row did.
+  const setStockQty = (code: string, qty: number | null, calculated: number) =>
+    setStockEdits((edits) => withStockQty(edits, code, qty, calculated));
+  const setStockRowRemoved = (code: string, removed: boolean) =>
+    setStockEdits((edits) => withStockRemoved(edits, code, removed));
+  const resetStockRow = (code: string) => setStockEdits((edits) => withStockRowReset(edits, code));
+  const resetAllStockEdits = () => setStockEdits({});
+  const addStockRow = (code: string, qty: number) => setStockEdits((edits) => withStockAdded(edits, code, qty));
+  // Catalogue items that could be added: everything this app knows a code for
+  // that the list is not already carrying. Deployment hardware and the spare
+  // parts the formulas never ask for both live here, which is the point - it
+  // is how an item nothing calculates gets onto a pull sheet at all.
+  const addableStockItems = useMemo(() => {
+    const onList = new Set(visibleStockRows.map((row) => baseCodeOf(row.code)));
+    return Object.values(STOCK_CATALOG)
+      .filter((item) => !onList.has(item.code))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [visibleStockRows]);
   // visibleStockRows joined to whatever Rentman data has been pulled, and the
   // one place the availability sum lives:
   //
-  //   Available Stock = Rentman Stock - Other Projects - Broken/Repair
+  //   Available Stock = Rentman Stock - peak out on other jobs - Broken/Repair
   //
   // then compared against this project's own TOTAL Required. `otherProjects`
   // and `broken` stay null until their check has actually been run, which is
   // what hides those columns rather than showing a misleading 0.
+  //
+  // `otherProjects` is the PEAK of the other bookings, not their sum: two jobs
+  // of 100 on different days in this window are 100 unavailable, not 200, and
+  // adding them up reported shortages that did not exist (see peakUsage). The
+  // peak is worked out here from the bookings the proxy returns, so it is
+  // right whichever version of the Worker is deployed.
   const stockTableRows = useMemo(() => {
     const LOW_MARGIN = 0.1;
+    const range = availabilityCheckedRange;
     return visibleStockRows.map((row) => {
       const base = baseCodeOf(row.code);
       const availability = availabilityByCode ? availabilityByCode[base] ?? null : null;
       const repairs = repairsByCode ? repairsByCode[base] ?? null : null;
-      const otherProjects = availabilityByCode ? availability?.totalRequired ?? 0 : null;
+      const usage = availability && range ? peakUsage(availability.projects, range.from, range.to) : null;
+      const otherProjects = availabilityByCode ? usage?.peak ?? 0 : null;
       const broken = repairsByCode ? repairs?.quantity ?? 0 : null;
       const totalRequired = row.rounded ?? row.required;
       const available = row.stock - (otherProjects ?? 0) - (broken ?? 0);
@@ -3155,10 +4145,11 @@ export default function App() {
         shortBy: headroom < 0 ? -headroom : 0,
         result,
         projects: availability?.projects ?? [],
+        usage,
         repairItems: repairs?.items ?? [],
       };
     });
-  }, [visibleStockRows, availabilityByCode, repairsByCode]);
+  }, [visibleStockRows, availabilityByCode, repairsByCode, availabilityCheckedRange]);
   const rentmanChecked = availabilityByCode !== null || repairsByCode !== null;
   const rentmanProxyConfigured = isRentmanProxyConfigured();
   const stockOverridesApplied = Object.keys(stockOverrides).length > 0;
@@ -3174,8 +4165,14 @@ export default function App() {
       const code = baseCodeOf(row.code);
       if (!seen.has(code)) seen.set(code, row.name);
     });
+    // Plus anything put on the list by hand: no calculation produced a row for
+    // it, but it is still going on the truck, so its stock is worth checking.
+    addedStockCodes(stockEdits).forEach((code) => {
+      const item = stockCatalogLookup(code);
+      if (item && !seen.has(code)) seen.set(code, item.name);
+    });
     return Array.from(seen, ([code, name]) => ({ code, name }));
-  }, [stockRows]);
+  }, [stockRows, stockEdits]);
 
   const checkRentmanStock = async () => {
     if (!rentmanEligibleItems.length) return;
@@ -3184,8 +4181,11 @@ export default function App() {
     setStockCheckError(null);
     try {
       const fetched = await fetchEquipmentStock(codes);
+      // calculatedStockRows, not visibleStockRows: this compares what the
+      // WAREHOUSE holds against what Rentman now says, and a row somebody took
+      // off this project's pull list still has a shelf quantity.
       const currentRows = rentmanEligibleItems.map((item) => {
-        const effective = visibleStockRows.find((row) => baseCodeOf(row.code) === item.code);
+        const effective = calculatedStockRows.find((row) => baseCodeOf(row.code) === item.code);
         return { code: item.code, name: item.name, stock: effective ? effective.stock : 0 };
       });
       setStockComparisonRows(buildStockComparison(currentRows, fetched));
@@ -3259,74 +4259,117 @@ export default function App() {
         : "MG9";
   const fileSafePanelType = mg9Count > 0 && mtCount > 0 ? "MIX" : mtCount > 0 ? "MT" : "MG9";
 
-  // Draw every signal + power cable route onto a canvas using the shared
-  // orthogonal router, so the layout view, PDF and PNG all match. dispRectPx
-  // maps a panel to its px rect in that canvas's coordinate space.
-  // Cable LINES only, with a thin black outline (drawn under the colour). Meant
-  // to be painted BEHIND the panels.
-  const drawCanvasCableLines = (ctx: CanvasRenderingContext2D, dispRectPx: (cell: Cell) => RectMm) => {
-    const drawPath = (path: Cell[] | undefined, color: string, offset: number) => {
+  // Every hop of the current patch as one drawable run, in the px space a
+  // canvas/SVG renderer is working in. rectOf maps a panel to its rect in that
+  // space, so the workspace, the PDF and any other renderer share one set of
+  // routes and therefore draw identical cabling.
+  //
+  // Where a signal hop and a power hop join the same two panels the same way
+  // round, the two are emitted as a SINGLE "both" run - one line, one direction
+  // mark - instead of a parallel pair. On a wall patched with "Match Power To
+  // Signal Pattern" that is most of the cabling, and collapsing it is the
+  // single biggest thing keeping a complicated layout readable.
+  const cableRoutesIn = (rectOf: (cell: Cell) => RectMm, includes?: (cell: Cell) => boolean) => {
+    type Hop = { from: Cell; to: Cell; signal: boolean; power: boolean };
+    const hops = new Map<string, Hop>();
+    const collect = (path: Cell[] | undefined, kind: "signal" | "power") => {
       if (!path || path.length < 2) return;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
       for (let idx = 1; idx < path.length; idx += 1) {
-        const pts = routeCablePx(dispRectPx(path[idx - 1]), dispRectPx(path[idx]), offset);
-        const trace = () => {
-          ctx.beginPath();
-          ctx.moveTo(pts[0].x, pts[0].y);
-          for (let k = 1; k < pts.length; k += 1) ctx.lineTo(pts[k].x, pts[k].y);
-        };
-        ctx.strokeStyle = "#000000";
-        ctx.lineWidth = 6;
-        trace();
-        ctx.stroke();
+        const from = path[idx - 1];
+        const to = path[idx];
+        const key = `${from.id}>${to.id}`;
+        const hop = hops.get(key) ?? { from, to, signal: false, power: false };
+        hop[kind] = true;
+        hops.set(key, hop);
+      }
+    };
+    Object.values(signalPortStats).forEach((stat) => collect(stat.path, "signal"));
+    powerPorts.forEach((port) => collect(powerPortStats[port.id]?.path, "power"));
+    const runs = [...hops.entries()]
+      // A hop with an end the caller is not drawing is dropped whole: half a
+      // run is worse than none, since it points at a panel that is not there.
+      .filter(([, hop]) => !includes || (includes(hop.from) && includes(hop.to)))
+      .map(([key, hop]) => {
+      const kind: CableKind = hop.signal && hop.power ? "both" : hop.signal ? "signal" : "power";
+      const dest = rectOf(hop.to);
+      return { key, kind, dest, route: routeCablePx(rectOf(hop.from), dest, kind) };
+    });
+    // Two runs can still land on the same lane - a chain that doubles back on
+    // itself, or a return leg retracing one that went out earlier. Drawn as
+    // they are, that reads as ONE cable with two arrows piled on it. Give each
+    // clashing run a lane of its own so both are visible, each with its own
+    // arrow. Two spare lanes is plenty: a third clash on one lane is rare
+    // enough to leave stacked rather than push a run onto a panel's labels.
+    const placed: Array<{ segs: CableSegment[]; slot: number }> = [];
+    runs.forEach((run) => {
+      let segs = cableSegments(run.route.pts);
+      const taken = new Set(placed.filter((p) => cableRunsClash(p.segs, segs)).map((p) => p.slot));
+      let slot = 0;
+      while (taken.has(slot) && slot < 3) slot += 1;
+      if (slot > 0) {
+        run.route = spreadCableRun(run.route, run.dest, -slot * CABLE_STROKE.casing);
+        segs = cableSegments(run.route.pts);
+      }
+      placed.push({ segs, slot });
+    });
+    return runs;
+  };
+
+  // Cable runs, with a pale casing under the colour so they read over any panel
+  // fill. Painted IN FRONT of the panel graphics (the routes keep themselves
+  // off the labels) and BEHIND the port-number badges and text. Every run
+  // carries one outline ">" where it enters each panel, and nothing anywhere
+  // else along it.
+  const drawCanvasCables = (
+    ctx: CanvasRenderingContext2D,
+    rectOf: (cell: Cell) => RectMm,
+    includes?: (cell: Cell) => boolean,
+  ) => {
+    const routes = cableRoutesIn(rectOf, includes);
+    ctx.save();
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const strokeAll = (pts: CablePoint[], kind: CableKind, scale: number) => {
+      cableStrokes(kind, scale).forEach(({ color, width, dash }) => {
+        ctx.setLineDash(dash ?? []);
         ctx.strokeStyle = color;
-        ctx.lineWidth = 4;
-        trace();
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let k = 1; k < pts.length; k += 1) ctx.lineTo(pts[k].x, pts[k].y);
         ctx.stroke();
-      }
+      });
+      ctx.setLineDash([]);
     };
-    Object.entries(signalPortStats).forEach(([portId, stat]) => {
-      drawPath(stat.path, PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length], -4);
+    routes.forEach(({ kind, route }) => {
+      if (route.pts.length < 2) return;
+      strokeAll(route.pts, kind, 1);
     });
-    powerPorts.forEach((port) => {
-      drawPath(powerPortStats[port.id]?.path, POWER_COLOR, 4);
+    // Every run first, then the entry marks, so a ">" is never buried under the
+    // next hop's casing.
+    routes.forEach(({ kind, route }) => {
+      if (!route.entry) return;
+      strokeAll(cableChevronPoints(route.entry, CABLE_STROKE.chevron), kind, 1);
     });
+    ctx.restore();
   };
 
-  // Cable ARROWHEADS only (black-outlined), painted IN FRONT of the panels so the
-  // signal/power direction stays visible.
-  const drawCanvasCableArrows = (ctx: CanvasRenderingContext2D, dispRectPx: (cell: Cell) => RectMm) => {
-    const drawPath = (path: Cell[] | undefined, color: string, offset: number) => {
-      if (!path || path.length < 2) return;
-      for (let idx = 1; idx < path.length; idx += 1) {
-        const ra = dispRectPx(path[idx - 1]);
-        const rb = dispRectPx(path[idx]);
-        const pts = routeCablePx(ra, rb, offset);
-        const last = pts[pts.length - 1];
-        let prev = pts[pts.length - 2];
-        // Touching panels collapse the last segment to a point; fall back to the
-        // source->destination centre direction so the arrow still points the
-        // right way (up/down/left/right).
-        if (Math.hypot(last.x - prev.x, last.y - prev.y) < 1) {
-          prev = { x: last.x - ((rb.x + rb.w / 2) - (ra.x + ra.w / 2)), y: last.y - ((rb.y + rb.h / 2) - (ra.y + ra.h / 2)) };
-        }
-        drawCanvasArrowHead(ctx, prev.x, prev.y, last.x, last.y, color);
-      }
-    };
-    Object.entries(signalPortStats).forEach(([portId, stat]) => {
-      drawPath(stat.path, PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length], -4);
-    });
-    powerPorts.forEach((port) => {
-      drawPath(powerPortStats[port.id]?.path, POWER_COLOR, 4);
-    });
-  };
-
-  const buildLayoutCanvas = (flipped = false, viewLabel = "Back View") => {
+  /**
+   * The Panel Layout image for one PDF page.
+   *
+   * `screens` limits the page to certain sub-screens: the panels of any other
+   * screen are not drawn, and the page is built around what is left - its own
+   * bounding box, its own rulers, its own centre line - exactly as the
+   * workspace does when one sub-screen is opened for editing. Null means the
+   * whole wall, which is what every page was before the option existed.
+   */
+  const buildLayoutCanvas = (flipped = false, viewLabel = "Back View", screens: LayoutScreenFilter = null) => {
     const px = CELL_SIZE / MODULE_MM; // export scale, independent of on-screen zoom
     const margin = 52;
-    const wallW = Math.max(1, Math.round(wallBBox.w * px));
-    const wallH = Math.max(1, Math.round(wallBBox.h * px));
+    const layoutPanels = screens ? activePanels.filter((cell) => layoutScreenIncludes(screens, cell)) : activePanels;
+    const layoutBBox = screens ? activeBBox(layoutPanels.map(cellRect)) : wallBBox;
+    const wallW = Math.max(1, Math.round(layoutBBox.w * px));
+    const wallH = Math.max(1, Math.round(layoutBBox.h * px));
     const contentW = wallW + margin * 2;
     const contentH = wallH + margin * 2 + 20;
 
@@ -3340,7 +4383,11 @@ export default function App() {
       printHeightMm = PDF_LAYOUT_USABLE_HEIGHT_MM;
       printWidthMm = printHeightMm * contentRatio;
     }
-    const scale = (PDF_LAYOUT_IMAGE_DPI / 25.4) * (printWidthMm / contentW);
+    const targetScale = (PDF_LAYOUT_IMAGE_DPI / 25.4) * (printWidthMm / contentW);
+    const scale = Math.min(
+      targetScale,
+      Math.sqrt(PDF_LAYOUT_MAX_IMAGE_PIXELS / (contentW * contentH)),
+    );
 
     const canvas = document.createElement("canvas");
     canvas.width = Math.max(1, Math.round(contentW * scale));
@@ -3354,7 +4401,7 @@ export default function App() {
     ctx.fillStyle = "#0f172a";
     ctx.font = "bold 18px Arial";
     ctx.textAlign = "left";
-    ctx.fillText(viewLabel, 16, 24);
+    drawOutlinedText(ctx, viewLabel, 16, 24, 18);
 
     ctx.save();
     ctx.translate(margin, margin + 20);
@@ -3362,8 +4409,13 @@ export default function App() {
     // Panel rect in export px, mirrored for the front view.
     const dispRectPx = (cell: Cell): RectMm => {
       const raw = cellRect(cell);
-      const d = flipped ? mirrorRectX(raw, wallBBox) : raw;
-      return { x: (d.x - wallBBox.x) * px, y: (d.y - wallBBox.y) * px, w: d.w * px, h: d.h * px };
+      const d = flipped ? mirrorRectX(raw, layoutBBox) : raw;
+      return { x: (d.x - layoutBBox.x) * px, y: (d.y - layoutBBox.y) * px, w: d.w * px, h: d.h * px };
+    };
+    // Same mapping for a box that is not a panel - a sub-screen's bounds.
+    const dispBoxPx = (box: RectMm): RectMm => {
+      const d = flipped ? mirrorRectX(box, layoutBBox) : box;
+      return { x: (d.x - layoutBBox.x) * px, y: (d.y - layoutBBox.y) * px, w: d.w * px, h: d.h * px };
     };
 
     // Metre ruler along the top and left edges.
@@ -3372,31 +4424,39 @@ export default function App() {
     ctx.font = "11px Arial";
     ctx.textAlign = "center";
     ctx.lineWidth = 1;
-    for (let m = 0; m * 1000 <= wallBBox.w + 1; m += 0.5) {
+    // The metre NUMBERS sit at the edge of the image, not tight against the
+    // wall: the band just above the wall is where a sub-screen's name label
+    // goes. The tick for each whole metre is drawn long enough to reach its
+    // number, so the two still read as one ruler.
+    const rulerTextY = -(margin - 14);
+    // Right-aligned, so it needs room to its LEFT inside the margin - ending
+    // at 30px in, not 12, or a "10m" runs off the edge of the image.
+    const rulerTextX = -(margin - 30);
+    for (let m = 0; m * 1000 <= layoutBBox.w + 1; m += 0.5) {
       const x = m * 1000 * px;
       ctx.beginPath();
       ctx.moveTo(x, -4);
-      ctx.lineTo(x, m % 1 === 0 ? -12 : -8);
+      ctx.lineTo(x, m % 1 === 0 ? rulerTextY + 4 : -8);
       ctx.stroke();
-      if (m % 1 === 0) ctx.fillText(`${m}m`, x, -16);
+      if (m % 1 === 0) drawOutlinedText(ctx, `${m}m`, x, rulerTextY, 11);
     }
     ctx.textAlign = "right";
-    // Height ruler reads bottom-up (0m at the wall's base), matching the live
-    // workspace - only the printed label flips, not the tick positions.
-    const maxHeightM = Math.floor(wallBBox.h / 1000);
-    for (let m = 0; m * 1000 <= wallBBox.h + 1; m += 0.5) {
-      const y = m * 1000 * px;
+    // Height ruler reads bottom-up: 0m IS the bottom of the wall, and the ticks
+    // are measured up from there - not laid out from the top and relabelled,
+    // which put 0m between two panels on any wall that is not a whole number
+    // of metres high (three 0.5m panels, for instance).
+    const wallBottomPx = layoutBBox.h * px;
+    for (let m = 0; m * 1000 <= layoutBBox.h + 1; m += 0.5) {
+      const y = wallBottomPx - m * 1000 * px;
       ctx.beginPath();
       ctx.moveTo(-4, y);
-      ctx.lineTo(m % 1 === 0 ? -12 : -8, y);
+      ctx.lineTo(m % 1 === 0 ? rulerTextX + 4 : -8, y);
       ctx.stroke();
-      if (m % 1 === 0) ctx.fillText(`${maxHeightM - m}m`, -16, y + 4);
+      if (m % 1 === 0) drawOutlinedText(ctx, `${m}m`, rulerTextX, y + 4, 11);
     }
 
-    // Cable lines first so they sit behind the panels.
-    drawCanvasCableLines(ctx, dispRectPx);
-
-    activePanels.forEach((cell) => {
+    // Panel graphics first: fill, outline and the chain-start rings.
+    layoutPanels.forEach((cell) => {
       if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
       const fill = cell.assignedPort ? PORT_COLORS[(cell.assignedPort - 1) % PORT_COLORS.length] : "#1e293b";
@@ -3404,44 +4464,91 @@ export default function App() {
       drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#0f172a", 2, { signalBadges, powerBadge, mirrorX: flipped });
     });
 
-    // Only clutter the diagram with canvas-position labels once the user has
-    // actually engaged with sub-screens/output-canvas positioning.
-    const showCanvasLabels = subScreens.length > 0 || wholeLayoutCanvasX !== 0 || wholeLayoutCanvasY !== 0;
-    activePanels.forEach((cell) => {
+    // Then the cabling, over the panel graphics but under everything that has
+    // to stay readable - exactly the order the live workspace uses.
+    // Cables are drawn for the panels on THIS page only: a run to a panel the
+    // page does not show would be a line heading off into white space.
+    const onThisPage = new Set(layoutPanels.map((cell) => cell.id));
+    drawCanvasCables(ctx, dispRectPx, screens ? (cell) => onThisPage.has(cell.id) : undefined);
+
+    layoutPanels.forEach((cell) => {
       if (!isPanelHead(cell)) return;
       const r = dispRectPx(cell);
-      const cx = r.x + r.w / 2;
-      ctx.fillStyle = "#020617";
-      ctx.font = "bold 10px Arial";
-      ctx.textAlign = "center";
+      // Beside the vertical cable lanes rather than on the panel's centre -
+      // see panelLabelCentreX for why that is what keeps the text full size.
+      const cx = r.x + panelLabelCentreX(r.w);
       // Stack all per-panel info text from the BOTTOM of the panel upward,
-      // leaving the top corners clear for the signal/power port-number
-      // badges (drawn by drawPanelShape above, in the same top-left/top-right
-      // spots as the live workspace).
-      let by = r.y + r.h - 6;
-      const variantSymbol = getPanelSymbol(cell);
-      if (variantSymbol) {
-        ctx.fillText(variantSymbol, cx, by);
-        by -= 14;
-      }
-      if (showCanvasLabels) {
-        const finalPos = getFinalCanvasPositionOf(cell);
-        ctx.fillText(`CX ${finalPos.x} CY ${finalPos.y}`, cx, by);
-        by -= 16;
-      }
-      if (cell.assignedPowerPort) {
-        ctx.fillText(`⚡ Plug ${cell.assignedPowerPort}`, cx, by);
-        by -= 16;
-      }
-      if (cell.assignedPort) {
-        ctx.fillText(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`, cx, by);
-        by -= 16;
-      }
-      ctx.fillText(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`, cx, by);
-    });
+      // leaving the top of the panel clear for the port-number badges and for
+      // the cable lanes the router keeps its runs in (see CABLE_LANE). A full
+      // 0.5m panel prints at CELL_SIZE here and keeps the usual 10px text; a
+      // narrow LED poster section steps down to whatever still fits it.
+      let fontPx = panelLabelFontPx(r.w, r.h, 10, 4.9, PANEL_LABEL_BOTTOM_PX);
+      if (fontPx) {
+        // Bottom line first - the stack is built upward from the foot of the
+        // panel, so the symbol sits at the bottom and the reference on top.
+        const variantSymbol = getPanelSymbol(cell);
+        const lines: string[] = [];
+        if (variantSymbol) lines.push(variantSymbol);
+        if (cell.assignedPowerPort) lines.push(`⚡ Plug ${cell.assignedPowerPort}`);
+        if (cell.assignedPort) lines.push(`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`);
+        lines.push(`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}${cellPanelType(cell) === "MT" ? " (MT)" : ""}`);
+        // Gap ABOVE each line, walking up the stack; the symbol sits a touch
+        // closer to the line above it than the info lines are to each other.
+        const gapAbove = (index: number) => Math.round(fontPx * (index === 0 && variantSymbol ? 1.3 : 1.4));
+        const stackHeight = () => lines.reduce((total, _line, i) => (i === 0 ? total : total + gapAbove(i - 1)), 0) + fontPx;
 
-    // Arrowheads last so the signal/power direction stays visible in front.
-    drawCanvasCableArrows(ctx, dispRectPx);
+        // A triangle or quarter circle leaves one corner of its rect empty, so
+        // a stack hung off the bottom edge runs off the lit area and reads as
+        // if it belonged to the panel next door. Those centre the stack on a
+        // point inside the silhouette instead, shrinking the text until the
+        // whole block fits there (see panelLabelBlockFits).
+        const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
+        const rotation = cell.rotation ?? 0;
+        const footY = r.y + r.h - PANEL_LABEL_BOTTOM_PX;
+        ctx.textAlign = "center";
+        const widest = () => {
+          ctx.font = `bold ${fontPx}px Arial`;
+          return lines.reduce((max, line) => Math.max(max, ctx.measureText(line).width), 0);
+        };
+        // The foot of the panel stays the first choice even on a shaped one:
+        // it is where the cable router leaves room for the text (see
+        // PANEL_LABEL_BOTTOM_PX), so moving the block off it only to dodge
+        // the silhouette would walk it straight into a cable run. So try the
+        // foot as it is, then the foot with smaller text, and only give the
+        // foot up when even the smallest text will not fit on the lit part
+        // there - a triangle standing on its point has nothing to sit on.
+        const fitsAtFoot = () =>
+          panelLabelBlockFitsAt(r, shape, rotation, flipped, cx, footY - stackHeight() / 2, widest() / 2, stackHeight() / 2);
+        let inset = false;
+        if (panelShapeNeedsInsetLabel(shape) && !fitsAtFoot()) {
+          const fullFontPx = fontPx;
+          while (fontPx > PANEL_LABEL_MIN_PX && !fitsAtFoot()) fontPx -= 1;
+          if (!fitsAtFoot()) {
+            inset = true;
+            fontPx = fullFontPx;
+            while (fontPx > PANEL_LABEL_MIN_PX
+              && !panelLabelBlockFits(r, shape, rotation, flipped, widest() / 2, stackHeight() / 2)) {
+              fontPx -= 1;
+            }
+          }
+        }
+        ctx.fillStyle = "#020617";
+        ctx.font = `bold ${fontPx}px Arial`;
+        ctx.textAlign = "center";
+        const anchor = inset ? panelLabelAnchor(r, shape, rotation, flipped) : null;
+        const anchorX = anchor ? anchor.x : cx;
+        let by = anchor ? anchor.y + stackHeight() / 2 : footY;
+        lines.forEach((line, index) => {
+          drawOutlinedText(ctx, line, anchorX, by, fontPx);
+          by -= gapAbove(index);
+        });
+      }
+
+      // Port-number badges last of all, so a run that crosses the top-left
+      // corner passes behind the number rather than over it.
+      const { signalBadges, powerBadge } = getPanelIndicators(cell);
+      drawPanelBadges(ctx, r.x, r.y, r.w, r.h, signalBadges, powerBadge);
+    });
 
     // Vertical centre indicators - follow the toggles in Panel Layout ->
     // Overlays & displays, so hiding them on screen hides them here too.
@@ -3453,10 +4560,10 @@ export default function App() {
     const drawCentreLine = (bbox: RectMm, color: string, label: string) => {
       if (bbox.w <= 0) return;
       const centreTrueX = bbox.x + bbox.w / 2;
-      const centreDisplayTrueX = flipped ? 2 * wallBBox.x + wallBBox.w - centreTrueX : centreTrueX;
-      const lineX = (centreDisplayTrueX - wallBBox.x) * px;
-      const yTop = (bbox.y - wallBBox.y) * px;
-      const yBottom = (bbox.y + bbox.h - wallBBox.y) * px;
+      const centreDisplayTrueX = flipped ? 2 * layoutBBox.x + layoutBBox.w - centreTrueX : centreTrueX;
+      const lineX = (centreDisplayTrueX - layoutBBox.x) * px;
+      const yTop = (bbox.y - layoutBBox.y) * px;
+      const yBottom = (bbox.y + bbox.h - layoutBBox.y) * px;
       ctx.save();
       ctx.strokeStyle = color;
       ctx.lineWidth = 1.5;
@@ -3478,9 +4585,43 @@ export default function App() {
       ctx.restore();
     };
 
-    if (showCentreLine) drawCentreLine(trueOuterBBox, "#eab308", "Centre");
+    // Sub-screen boundaries, drawn exactly as the workspace draws them: a
+    // dashed box just outside the screen's panels, in that screen's own
+    // colour, with its name above the box. Below the centre lines so a centre
+    // label is never buried, and above the panels so the box reads as a
+    // grouping rather than as part of any one panel.
+    subScreens.forEach((screen, index) => {
+      const cells = layoutPanels.filter((cell) => cell.subScreenId === screen.id);
+      if (!cells.length) return;
+      const box = dispBoxPx(activeBBox(cells.map(cellRect)));
+      const color = normalizeSubScreenColor(screen.color, index);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([9, 7]);
+      const pad = 6;
+      const radius = 8;
+      const x = box.x - pad;
+      const y = box.y - pad;
+      const w = box.w + pad * 2;
+      const h = box.h + pad * 2;
+      ctx.beginPath();
+      if (typeof ctx.roundRect === "function") ctx.roundRect(x, y, w, h, radius);
+      else ctx.rect(x, y, w, h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "bold 13px Arial";
+      ctx.textAlign = "left";
+      ctx.fillStyle = color;
+      drawOutlinedText(ctx, screen.name, x + 2, y - 5, 13);
+      ctx.restore();
+    });
+
+    if (showCentreLine) drawCentreLine(screens ? trueOuterBBoxOf(layoutPanels) : trueOuterBBox, "#eab308", "Centre");
     if (showSubScreenCentreLines) {
-      subScreenCentreLines.forEach((entry) => drawCentreLine(entry.bbox, entry.color, entry.name));
+      subScreenCentreLines
+        .filter((entry) => !screens || layoutPanels.some((cell) => cell.subScreenId === entry.id))
+        .forEach((entry) => drawCentreLine(entry.bbox, entry.color, entry.name));
     }
 
     ctx.restore();
@@ -3569,43 +4710,67 @@ export default function App() {
     }
   };
 
+// Everything a saved project file holds - also what the Test Pattern
+// Generator is handed when it is opened from here.
+const projectFilePayload = () => {
+  // formatVersion 7: adds manual stock-list edits (v1-v6 files still open,
+  // see openJson - the number bump itself is purely documentation, there's
+  // no branching logic tied to it anywhere).
+  //
+  // The edits are saved, the edited rows are not: they are notes against a
+  // stock code ("pull 4 of these, not 6", "not this time"), so reopening the
+  // file recalculates the list from the layout as it always did and lays the
+  // same notes back over it.
+  // stockRows here is always the plain catalog-based numbers (this file
+  // snapshots the theoretical required/spare/rounded math, not a live
+  // Rentman read that would just go stale the moment the file is
+  // reopened) - the equipment mapping that drives live data is account-
+  // wide and lives in localStorage instead, not in this per-project file.
+  return {
+    formatVersion: 7,
+    appVersion: APP_VERSION,
+    projectName: safeProjectName,
+    surfaceName,
+    panelType,
+    powerDistro,
+    backupSignalLoop,
+    includeReinforcementPlate,
+    deploymentType,
+    wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
+    panels: grid,
+    patching: { signalPortsUsed, powerPortsUsed },
+    stockRows,
+    subScreens,
+    // formatVersion 7: things standing in front of the LED. Purely pictorial
+    // (see obstructionModel.ts) - nothing here reaches a count or a total.
+    obstructions,
+    outputCanvas: { w: outputCanvasW, h: outputCanvasH },
+    wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
+    processorModel,
+    canvasInputs,
+    inputMode,
+    wholeCanvasInputId,
+    rentmanDateFrom: projectDateFrom,
+    rentmanDateTo: projectDateTo,
+    stockEdits,
+  };
+};
+
+// The generator is a separate page, so the open project goes across the same
+// way the Moving Test Pattern window gets it: through localStorage, read once
+// by the new tab (generator.html?fromPlanner=1).
+const openTestPatternGenerator = () => {
+  try {
+    localStorage.setItem("testPatternGenerator:plannerProject:v1", JSON.stringify({ sentAt: new Date().toISOString(), project: projectFilePayload() }));
+  } catch (err) {
+    console.error("Could not hand the project to the Test Pattern Generator", err);
+  }
+  window.open(`${location.pathname.replace(/[^/]*$/, "")}generator.html?fromPlanner=1`, "_blank");
+};
+
 const exportJson = () => {
   try {
-    // formatVersion 7: adds obstructions and per-sub-screen custom
-    // resolutions (v1-v6 files still open, see openJson - the number bump
-    // itself is purely documentation, there's no branching logic tied to it
-    // anywhere).
-    // stockRows here is always the plain catalog-based numbers (this file
-    // snapshots the theoretical required/spare/rounded math, not a live
-    // Rentman read that would just go stale the moment the file is
-    // reopened) - the equipment mapping that drives live data is account-
-    // wide and lives in localStorage instead, not in this per-project file.
-    const payload = {
-      formatVersion: 7,
-      appVersion: APP_VERSION,
-      projectName: safeProjectName,
-      surfaceName,
-      panelType,
-      powerDistro,
-      backupSignalLoop,
-      includeReinforcementPlate,
-      deploymentType,
-      wall: { cols, rows, widthM: wallWidthM, heightM: wallHeightM, pixelW: wallPixelW, pixelH: wallPixelH },
-      panels: grid,
-      patching: { signalPortsUsed, powerPortsUsed },
-      stockRows,
-      subScreens,
-      // formatVersion 7: obstructions.
-      obstructions,
-      outputCanvas: { w: outputCanvasW, h: outputCanvasH },
-      wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
-      processorModel,
-      canvasInputs,
-      inputMode,
-      wholeCanvasInputId,
-      rentmanDateFrom: projectDateFrom,
-      rentmanDateTo: projectDateTo,
-    };
+    const payload = projectFilePayload();
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
     const url = window.URL.createObjectURL(blob);
@@ -3724,12 +4889,19 @@ const exportJson = () => {
   // identity colour (null for the full wall) - drawn as a border and name
   // banner so a stack of PNGs is instantly tellable apart.
   const renderTestPatternCanvas = (panels: Cell[], name: string, accentColor: string | null): HTMLCanvasElement => {
+      // The full-wall PNG declares every sub-screen, so each one is outlined
+      // and NAMED on the image the same way the moving pattern already did it.
+      // Without this the whole-wall PNG was the one export that showed no
+      // sub-screen names at all. A single-screen PNG declares none: its own
+      // name goes on as the accent banner further down, and declaring the
+      // screen as well would print the name twice.
+      const declaredSubScreens = accentColor === null ? testPatternSubScreens : [];
       // Shares computeTestPatternLayout with the video/live test pattern
       // (drawTestPattern.ts) instead of keeping a separate duplicate
       // position/label computation - a previous duplicate here silently
       // reintroduced the same "gaps collapse, front-view labels wrong"
       // bugs the shared version had already been fixed for.
-      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName: name, panelType, panels });
+      const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName: name, panelType, panels, subScreens: declaredSubScreens });
       const W = Math.max(1, layout.W);
       const H = Math.max(1, layout.H);
       const canvas = document.createElement("canvas");
@@ -3770,21 +4942,53 @@ const exportJson = () => {
         // clean per-panel pixel map, not a patching diagram.
         drawPanelShape(ctx, r.x, r.y, r.w, r.h, cell, fill, "#ffffff", 1, { hatchStep: 24, mirrorX: true });
 
-        const cx = r.x + r.w / 2;
+        // Panel reference, and the shape symbol below it (△/◜/Corner - no
+        // rotate icon, no signal/power port info). Both centred on the panel,
+        // EXCEPT on a triangle or quarter circle: there the middle of the rect
+        // is off the lit area, so the text was cut away with the shape. Those
+        // centre on a point inside the silhouette instead, turned with the
+        // panel, and shrink to the room the shape leaves (see
+        // panelShapeLabelPoint).
+        const shape = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape;
+        const shaped = panelShapeNeedsInsetLabel(shape);
+        const refText = `↓ ${layout.rowLabel(cell)} → ${layout.colLabel(cell)}`;
+        const variantSymbol = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].symbol;
+        let refFontPx = Math.max(12, Math.floor(r.h * 0.085));
+        const refWidth = () => {
+          ctx.font = `bold ${refFontPx}px Arial`;
+          return ctx.measureText(refText).width;
+        };
+        let width = refWidth();
+        if (shaped) {
+          const budget = Math.min(r.w, r.h) * 0.52;
+          if (width > budget) {
+            refFontPx = Math.max(9, Math.floor((refFontPx * budget) / width));
+            width = refWidth();
+          }
+        }
+        const local = panelShapeLabelPoint(shape, r.w, r.h);
+        const anchor = shaped
+          ? panelFramePoint(r, cell.rotation ?? 0, true, local.x, local.y)
+          : { x: r.x + r.w / 2, y: r.y + r.h * 0.4 };
+        const symbolFontPx = Math.max(shaped ? 10 : 14, Math.floor(r.h * (shaped ? 0.1 : 0.12)));
         ctx.fillStyle = "#020617";
         ctx.textAlign = "center";
-        ctx.font = `bold ${Math.max(12, Math.floor(r.h * 0.085))}px Arial`;
-        ctx.fillText(`↓ ${layout.rowLabel(cell)} → ${layout.colLabel(cell)}`, cx, r.y + r.h * 0.4);
-        // Shape symbol only (△/◜/Corner) - no rotate icon, no signal/power port info.
-        const variantSymbol = PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].symbol;
+        ctx.textBaseline = shaped ? "middle" : "alphabetic";
+        ctx.font = `bold ${refFontPx}px Arial`;
+        ctx.fillText(refText, anchor.x, shaped ? anchor.y - refFontPx * 0.6 : anchor.y);
         if (variantSymbol) {
-          ctx.font = `bold ${Math.max(14, Math.floor(r.h * 0.12))}px Arial`;
-          ctx.fillText(variantSymbol, cx, r.y + r.h - 8);
+          ctx.font = `bold ${symbolFontPx}px Arial`;
+          ctx.fillText(variantSymbol, anchor.x, shaped ? anchor.y + symbolFontPx * 0.7 : r.y + r.h - 8);
         }
+        ctx.textBaseline = "alphabetic";
       });
 
-      // No signal/power cable-routing lines or arrowheads in the PNG: it is a
-      // clean front-view pixel map of the wall for the observer / processor.
+      // No signal/power cable runs or entry marks in the PNG: it is a clean
+      // front-view pixel map of the wall for the observer / processor.
+
+      // Every declared sub-screen's own outline and name, shared with the
+      // moving pattern rather than drawn again here.
+      drawSurfaceBoundaries(ctx, layout);
 
       // Sub-screen identity: a border in its own colour plus its name, so a
       // folder of per-sub-screen PNGs can be matched back to the layout at a
@@ -3851,16 +5055,31 @@ const exportJson = () => {
         backgroundImage: settings.backgroundImage,
         showPieceOutlines: settings.showPieceOutlines,
       });
+      // Tagged PNG_EXPORT_DPI like the other PNG exports, so it lands in a
+      // layout program at a sensible print size instead of being read as 72.
+      const raw = dataUrlToBytes(canvas.toDataURL("image/png"));
+      const blob = new Blob([withPngDpi(raw, PNG_EXPORT_DPI) as unknown as BlobPart], { type: "image/png" });
+      const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
-      link.href = canvas.toDataURL("image/png");
+      link.href = url;
       link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-Basic-LED-Map.png`);
       document.body.appendChild(link);
       link.click();
       link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
     } catch (err) {
       console.error("Basic LED Map failed", err);
       alert("Basic LED Map failed - check console");
     }
+  };
+
+  // A canvas data URL back to the raw PNG bytes, so the file can be tagged
+  // before it is handed over (see withPngDpi).
+  const dataUrlToBytes = (dataUrl: string): Uint8Array => {
+    const binary = atob(dataUrl.slice(dataUrl.indexOf(",") + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return bytes;
   };
 
   const exportTestPatternPngs = (selectedKeys: Set<string>) => {
@@ -3872,12 +5091,22 @@ const exportJson = () => {
         const safeName = (surface.key === FULL_WALL_PATTERN_KEY ? `${fileSafeProjectName}-${fileSafePanelType}-Full-Wall` : surface.name)
           .replace(/[<>:"/\\|?*\x00-\x1F]/g, "-")
           .replace(/\s+/g, "-");
+        // Tagged PNG_EXPORT_DPI rather than left with no resolution at all,
+        // which is what canvas produces and which readers treat as 72. The
+        // pixels are untouched - a test pattern maps one-for-one onto the
+        // wall, so resampling it would destroy the thing it is for.
+        const raw = dataUrlToBytes(canvas.toDataURL("image/png"));
+        const blob = new Blob([withPngDpi(raw, PNG_EXPORT_DPI) as unknown as BlobPart], { type: "image/png" });
+        const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
-        link.href = canvas.toDataURL("image/png");
+        link.href = url;
         link.setAttribute("download", `${safeName}-Test-Pattern.png`);
         document.body.appendChild(link);
         link.click();
         link.remove();
+        // Revoked on the next tick - revoking immediately races the download
+        // in some browsers.
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
       });
     } catch (err) {
       console.error("PNG test pattern failed", err);
@@ -3984,7 +5213,11 @@ const exportJson = () => {
   // bitrate would produce on this pattern's large flat colour fields and
   // sharp edges/text. Shared by both the WebM and MP4 downloads - MP4 just
   // pipes this same recording through encodeWebmToMp4 afterwards.
-  const recordMovingTestPatternWebm = (project: TestPatternProject): Promise<Blob> | null => {
+  const recordMovingTestPatternWebm = (
+    project: TestPatternProject,
+    captureFps: number,
+    seconds: number = LOOP_SECONDS,
+  ): { recording: Promise<Blob>; layout: TestPatternLayout } | null => {
     if (isRecordingVideo) return null;
     const mimeType = pickVideoMimeType();
     if (!mimeType) {
@@ -4009,9 +5242,14 @@ const exportJson = () => {
     ctx.scale(1, layout.contentPixelH / layout.H);
 
     const loopStart = performance.now();
+    // Drawn at the rate the FILE is being made at, not the live view's own
+    // gentler DRAW_FPS: nothing here is competing with a user interface, and a
+    // 60p delivery file whose picture only changes 24 times a second is a 60p
+    // file in name only. A wall too big to redraw in time simply repeats a
+    // frame - captureStream below samples on its own clock either way.
     const drawId = window.setInterval(() => {
       drawTestPatternFrame(ctx, layout, (performance.now() - loopStart) / 1000);
-    }, 1000 / DRAW_FPS);
+    }, 1000 / captureFps);
 
     // ~6 bits/pixel of total resolution, floor 8Mbps / cap 80Mbps: MediaRecorder's
     // default bitrate is far too low for this pattern's sharp edges and text,
@@ -4019,13 +5257,14 @@ const exportJson = () => {
     // instead of leaving every export at one low fixed rate. Uses the actual
     // encoded resolution (content resolution), not the native one.
     const videoBitsPerSecond = Math.min(80_000_000, Math.max(8_000_000, Math.round(layout.contentPixelW * layout.contentPixelH * 6)));
-    const stream = canvas.captureStream(DRAW_FPS);
+    const stream = canvas.captureStream(captureFps);
     const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond });
     const chunks: BlobPart[] = [];
     recorder.ondataavailable = (event) => {
       if (event.data.size > 0) chunks.push(event.data);
     };
     setVideoRecordSeconds(0);
+    setVideoRecordTotal(seconds);
     setIsRecordingVideo(true);
     const result = new Promise<Blob>((resolve) => {
       recorder.onstop = () => {
@@ -4035,8 +5274,8 @@ const exportJson = () => {
       };
     });
     recorder.start();
-    setTimeout(() => recorder.stop(), LOOP_SECONDS * 1000);
-    return result;
+    setTimeout(() => recorder.stop(), seconds * 1000);
+    return { recording: result, layout };
   };
 
   // Filename carries the chosen surface, so a folder of per-screen recordings
@@ -4046,22 +5285,48 @@ const exportJson = () => {
     return `${fileSafeProjectName}${surfacePart}-front-test-pattern.${ext}`;
   };
 
+  // What the chosen surface will actually encode at - the content resolution
+  // of its own layout, which is what the download dialog quotes and what the
+  // H.264 level is chosen from.
+  const movingPatternEncodedSize = useMemo(() => {
+    const project = movingPatternProjectFor(movingPatternSurfaceKey);
+    if (!project) return { w: 0, h: 0 };
+    const layout = computeTestPatternLayout(project);
+    return { w: layout.contentPixelW, h: layout.contentPixelH };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [movingPatternSurfaceKey, grid, subScreens, panelType, safeProjectName, surfaceName]);
+
   const downloadMovingTestPatternVideo = (project: TestPatternProject) => {
-    const recording = recordMovingTestPatternWebm(project);
-    if (!recording) return;
-    recording.then((blob) => downloadBlob(blob, movingPatternFileName(project, "webm")));
+    const started = recordMovingTestPatternWebm(project, videoFps);
+    if (!started) return;
+    started.recording.then((blob) => downloadBlob(blob, movingPatternFileName(project, "webm")));
   };
 
   const downloadMovingTestPatternMp4 = (project: TestPatternProject) => {
     if (isEncodingMp4) return;
-    const recording = recordMovingTestPatternWebm(project);
-    if (!recording) return;
-    recording.then(async (blob) => {
+    // Recorded longer than one loop and cut back to exactly one in the encode,
+    // so the file repeats without a jump - see MP4_RECORD_MARGIN_SECONDS.
+    const started = recordMovingTestPatternWebm(project, videoFps, LOOP_SECONDS + MP4_RECORD_MARGIN_SECONDS);
+    if (!started) return;
+    started.recording.then(async (blob) => {
       setIsEncodingMp4(true);
       setMp4EncodeProgress(0);
       try {
         const { encodeWebmToMp4 } = await import("./testPattern/mp4Encode");
-        const mp4Blob = await encodeWebmToMp4(blob, setMp4EncodeProgress);
+        // The encoded size is the CONTENT resolution - what the recording
+        // canvas actually is - which is also what decides the H.264 level.
+        const mp4Blob = await encodeWebmToMp4(
+          blob,
+          {
+            fps: videoFps,
+            targetMbps: mp4TargetMbps,
+            maxMbps: Math.max(mp4TargetMbps, mp4MaxMbps),
+            width: started.layout.contentPixelW,
+            height: started.layout.contentPixelH,
+            loopSeconds: LOOP_SECONDS,
+          },
+          setMp4EncodeProgress,
+        );
         downloadBlob(mp4Blob, movingPatternFileName(project, "mp4"));
       } catch (err) {
         console.error("MP4 encode failed", err);
@@ -4133,6 +5398,9 @@ const exportJson = () => {
         setProjectDateTo(typeof data.rentmanDateTo === "string" ? data.rentmanDateTo : "");
         // formatVersion 7: older projects have no obstructions at all.
         setObstructions(normalizeObstructions(data.obstructions));
+        // formatVersion 7: older projects have no manual stock edits, which
+        // is the same as having none - the list opens as the tool calculates it.
+        setStockEdits(normalizeStockEdits(data.stockEdits));
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -4210,8 +5478,10 @@ const exportJson = () => {
     setGrid(panels);
     // Import replaces the whole project's panels wholesale - any existing
     // sub-screens no longer have valid members, so start clean rather than
-    // leaving stale/empty sub-screens behind.
+    // leaving stale/empty sub-screens behind. Manual stock edits go the same
+    // way: they were notes about a different wall's pull list.
     setSubScreens([]);
+    setStockEdits({});
     setActiveSubScreenId(null);
     setSelectedId(null);
     setSelectedCells(new Set());
@@ -4239,11 +5509,35 @@ const exportJson = () => {
       sections.push({ key: "sparePanels", label: "Spare Panels by Surface", hint: "Panel counts broken down per sub-screen and panel type" });
     }
     sections.push({ key: "ports", label: "Signal & Power Ports In Use", hint: "Per-port panel counts and first-to-last panel of each chain" });
+    sections.push({ key: "weights", label: "Weight breakdown", hint: "Every weight behind the total - panels by type, each rigging and cable allowance, and what is left out" });
     if (subScreens.length > 0) sections.push({ key: "subScreens", label: "Sub-Screens summary" });
+    sections.push({ key: "outputCanvas", label: "Output Canvas", hint: "Canvas resolution and where each screen sits on it" });
     sections.push(
       { key: "layoutBack", label: "Panel Layout - Back View" },
       { key: "layoutFront", label: "Panel Layout - Front View" },
     );
+    // Which sub-screens the Panel Layout pages draw. Everything is ticked by
+    // default, which is the whole wall exactly as before; untick one and its
+    // panels are left off those pages, which are then built around what is
+    // left - its own bounds, rulers and centre line.
+    if (subScreens.length > 0) {
+      subScreens.forEach((screen) => {
+        const count = grid.filter((cell) => isActiveCell(cell) && cell.subScreenId === screen.id).length;
+        sections.push({
+          key: `${PDF_SCREEN_KEY_PREFIX}${screen.id}`,
+          label: `Panel Layout: ${screen.name}`,
+          hint: `${count} panel${count === 1 ? "" : "s"}`,
+        });
+      });
+      const unassigned = grid.filter((cell) => isActiveCell(cell) && !cell.subScreenId).length;
+      if (unassigned > 0) {
+        sections.push({
+          key: `${PDF_SCREEN_KEY_PREFIX}${PDF_UNASSIGNED_SCREEN_KEY}`,
+          label: "Panel Layout: panels in no sub-screen",
+          hint: `${unassigned} panel${unassigned === 1 ? "" : "s"}`,
+        });
+      }
+    }
     return sections;
   };
 
@@ -4252,6 +5546,34 @@ const exportJson = () => {
     const wants = (key: string) => sections.has(key);
     const jsPDF = (await import("jspdf")).default;
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "landscape", compress: true });
+    // Scrub anything the built-in fonts cannot set, once, where every string
+    // enters the document - see pdfSafeText.
+    {
+      const rawText = pdf.text.bind(pdf);
+      const rawSplit = pdf.splitTextToSize.bind(pdf);
+      const scrub = (value: unknown): never => (Array.isArray(value) ? value.map((v) => pdfSafeText(String(v))) : pdfSafeText(String(value ?? ""))) as never;
+      pdf.text = ((value: unknown, ...rest: unknown[]) => rawText(scrub(value), ...(rest as [number, number]))) as typeof pdf.text;
+      pdf.splitTextToSize = ((value: unknown, ...rest: unknown[]) => rawSplit(scrub(value), ...(rest as [number]))) as typeof pdf.splitTextToSize;
+    }
+    /**
+     * Draw one line that must not overrun: shrunk, then ellipsised, to fit
+     * `maxWidth` (see fitTextToWidth). Restores the font size afterwards so a
+     * shrunk heading never silently resizes the body text below it.
+     */
+    const drawFitted = (text: string, x: number, y: number, maxWidth: number, baseSize: number, minSize: number) => {
+      const previous = pdf.getFontSize();
+      const fitted = fitTextToWidth(pdfSafeText(text), maxWidth, baseSize, minSize, (value, size) => {
+        pdf.setFontSize(size);
+        return pdf.getTextWidth(value);
+      });
+      pdf.setFontSize(fitted.size);
+      pdf.text(fitted.text, x, y);
+      pdf.setFontSize(previous);
+    };
+    /** Every page heading: same place, same rules, never off the edge. */
+    const drawPageTitle = (text: string, baseSize = 16) =>
+      drawFitted(text, 10, 12, pdf.internal.pageSize.getWidth() - 20, baseSize, 9);
+
     const printedAt = new Date().toLocaleString();
     const usedSignalPorts = signalPorts.filter((port) => signalPortStats[port.id].panels > 0);
     const usedPowerPorts = powerPorts.filter((port) => powerPortStats[port.id].panels > 0);
@@ -4290,26 +5612,143 @@ const exportJson = () => {
       });
     };
 
-    const drawLayoutPage = (canvas: HTMLCanvasElement, viewLabel: string) => {
+    /**
+     * Key for the Panel Layout pages: what every mark on the drawing means,
+     * in the top-right corner where the header leaves the page empty, so the
+     * drawing itself keeps its full size.
+     *
+     * Drawn as vector swatches with the same colours and the same shapes the
+     * layout canvas uses, so the key cannot drift from what it is explaining.
+     */
+    const drawLayoutKey = (x: number, y: number) => {
+      const [sigR, sigG, sigB] = rgbOf(SIGNAL_CABLE_COLOR);
+      const [powR, powG, powB] = rgbOf(POWER_COLOR);
+      const rowH = 4.3;
+      const swatchW = 7;
+
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(9);
+      pdf.text("Key", x, y);
+
+      const label = (col: number, row: number, text: string) => {
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(7);
+        pdf.setTextColor(15, 23, 42);
+        pdf.text(text, x + col * 54 + swatchW + 2, y + 4 + row * rowH + 1);
+      };
+      const cableSwatch = (col: number, row: number, kind: CableKind) => {
+        const sx = x + col * 54;
+        const sy = y + 4 + row * rowH;
+        cableStrokes(kind).forEach(({ color, width, dash }) => {
+          if (color === CABLE_CASING_COLOR) return; // the casing is white - invisible on paper
+          const [r, g, b2] = rgbOf(color);
+          pdf.setDrawColor(r, g, b2);
+          pdf.setLineWidth(width * 0.28);
+          if (dash) pdf.setLineDashPattern([1.6, 1.6], 0);
+          pdf.line(sx, sy, sx + swatchW, sy);
+          pdf.setLineDashPattern([], 0);
+        });
+      };
+      const badgeSwatch = (col: number, row: number, hex: string, text: string) => {
+        const [r, g, b2] = rgbOf(hex);
+        const sx = x + col * 54 + swatchW / 2;
+        const sy = y + 4 + row * rowH;
+        pdf.setFillColor(r, g, b2);
+        pdf.circle(sx, sy, 1.7, "F");
+        pdf.setTextColor(255, 255, 255);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(5);
+        pdf.text(text, sx, sy + 0.8, { align: "center" });
+        pdf.setTextColor(15, 23, 42);
+      };
+
+      cableSwatch(0, 0, "signal");
+      label(0, 0, "Signal cable");
+      cableSwatch(0, 1, "power");
+      label(0, 1, "Power cable");
+      cableSwatch(0, 2, "both");
+      label(0, 2, "Signal + power, one run");
+
+      // The ">" entry mark, drawn with the same chevron the layout uses.
+      {
+        const sx = x + 0 * 54;
+        const sy = y + 4 + 3 * rowH;
+        const pts = cableChevronPoints({ x: sx + swatchW - 2, y: sy, angle: 0 }, 2.6);
+        pdf.setDrawColor(powR, powG, powB);
+        pdf.setLineWidth(0.7);
+        pdf.lines(
+          pts.slice(1).map((pt, i) => [pt.x - pts[i].x, pt.y - pts[i].y]),
+          pts[0].x,
+          pts[0].y,
+        );
+        label(0, 3, "Direction, into the panel");
+      }
+
+      pdf.setDrawColor(234, 179, 8);
+      pdf.setLineWidth(0.5);
+      pdf.setLineDashPattern([1.2, 1.2], 0);
+      pdf.line(x + 3.5, y + 4 + 4 * rowH - 1.6, x + 3.5, y + 4 + 4 * rowH + 1.6);
+      pdf.setLineDashPattern([], 0);
+      label(0, 4, "Centre of the wall");
+
+      // Only worth a row when the drawing actually has sub-screen boxes on it.
+      if (subScreens.length > 0) {
+        const [ssR, ssG, ssB] = rgbOf(normalizeSubScreenColor(subScreens[0].color, 0));
+        pdf.setDrawColor(ssR, ssG, ssB);
+        pdf.setLineWidth(0.6);
+        pdf.setLineDashPattern([1.4, 1.1], 0);
+        const sy = y + 4 + 5 * rowH;
+        pdf.roundedRect(x, sy - 1.6, swatchW, 3.2, 0.8, 0.8, "S");
+        pdf.setLineDashPattern([], 0);
+        label(0, 5, "Sub-screen, named above its box");
+      }
+
+      badgeSwatch(1, 0, SIGNAL_START_COLOR, "1");
+      label(1, 0, "Signal chain start (port)");
+      badgeSwatch(1, 1, POWER_START_COLOR, "1");
+      label(1, 1, "Power chain start (plug)");
+      label(1, 2, "1 > 2 = row > column");
+      label(1, 3, "P1 (3) = port 1, 3rd panel");
+      label(1, 4, "LU/LD/RU/RD = shape corner");
+
+      pdf.setTextColor(15, 23, 42);
+      pdf.setDrawColor(0, 0, 0);
+      pdf.setLineWidth(0.2);
+    };
+
+    const drawLayoutPage = (canvas: HTMLCanvasElement, viewLabel: string, screenNote?: string) => {
       pdf.addPage("a4", "landscape");
       const pageWidth = pdf.internal.pageSize.getWidth();
       const pageHeight = pdf.internal.pageSize.getHeight();
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(18);
-      pdf.text(`${safeProjectName} - Panel Layout - ${viewLabel}`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Panel Layout - ${viewLabel}`, 18);
 
       pdf.setFont("helvetica", "normal");
+      // A page that shows only some of the wall says so on its own face - the
+      // figures below it are still the whole wall's, and a drawing of part of
+      // a wall that does not admit it is how the wrong thing gets built.
+      if (screenNote) {
+        pdf.setFontSize(8);
+        pdf.setTextColor(37, 99, 235);
+        // In the gap between the last header line (y 44) and the top of the
+        // drawing (y 50) - the only strip on this page that is always empty.
+        pdf.text(screenNote, 10, 47.5, { maxWidth: 270 });
+        pdf.setTextColor(15, 23, 42);
+      }
       pdf.setFontSize(10);
-      pdf.text(`Project name: ${safeProjectName}`, 10, 20);
+      // Stops short of the second column, which starts at x=105.
+      drawFitted(`Project name: ${safeProjectName}`, 10, 20, 92, 10, 7);
       pdf.text(`Panel type: ${panelTypeSummary}`, 10, 26);
       pdf.text(`Power distro: ${distro.label}`, 10, 32);
-      pdf.text(`Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`, 10, 38);
+      pdf.text(`Panels: ${totalPanels} active across ${gridRefs.rows} row${gridRefs.rows === 1 ? "" : "s"} x ${gridRefs.cols} column${gridRefs.cols === 1 ? "" : "s"}`, 10, 38);
 
       pdf.text(`${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`, 105, 20);
       pdf.text(`Total weight: ${totalWeight.toFixed(1)} kg`, 105, 26);
-      pdf.text(wallResolutionSummaryLines[0], 105, 32);
-      pdf.text(wallResolutionSummaryLines[1], 105, 38);
-      pdf.text(wallResolutionSummaryLines[2], 105, 44);
+      // The Key starts at x=180, so these have 73mm and no more.
+      wallResolutionSummaryLines.forEach((line, i) => drawFitted(line, 105, 32 + i * 6, 73, 10, 6.5));
+
+      drawLayoutKey(180, 16);
 
       const usableWidth = pageWidth - 20;
       const usableHeight = pageHeight - 58;
@@ -4352,7 +5791,7 @@ const exportJson = () => {
         pdf.text(STOCK_COUNT_LABELS.total, stockCols.rounded, y, { align: "right" });
         pdf.text(rentmanChecked ? "Rentman Stock" : "Stock", stockCols.stock, y, { align: "right" });
         if (rentmanChecked) {
-          if (availabilityByCode) pdf.text("Other Projects", stockCols.other, y, { align: "right" });
+          if (availabilityByCode) pdf.text("Out on the day", stockCols.other, y, { align: "right" });
           if (repairsByCode) pdf.text("Broken / Repair", stockCols.broken, y, { align: "right" });
           pdf.text("Available", stockCols.available, y, { align: "right" });
         }
@@ -4364,7 +5803,7 @@ const exportJson = () => {
       for (let index = startIndex; index < stockTableRows.length; index += 1) {
         const entry = stockTableRows[index];
         const row = entry.row;
-        if (y > maxY) return index;
+        if (y > maxY) return { next: index, y };
         const short = rentmanChecked ? entry.result === "SHORT" : row.net < 0;
         if (short || (rentmanChecked && entry.result === "LOW")) {
           if (short) pdf.setFillColor(254, 226, 226);
@@ -4373,7 +5812,9 @@ const exportJson = () => {
         }
         pdf.setFontSize(rentmanChecked ? 7 : 8);
         pdf.text(String(row.code), 12, y);
-        pdf.text(pdf.splitTextToSize(row.name, stockCols.itemWrap)[0], 34, y);
+        // A quantity somebody typed in is not the tool's answer, and a printed
+        // pull sheet has to say so - the mark is explained under the table.
+        pdf.text(pdf.splitTextToSize(`${row.edited ? "* " : ""}${row.name}`, stockCols.itemWrap)[0], 34, y);
         pdf.text(formatNumber(row.required), stockCols.required, y, { align: "right" });
         pdf.text(formatNumber(row.spare ?? 0), stockCols.spare, y, { align: "right" });
         pdf.text(formatNumber(row.spareRounded ?? row.spare ?? 0), stockCols.spareRounded, y, { align: "right" });
@@ -4396,25 +5837,72 @@ const exportJson = () => {
         );
         y += 6;
       }
-      return stockTableRows.length;
+      return { next: stockTableRows.length, y };
     };
 
     const drawStockPage = (startIndex = 0) => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Stock Summary`, 10, 12);
-      let nextIndex = drawStockTable(startIndex, 22, 190);
-      while (nextIndex < stockTableRows.length) {
+      drawPageTitle(`${safeProjectName} - Stock Summary`);
+      let table = drawStockTable(startIndex, 22, 190);
+      while (table.next < stockTableRows.length) {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Stock Summary continued`, 10, 12);
-        nextIndex = drawStockTable(nextIndex, 22, 190);
+        drawPageTitle(`${safeProjectName} - Stock Summary continued`);
+        table = drawStockTable(table.next, 22, 190);
       }
+      drawStockEditNotes(table.y);
     };
 
-    // Every project and repair job behind the Other Projects / Broken columns
+    // Manual changes are declared under the table, not left to be spotted: a
+    // pull sheet that quietly differs from what the tool worked out is the one
+    // thing this page must never be. Called wherever the table happens to
+    // finish - the front page when it is short enough, its own page when it
+    // is not.
+    function drawStockEditNotes(afterY: number) {
+      const edited = visibleStockRows.filter((row) => row.edited && !row.manual);
+      const added = visibleStockRows.filter((row) => row.manual);
+      const notes = [
+        edited.length
+          ? `* Quantity set by hand, not calculated: ${edited
+              .map((row) => `${row.code} ${formatNumber(row.rounded ?? row.required)} (tool: ${formatNumber(row.calculated ?? 0)})`)
+              .join(", ")}`
+          : null,
+        added.length
+          ? `* Put on this list by hand - nothing on this wall asks for it: ${added
+              .map((row) => `${row.code} ${row.name} x ${formatNumber(row.rounded ?? 0)}`)
+              .join(", ")}`
+          : null,
+        stockRowsRemoved.length
+          ? `Taken off this list by hand: ${stockRowsRemoved.map((row) => `${row.code} ${row.name}`).join(", ")}`
+          : null,
+      ].filter((note): note is string => note !== null);
+      if (!notes.length) return;
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(8);
+      // Wrapped here rather than by maxWidth, so the space the notes need is
+      // known before they are placed - they go under the table when they fit
+      // above the page footer, and on a page of their own when they do not.
+      const lines = notes.flatMap((note) => pdf.splitTextToSize(note, 274) as string[]);
+      const FOOTER_TOP = 198;
+      let noteY = afterY + 4;
+      if (noteY + lines.length * 4.5 > FOOTER_TOP) {
+        pdf.addPage("a4", "landscape");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(16);
+        drawPageTitle(`${safeProjectName} - Stock Summary continued`);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(8);
+        noteY = 22;
+      }
+      pdf.setTextColor(120, 53, 15);
+      lines.forEach((line, index) => pdf.text(line, 10, noteY + index * 4.5));
+      pdf.setTextColor(15, 23, 42);
+    }
+
+    // Every project and repair job behind the Out on the day / Broken columns
     // above, so the printed report stands on its own without needing the
     // expandable cells in the app.
     const drawRentmanDetailPage = () => {
@@ -4425,25 +5913,30 @@ const exportJson = () => {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Other Projects & Repairs${continued ? " (continued)" : ""}`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Other Projects & Repairs${continued ? " (continued)" : ""}`);
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(9);
         pdf.setTextColor(100, 116, 139);
-        pdf.text(
+        // Wrapped rather than run off the edge of the page: this line is what
+        // explains why the figures are not the sum of the jobs under them.
+        const intro = pdf.splitTextToSize(
           availabilityCheckedRange
-            ? `Other projects overlapping ${availabilityCheckedRange.from} to ${availabilityCheckedRange.to}. Broken / repair is current, not date-ranged.`
+            ? `Jobs overlapping ${availabilityCheckedRange.from} to ${availabilityCheckedRange.to}. The figure against each item is the most of it out on any ONE day of that range, not the sum of these jobs; * marks the ones making up that peak. Cancelled jobs are listed but not counted. Broken / repair is current, not date-ranged.`
             : "Broken / repair is current, not date-ranged.",
-          10,
-          18,
-        );
+          274,
+        ) as string[];
+        intro.forEach((line, index) => pdf.text(line, 10, 18 + index * 4.5));
         pdf.setTextColor(15, 23, 42);
-        y = 26;
+        y = 20 + intro.length * 4.5 + 2;
       };
       const ensureRoom = (linesNeeded: number) => {
         if (y === 0 || y + linesNeeded * 5 > 195) startPage(y !== 0);
       };
       withDetail.forEach((entry) => {
-        ensureRoom(entry.projects.length + entry.repairItems.length + 3);
+        // Headroom for the fixed lines above the bookings: the item's name,
+        // the peak line, the "booked across the whole range" line, the
+        // cancelled-jobs line and the repairs header.
+        ensureRoom(entry.projects.length + entry.repairItems.length + 5);
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(11);
         pdf.text(`${entry.row.code} - ${entry.row.name}`, 10, y);
@@ -4451,14 +5944,47 @@ const exportJson = () => {
         pdf.setFont("helvetica", "normal");
         pdf.setFontSize(8);
         if (entry.projects.length) {
-          pdf.text(`Other Projects: ${formatNumber(entry.otherProjects ?? 0)}`, 14, y);
+          const usage = entry.usage;
+          const peakWhen = usage?.peakStart
+            ? ` - peak ${usage.peakStart === usage.peakEnd ? formatDateLabel(usage.peakStart) : `${formatDateLabel(usage.peakStart)} to ${formatDateLabel(usage.peakEnd)}`}`
+            : "";
+          pdf.text(`${formatNumber(entry.otherProjects ?? 0)} out on other jobs at once${peakWhen}`, 14, y);
           y += 4.5;
-          entry.projects.forEach((project) => {
+          // Said in full on the page: the sum of these bookings is not what is
+          // unavailable, and a reader comparing the two numbers deserves to
+          // know why they differ rather than assuming one of them is wrong.
+          if (usage?.overstated) {
+            pdf.setTextColor(100, 116, 139);
             pdf.text(
-              `#${project.projectNumber} - ${project.projectName} - ${project.status ?? "No status"} - ${formatNumber(project.quantity)} - ${formatDateLabel(project.planPeriodStart)} to ${formatDateLabel(project.planPeriodEnd)}`,
+              `${formatNumber(usage.total)} is booked across the whole range, but these jobs do not all run together.`,
               18,
               y,
             );
+            pdf.setTextColor(15, 23, 42);
+            y += 4.5;
+          }
+          // Cancelled jobs are listed below with the rest, so the page has to
+          // say why the numbers against them do not add up to the figure above.
+          if (usage?.cancelled.length) {
+            pdf.setTextColor(100, 116, 139);
+            pdf.text(
+              `${formatNumber(usage.cancelledQuantity)} on ${usage.cancelled.length} cancelled job${usage.cancelled.length === 1 ? "" : "s"} is not counted - that kit is on the shelf.`,
+              18,
+              y,
+            );
+            pdf.setTextColor(15, 23, 42);
+            y += 4.5;
+          }
+          entry.projects.forEach((project) => {
+            const cancelled = isCancelledStatus(project.status);
+            const inPeak = usage?.peakBookings.includes(project) ?? false;
+            if (!inPeak) pdf.setTextColor(100, 116, 139);
+            pdf.text(
+              `${inPeak ? "*" : " "} #${project.projectNumber} - ${project.projectName} - ${project.status ?? "No status"} - ${formatNumber(project.quantity)} - ${formatDateLabel(project.planPeriodStart)} to ${formatDateLabel(project.planPeriodEnd)}${cancelled ? " - not counted" : ""}`,
+              18,
+              y,
+            );
+            if (!inPeak) pdf.setTextColor(15, 23, 42);
             y += 4.5;
           });
         }
@@ -4520,11 +6046,357 @@ const exportJson = () => {
       return subScreens.length;
     };
 
+    // Colour helper: jsPDF wants channels, the app stores hex.
+    const rgbOf = (hex: string): [number, number, number] => {
+      const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+      if (!m) return [15, 23, 42];
+      const v = Number.parseInt(m[1], 16);
+      return [(v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
+    };
+
+    // Every screen that sits on the output canvas, in the same terms the
+    // Output Canvas panel uses on screen: its position on the canvas, its own
+    // pixel resolution, and its identity colour. With no sub-screens the whole
+    // layout is the single entry, exactly as the panel shows it.
+    const outputCanvasEntries = subScreens.length
+      ? subScreens.map((screen, index) => ({
+          name: screen.name,
+          x: screen.canvasX,
+          y: screen.canvasY,
+          resolution: subScreenResolutionOf(grid, screen.id),
+          color: normalizeSubScreenColor(screen.color, index),
+          panels: subScreenPanelCount(grid, screen.id),
+        }))
+      : [{
+          name: "Whole Layout",
+          x: wholeLayoutCanvasX,
+          y: wholeLayoutCanvasY,
+          // Footprint, like the sub-screen entries above and like the wall's
+          // own quoted Resolution - this is canvas area, not the NovaStar
+          // cabinet topology.
+          resolution: wallFootprintResolutionOf(activePanels),
+          color: normalizeSubScreenColor(null, 0),
+          panels: activePanels.length,
+        }];
+
+    /**
+     * The output canvas, drawn the way the app's own Output Canvas view draws
+     * it: the full canvas as one frame with every screen sitting where it has
+     * been placed on it, to scale.
+     *
+     * Deliberately vector, unfilled and light: this page is a reference a
+     * technician prints, and a page of solid dark fill is a page of ink. The
+     * canvas is a thin grey frame, each screen a thin outline in its own
+     * identity colour, and everything else is text.
+     */
+    const drawOutputCanvasPage = () => {
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      drawPageTitle(`${safeProjectName} - Output Canvas`);
+
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(11);
+      pdf.text(`Canvas resolution: ${formatNumber(outputCanvasW)} x ${formatNumber(outputCanvasH)} px`, 10, 20);
+      pdf.setFontSize(9);
+      pdf.text(
+        `${outputCanvasEntries.length} screen${outputCanvasEntries.length === 1 ? "" : "s"} placed on the canvas. Positions are the top-left pixel of each screen.`,
+        10,
+        26,
+      );
+
+      // Canvas frame, scaled to fit the page's own drawing area.
+      const frameMaxW = 277;
+      const frameMaxH = 96;
+      const canvasW = Math.max(outputCanvasW, 1);
+      const canvasH = Math.max(outputCanvasH, 1);
+      const scale = Math.min(frameMaxW / canvasW, frameMaxH / canvasH);
+      const frameW = Math.max(1, canvasW * scale);
+      const frameH = Math.max(1, canvasH * scale);
+      const frameX = 10 + (frameMaxW - frameW) / 2;
+      const frameY = 32;
+
+      pdf.setDrawColor(100, 116, 139);
+      pdf.setLineWidth(0.4);
+      pdf.rect(frameX, frameY, frameW, frameH);
+      pdf.setFontSize(7);
+      pdf.setTextColor(100, 116, 139);
+      pdf.text("0, 0", frameX, frameY - 1.5);
+      pdf.text(`${formatNumber(outputCanvasW)}, ${formatNumber(outputCanvasH)}`, frameX + frameW, frameY + frameH + 3.5, { align: "right" });
+      pdf.setTextColor(15, 23, 42);
+
+      outputCanvasEntries.forEach((entry) => {
+        if (entry.resolution.w <= 0 || entry.resolution.h <= 0) return;
+        const [r, g, bch] = rgbOf(entry.color);
+        const x = frameX + entry.x * scale;
+        const y = frameY + entry.y * scale;
+        const w = Math.max(0.6, entry.resolution.w * scale);
+        const h = Math.max(0.6, entry.resolution.h * scale);
+        pdf.setDrawColor(r, g, bch);
+        pdf.setLineWidth(0.7);
+        pdf.rect(x, y, w, h);
+        // Name inside the box when it fits, tucked above it when it does not.
+        pdf.setFontSize(7);
+        pdf.setTextColor(r, g, bch);
+        const label = pdf.splitTextToSize(entry.name, Math.max(w - 2, 12))[0];
+        if (h >= 8) {
+          pdf.text(label, x + 1.5, y + 4);
+          pdf.setTextColor(71, 85, 105);
+          pdf.text(`${formatNumber(entry.resolution.w)} x ${formatNumber(entry.resolution.h)}`, x + 1.5, y + 7.5);
+        } else {
+          pdf.text(label, x, Math.max(y - 1, frameY - 1));
+        }
+        pdf.setTextColor(15, 23, 42);
+      });
+
+      // The same numbers as a table, because a drawing to scale is not
+      // something you can read a pixel position off.
+      let y = frameY + frameH + 12;
+      pdf.setFillColor(226, 232, 240);
+      pdf.rect(10, y - 5, 277, 7, "F");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(8);
+      pdf.text("Screen", 12, y);
+      pdf.text("Canvas X", 110, y);
+      pdf.text("Canvas Y", 140, y);
+      pdf.text("Resolution", 170, y);
+      pdf.text("Right, Bottom", 215, y);
+      pdf.text("Panels", 285, y, { align: "right" });
+      y += 6;
+      pdf.setFont("helvetica", "normal");
+      outputCanvasEntries.forEach((entry) => {
+        if (y > 196) return;
+        const [r, g, bch] = rgbOf(entry.color);
+        pdf.setFillColor(r, g, bch);
+        pdf.rect(12, y - 2.6, 3, 3, "F");
+        pdf.text(pdf.splitTextToSize(entry.name, 88)[0], 17, y);
+        pdf.text(formatNumber(entry.x), 110, y);
+        pdf.text(formatNumber(entry.y), 140, y);
+        pdf.text(`${formatNumber(entry.resolution.w)} x ${formatNumber(entry.resolution.h)}`, 170, y);
+        pdf.text(`${formatNumber(entry.x + entry.resolution.w)}, ${formatNumber(entry.y + entry.resolution.h)}`, 215, y);
+        pdf.text(formatNumber(entry.panels), 285, y, { align: "right" });
+        y += 6;
+      });
+
+      // Anything that will not map: a screen hanging off the canvas, or two
+      // sharing pixels. Worth a line on the page a technician is holding.
+      const problems: string[] = [];
+      outputCanvasEntries.forEach((entry, i) => {
+        if (entry.x < 0 || entry.y < 0) problems.push(`${entry.name}: negative canvas position (X ${entry.x}, Y ${entry.y}).`);
+        if (entry.x + entry.resolution.w > outputCanvasW || entry.y + entry.resolution.h > outputCanvasH) {
+          problems.push(`${entry.name}: extends beyond the ${outputCanvasW} x ${outputCanvasH} canvas.`);
+        }
+        outputCanvasEntries.slice(i + 1).forEach((other) => {
+          const overlap =
+            entry.x < other.x + other.resolution.w && other.x < entry.x + entry.resolution.w &&
+            entry.y < other.y + other.resolution.h && other.y < entry.y + entry.resolution.h;
+          if (overlap && entry.resolution.w > 0 && other.resolution.w > 0) {
+            problems.push(`${entry.name} and ${other.name} overlap on the canvas.`);
+          }
+        });
+      });
+      if (problems.length) {
+        y += 4;
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(9);
+        pdf.setTextColor(180, 83, 9);
+        pdf.text("Check before mapping", 10, y);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(8);
+        y += 5;
+        problems.slice(0, 6).forEach((line) => {
+          if (y > 204) return;
+          pdf.text(`- ${line}`, 12, y);
+          y += 4.5;
+        });
+        pdf.setTextColor(15, 23, 42);
+      }
+    };
+
+    /**
+     * Every weight that makes up the total, and where each one comes from.
+     *
+     * The summary page has only ever printed one number, which is no use to
+     * whoever has to sign off a rigging plot: this page shows the panels type
+     * by type, each rigging and cable allowance with the sum that produced it,
+     * and the allowances that are switched OFF as well - an allowance nobody
+     * can see is one nobody can question.
+     */
+    const drawWeightsPage = () => {
+      pdf.addPage("a4", "landscape");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(16);
+      drawPageTitle(`${safeProjectName} - Weight Breakdown`);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      pdf.setTextColor(71, 85, 105);
+      pdf.text("Every figure below is this project's own layout and patching - no allowance is carried in that is not listed here.", 10, 18);
+      pdf.setTextColor(15, 23, 42);
+
+      let y = 30;
+      const sectionHeading = (text: string) => {
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(11);
+        pdf.text(text, 10, y);
+        y += 6;
+      };
+      const tableHead = (cols: Array<{ text: string; x: number; align?: "right" }>) => {
+        pdf.setFillColor(226, 232, 240);
+        pdf.rect(10, y - 5, 274, 7, "F");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(8);
+        cols.forEach((col) => pdf.text(col.text, col.x, y, col.align ? { align: col.align } : undefined));
+        y += 6;
+        pdf.setFont("helvetica", "normal");
+      };
+      const row = (cells: Array<{ text: string; x: number; align?: "right" }>, bold = false, muted = false) => {
+        pdf.setFont("helvetica", bold ? "bold" : "normal");
+        pdf.setFontSize(8);
+        if (muted) pdf.setTextColor(100, 116, 139);
+        cells.forEach((cell) => pdf.text(cell.text, cell.x, y, cell.align ? { align: cell.align } : undefined));
+        if (muted) pdf.setTextColor(15, 23, 42);
+        y += 6;
+      };
+      const kg = (value: number) => `${value.toFixed(1)} kg`;
+
+      // --- Panels, by type -------------------------------------------------
+      sectionHeading("Panels");
+      tableHead([
+        { text: "Panel type", x: 12 },
+        { text: "Panels", x: 80, align: "right" },
+        { text: "Each", x: 120, align: "right" },
+        { text: "Weight", x: 165, align: "right" },
+      ]);
+      (Object.keys(PANEL_TYPES) as PanelTypeKey[]).forEach((key) => {
+        const count = panelTypeCounts[key];
+        if (!count) return;
+        const spec = PANEL_TYPES[key];
+        row([
+          { text: key === "POSTER" ? `${spec.name} (per section)` : spec.name, x: 12 },
+          { text: formatNumber(count), x: 80, align: "right" },
+          { text: kg(spec.weight), x: 120, align: "right" },
+          { text: kg(count * spec.weight), x: 165, align: "right" },
+        ]);
+      });
+      if (panelTypeCounts.POSTER > 0) {
+        row([{ text: "LED poster sections are carried at 0 kg by instruction, not by omission.", x: 12 }], false, true);
+      }
+      row([
+        { text: "Panels subtotal", x: 12 },
+        { text: formatNumber(totalPanels), x: 80, align: "right" },
+        { text: "", x: 120 },
+        { text: kg(panelOnlyWeight), x: 165, align: "right" },
+      ], true);
+      y += 4;
+
+      // --- Rigging and cables ---------------------------------------------
+      sectionHeading("Rigging and cables");
+      pdf.setFontSize(8);
+      pdf.setTextColor(100, 116, 139);
+      pdf.text(
+        `Top-row panels (what the rigging hangs from): ${topRowBars.mg9} MG9, ${topRowBars.mt} MT${topRowBars.poster ? `, ${topRowBars.poster} poster sections` : ""}.`,
+        10,
+        y,
+      );
+      pdf.setTextColor(15, 23, 42);
+      y += 6;
+      tableHead([
+        { text: "Item", x: 12 },
+        { text: "How it is worked out", x: 80 },
+        { text: "In the total", x: 180, align: "right" },
+        { text: "Weight", x: 215, align: "right" },
+      ]);
+      const allowance = (name: string, method: string, weight: number, included: boolean) => {
+        row([
+          { text: name, x: 12 },
+          // Clipped to its column: a long method running under the next
+          // column is how "No" ends up printed through a sentence.
+          { text: pdf.splitTextToSize(method, 95)[0], x: 80 },
+          { text: included ? "Yes" : "No", x: 180, align: "right" },
+          { text: kg(weight), x: 215, align: "right" },
+        ], false, !included);
+      };
+      allowance(
+        "Fly bar",
+        `${topRowBars.mg9} x ${PANEL_TYPES.MG9.defaults.flyBarWeight}kg (MG9) + ${topRowBars.mt} x ${PANEL_TYPES.MT.defaults.flyBarWeight}kg (MT)`,
+        flyBarWeight,
+        includeFlyBar,
+      );
+      allowance(
+        "Sling and shackle",
+        `${topRowBars.mg9 + topRowBars.mt} top-row panels x ${PANEL_TYPES.MG9.defaults.slingWeight}kg`,
+        slingWeight,
+        includeSling,
+      );
+      allowance(
+        "Power cables",
+        `${powerPortsUsed} outlet${powerPortsUsed === 1 ? "" : "s"} in use x 3kg`,
+        powerCableWeight,
+        includePowerCable,
+      );
+      allowance(
+        "Signal cables",
+        `${effectiveSignalPortsUsed} run${effectiveSignalPortsUsed === 1 ? "" : "s"} x 1kg${backupSignalLoop ? " (backup loop doubles them)" : ""}`,
+        signalCableWeight,
+        includeSignalCable,
+      );
+      allowance("Custom weight", "Entered by hand in Wall Summary", Number(customWeight || 0), includeCustomWeight);
+      row([
+        { text: "Rigging and cables subtotal", x: 12 },
+        { text: "Only the items marked Yes", x: 80 },
+        { text: "", x: 180 },
+        { text: kg(additionalWeight), x: 215, align: "right" },
+      ], true);
+      y += 4;
+
+      // --- Total ------------------------------------------------------------
+      pdf.setFillColor(224, 242, 254);
+      pdf.rect(10, y - 5, 274, 8, "F");
+      row([
+        { text: "TOTAL WEIGHT", x: 12 },
+        { text: `${kg(panelOnlyWeight)} of panels + ${kg(additionalWeight)} of rigging and cables`, x: 80 },
+        { text: "", x: 180 },
+        { text: kg(totalWeight), x: 215, align: "right" },
+      ], true);
+      y += 4;
+
+      // --- Per sub-screen ----------------------------------------------------
+      // Panels only: the rigging allowances above are worked out across the
+      // whole wall, and splitting them per screen would be inventing a number.
+      if (subScreens.length > 0 && y < 170) {
+        sectionHeading("Panel weight per sub-screen");
+        tableHead([
+          { text: "Sub-screen", x: 12 },
+          { text: "Panels", x: 120, align: "right" },
+          { text: "Panel weight", x: 165, align: "right" },
+        ]);
+        const weightOf = (cells: Cell[]) => cells.reduce((sum, cell) => sum + PANEL_TYPES[cellPanelType(cell)].weight, 0);
+        subScreens.forEach((screen) => {
+          if (y > 190) return;
+          const cells = activePanels.filter((cell) => cell.subScreenId === screen.id);
+          if (!cells.length) return;
+          row([
+            { text: pdf.splitTextToSize(screen.name, 100)[0], x: 12 },
+            { text: formatNumber(cells.length), x: 120, align: "right" },
+            { text: kg(weightOf(cells)), x: 165, align: "right" },
+          ]);
+        });
+        const loose = activePanels.filter((cell) => !cell.subScreenId);
+        if (loose.length && y <= 190) {
+          row([
+            { text: "Panels in no sub-screen", x: 12 },
+            { text: formatNumber(loose.length), x: 120, align: "right" },
+            { text: kg(weightOf(loose)), x: 165, align: "right" },
+          ]);
+        }
+      }
+    };
+
     const drawSubScreensSummaryPage = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Sub-Screens`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Sub-Screens`);
       pdf.setFont("helvetica", "normal");
       pdf.setFontSize(10);
       pdf.text(`Output canvas: ${outputCanvasW} x ${outputCanvasH}px`, 10, 18);
@@ -4533,7 +6405,7 @@ const exportJson = () => {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Sub-Screens continued`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Sub-Screens continued`);
         nextIndex = drawSubScreensTable(nextIndex, 22, 190);
       }
     };
@@ -4548,7 +6420,7 @@ const exportJson = () => {
       pdf.addPage("a4", "landscape");
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(16);
-      pdf.text(`${safeProjectName} - Signal & Power Ports In Use`, 10, 12);
+      drawPageTitle(`${safeProjectName} - Signal & Power Ports In Use`);
 
       const colW = 133;
       type PortColumn = { label: string; x: number; align?: "right" };
@@ -4631,7 +6503,7 @@ const exportJson = () => {
         pdf.addPage("a4", "landscape");
         pdf.setFont("helvetica", "bold");
         pdf.setFontSize(16);
-        pdf.text(`${safeProjectName} - Spare Panels by Surface${continued ? " (continued)" : ""}`, 10, 12);
+        drawPageTitle(`${safeProjectName} - Spare Panels by Surface${continued ? " (continued)" : ""}`);
         y = 24;
         if (!continued) {
           pdf.setFont("helvetica", "normal");
@@ -4710,19 +6582,21 @@ const exportJson = () => {
     drawInfoBox("Wall", [
       `Panel type: ${panelTypeSummary}`,
       `Power distro: ${distro.label}`,
-      `Panels: ${totalPanels} active across ${panelBands.length} row band${panelBands.length === 1 ? "" : "s"}`,
+      `Panels: ${totalPanels} active across ${gridRefs.rows} row${gridRefs.rows === 1 ? "" : "s"} x ${gridRefs.cols} column${gridRefs.cols === 1 ? "" : "s"}`,
       `${wallSizeLabel}: ${formatMeters(wallWidthM)}m x ${formatMeters(wallHeightM)}m`,
       ...wallResolutionSummaryLines,
-    ], 10, 24, 66, 48);
+    ], 10, 24, 66, 52);
 
     drawInfoBox("Power", [
       `Max draw: ${formatNumber(totalPowerMaxW)} W / ${formatNumber(totalPowerMaxA, 2)} A`,
       `Average draw: ${formatNumber(totalPowerAvgW)} W / ${formatNumber(totalPowerAvgA, 2)} A`,
-      `Circuits used: ${circuitsUsedMax}`,
+      powerPortsUsed > 0
+        ? `Outlets in use: ${powerPortsUsed}${circuitsUsedMax !== powerPortsUsed ? ` (${circuitsUsedMax} if filled to the limit)` : ""}`
+        : `Outlets needed: ${circuitsUsedMax} if filled to the limit`,
       `Per outlet: ${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`,
       `Outlet limit: ${safePanelsPerPowerOutlet} panels`,
       `Unassigned power panels: ${unassignedPowerPanels}`,
-    ], 80, 24, 66, 48);
+    ], 80, 24, 66, 52);
 
     drawInfoBox("Weight + Output", [
       `Total weight: ${totalWeight.toFixed(1)} kg`,
@@ -4731,7 +6605,7 @@ const exportJson = () => {
       `Best output: ${bestResolution ? `${bestResolution[0]} x ${bestResolution[1]}` : "None in preset list"}`,
       `Signal limit: ${safePanelsPerSignalPort} panels / ${formatNumber(signalPortPixels)} px`,
       `Active support span: ${activeColsCount} cols x ${activeRowsCount} rows`,
-    ], 150, 24, 66, 48);
+    ], 150, 24, 66, 52);
 
     drawInfoBox("Panel Count", [
       `${PANEL_COUNT_LABELS.required}: ${formatNumber(panelCounts.required)}`,
@@ -4739,7 +6613,7 @@ const exportJson = () => {
       `${PANEL_COUNT_LABELS.spareRounded}: ${formatNumber(panelCounts.spareRounded)}`,
       `${PANEL_COUNT_LABELS.total}: ${formatNumber(panelCounts.total)}`,
       `Boxes: ${boxCount}`,
-    ], 220, 24, 66, 48);
+    ], 220, 24, 66, 52);
 
     drawInfoBox("Deployment", [
       `Backup signal loop: ${backupSignalLoop ? `Yes, effective signal ports ${effectiveSignalPortsUsed}` : "No"}`,
@@ -4767,26 +6641,60 @@ const exportJson = () => {
       "See Signal & Power Ports page for full detail.",
     ], 220, 78, 66, 44);
 
-    let nextStockIndex = 0;
+    let stockTableEnd = { next: 0, y: 138 };
     if (wants("stock")) {
       pdf.setFont("helvetica", "bold");
       pdf.setFontSize(12);
       pdf.text("Stock Summary", 10, 128);
-      nextStockIndex = drawStockTable(0, 138, 190);
+      stockTableEnd = drawStockTable(0, 138, 190);
     }
 
-    if (wants("stock") && nextStockIndex < stockTableRows.length) drawStockPage(nextStockIndex);
+    if (wants("stock")) {
+      // The notes belong under whichever page the table ends on, so they are
+      // drawn by the continuation page when there is one and here when the
+      // whole table fitted on this page.
+      if (stockTableEnd.next < stockTableRows.length) drawStockPage(stockTableEnd.next);
+      else drawStockEditNotes(stockTableEnd.y);
+    }
     if (wants("rentmanDetail")) drawRentmanDetailPage();
     if (wants("sparePanels")) drawSparePanelsPage();
     if (wants("ports")) drawPortsInUsePage();
+    if (wants("weights")) drawWeightsPage();
     if (wants("subScreens") && subScreens.length > 0) drawSubScreensSummaryPage();
-    if (wants("layoutBack")) drawLayoutPage(buildLayoutCanvas(false, "Back View"), "Back View");
-    if (wants("layoutFront")) drawLayoutPage(buildLayoutCanvas(true, "Front View"), "Front View");
+    if (wants("outputCanvas")) drawOutputCanvasPage();
+    // The Panel Layout pages cover the ticked sub-screens. All of them ticked
+    // is the whole wall and no filter at all, so nothing changes for a project
+    // that has no sub-screens or leaves them alone.
+    const screenFilter: LayoutScreenFilter = (() => {
+      if (!subScreens.length) return null;
+      const ids = new Set(subScreens.filter((screen) => wants(`${PDF_SCREEN_KEY_PREFIX}${screen.id}`)).map((s) => s.id));
+      const hasUnassigned = activePanels.some((cell) => !cell.subScreenId);
+      const unassigned = !hasUnassigned || wants(`${PDF_SCREEN_KEY_PREFIX}${PDF_UNASSIGNED_SCREEN_KEY}`);
+      if (ids.size === subScreens.length && unassigned) return null;
+      return { ids, unassigned };
+    })();
+    const layoutPanelCount = screenFilter
+      ? activePanels.filter((cell) => layoutScreenIncludes(screenFilter, cell)).length
+      : activePanels.length;
+    // Every sub-screen unticked leaves nothing to draw - the pages are skipped
+    // rather than printed empty.
+    const layoutNote = screenFilter
+      ? `Showing ${[...subScreens.filter((screen) => screenFilter.ids.has(screen.id)).map((s) => s.name),
+          ...(screenFilter.unassigned && activePanels.some((cell) => !cell.subScreenId) ? ["panels in no sub-screen"] : [])]
+          .join(", ")} only - ${layoutPanelCount} of ${activePanels.length} panels. The figures below are the whole wall's.`
+      : undefined;
+    if (layoutPanelCount > 0) {
+      if (wants("layoutBack")) drawLayoutPage(buildLayoutCanvas(false, "Back View", screenFilter), "Back View", layoutNote);
+      if (wants("layoutFront")) drawLayoutPage(buildLayoutCanvas(true, "Front View", screenFilter), "Front View", layoutNote);
+    }
     addPdfFooters();
     pdf.save(`${fileSafeProjectName}-${fileSafePanelType}-${cols}x${rows}.pdf`);
   } catch (err) {
     console.error("PDF failed", err);
-    alert("PDF failed - check console");
+    // Say WHAT failed. "Check console" on its own left the one person who
+    // could report the fault with nothing to report.
+    const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    alert(`PDF failed - ${detail}\n\nThe browser console has the full details.`);
   }
 };
 
@@ -4834,8 +6742,19 @@ const exportJson = () => {
   // when the front view is shown. The workspace origin is the bbox corner
   // minus padding and stays fixed during a drag gesture.
   const WORKSPACE_PAD_MM = 300;
-  const workspaceOrigin = { x: wallBBox.x - WORKSPACE_PAD_MM, y: wallBBox.y - WORKSPACE_PAD_MM };
-  const workspaceSizeMm = { w: wallBBox.w + WORKSPACE_PAD_MM * 2, h: wallBBox.h + WORKSPACE_PAD_MM * 2 };
+  // With panels on the clipboard the workspace opens out by the size of what
+  // is waiting to be pasted, so a copy can be dropped CLEAR of the wall on any
+  // side instead of only within the usual 300mm margin - the pointer cannot
+  // reach past the workspace, so without this there was nowhere to put a copy
+  // that was not overlapping what it came from. Per axis, so a wide, short
+  // strip does not open up a tall empty workspace it will never use; the extra
+  // module is the gap you would leave anyway. It goes on all four sides, and
+  // comes straight back off when the clipboard is cleared.
+  const pastePadX = clipboard ? clipboard.w + MODULE_MM : 0;
+  const pastePadY = clipboard ? clipboard.h + MODULE_MM : 0;
+  const workspacePad = { x: WORKSPACE_PAD_MM + pastePadX, y: WORKSPACE_PAD_MM + pastePadY };
+  const workspaceOrigin = { x: wallBBox.x - workspacePad.x, y: wallBBox.y - workspacePad.y };
+  const workspaceSizeMm = { w: wallBBox.w + workspacePad.x * 2, h: wallBBox.h + workspacePad.y * 2 };
   const mmToPx = (mm: number) => mm * pxPerMm;
   // Sets zoom so the FULL workspace (every active panel, including any
   // imported far outside the default view) fits inside the scrollable
@@ -5270,10 +7189,18 @@ const exportJson = () => {
 
   const onPanelMouseEnter = (cell: Cell) => {
     if (isPanelDimmed(cell)) return;
+    setHoveredPanelId(cell.id);
     if (editMode !== "patch" || !isDragging) return;
     if (!isActiveCell(cell)) return;
     if (patchMode === "signal") assignSignalPanel(cell);
     else assignPowerPanel(cell);
+  };
+
+  // Only clear on the way out of the panel the readout is actually showing -
+  // moving between two touching panels fires the new panel's enter before the
+  // old panel's leave, and clearing blindly would blank the readout.
+  const onPanelMouseLeave = (cell: Cell) => {
+    setHoveredPanelId((prev) => (prev === cell.id ? null : prev));
   };
 
   const applyManualSignalPatch = (value: string) => {
@@ -5339,6 +7266,67 @@ const exportJson = () => {
     });
   };
 
+  // One description of the walk, read by both the preview overlay and the
+  // Auto Snake button.
+  const snakeOrderOptions: SnakeOrderOptions = useMemo(
+    () => ({
+      direction: snakeDirection,
+      alternates: snakeAlternates,
+      perSubScreen: snakePerSubScreen,
+      subScreenIds: subScreens.map((screen) => screen.id),
+    }),
+    [snakeDirection, snakeAlternates, snakePerSubScreen, subScreens],
+  );
+
+  /**
+   * The path Auto Snake would patch right now: the panels, in order, grouped
+   * into the runs the button would make.
+   *
+   * Recomputed whenever an option or the layout changes, which is the point -
+   * the overlay has to answer "what will this button do" before it is pressed.
+   * Scoped exactly as the button is scoped, so previewing inside one open
+   * sub-screen shows that screen's path and nothing else.
+   *
+   * Deliberately holds CELLS, not screen positions, and deliberately does not
+   * depend on an in-flight drag. Letter patching walks the connected groups to
+   * find its letters, which costs ~200ms over a 141-panel wall; hanging that
+   * off the drag offset re-ran it on every mouse move and made dragging
+   * unusable in that mode. The positions are read at draw time instead, so the
+   * line still follows a panel being dragged - what it does not do is re-band
+   * the whole wall mid-gesture, which would have the path leaping about while
+   * somebody is only trying to place a panel. The order settles when the drag
+   * is committed to the grid.
+   */
+  const snakePreviewRuns = useMemo(() => {
+    if (!snakePreview) return [];
+    // The button's own scope helper, not a copy of it - a preview scoped by
+    // its own rule is a preview of a different button.
+    const scopeIds = currentScopeIds();
+    const scoped = (scopeIds ? grid.filter((c) => scopeIds.has(c.id)) : grid).filter((c) => isActiveCell(c));
+    if (!scoped.length) return [];
+    let order = 0;
+    return snakeOrderSegments(scoped, snakeOrderOptions).map((segment, segmentIndex) => ({
+      segmentIndex,
+      screenName: segment.length ? subScreens.find((sc) => sc.id === segment[0].subScreenId)?.name ?? null : null,
+      cells: segment.map((cell) => ({ cell, order: (order += 1) })),
+    }));
+  }, [snakePreview, snakeOrderOptions, grid, subScreens, resolvedActiveSubScreenId]);
+
+  /** The same runs with each panel's CURRENT screen position - cheap, so it can follow a drag. */
+  const snakePreviewSegments = useMemo(
+    () =>
+      snakePreviewRuns.map((run) => ({
+        ...run,
+        points: run.cells.map(({ cell, order }) => {
+          const rect = displayRectOf(cell);
+          return { id: cell.id, order, x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+        }),
+      })),
+    // displayRectOf reads the view flip and any in-flight drag.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [snakePreviewRuns, isFlippedView, moveDrag, wallBBox],
+  );
+
   const snakePatch = () => {
     commitGridUpdate((prev) => {
       const next = cloneGrid(prev);
@@ -5353,9 +7341,9 @@ const exportJson = () => {
       // otherwise a single reading-order segment over row/column bands.
       const letterMode = snakeDirection === "LETTERS";
       const scopedForOrdering = scopeIds ? next.filter((c) => scopeIds.has(c.id)) : next;
-      const segments = letterMode
-        ? orderPanelsForLetters(scopedForOrdering)
-        : orderPanelsForSnake(scopedForOrdering, snakeDirection, snakeAlternates);
+      // The same call the preview overlay makes, so what was drawn is what
+      // gets patched.
+      const segments = snakeOrderSegments(scopedForOrdering, snakeOrderOptions);
 
       if (patchMode === "signal") {
         for (const cell of next) {
@@ -5782,13 +7770,18 @@ const exportJson = () => {
       keys.forEach((key) => {
         const target = findCellById(next, key);
         if (!target || !isActiveCell(target)) return;
-        // Variants (triangle/curve/corner) are MG9-only.
-        if (cellPanelType(target) !== "MG9") return;
+        // Each type takes only the variants it physically has - the shaped
+        // ones are MG9 parts, while a corner can be MG9 or MT.
+        if (!PANEL_TYPE_VARIANTS[cellPanelType(target)]?.includes(variant)) return;
         target.panelVariant = variant;
       });
       return next;
     });
   };
+
+  // The variants the currently selected panel can be set to - drives the
+  // picker, and what it being empty of real choices disables.
+  const selectedVariantChoices = ((PANEL_TYPE_VARIANTS[selectedPanel ? cellPanelType(selectedPanel) : "MG9"] ?? ["STANDARD"]) as PanelVariantKey[]);
 
   const applySelectedPanelType = (type: PanelTypeKey) => {
     const keys = getSelectedIds(selectedCells, selectedId, grid);
@@ -5847,67 +7840,85 @@ const exportJson = () => {
   const svgH = Math.max(1, Math.round(mmToPx(workspaceSizeMm.h)));
   // Human-friendly row/column labels for a panel - back-view, unmirrored
   // (this workspace's own Front/Back toggle doesn't flip these reference
-  // numbers - see columnBands/bandPanelsByColumn for why this is banded by
-  // actual panel adjacency rather than raw position / a fixed module size).
-  const panelRowLabel = (cell: Cell) => (bandIndexById.get(cell.id) ?? 0) + 1;
-  const panelColLabel = (cell: Cell) => String((columnIndexById.get(cell.id) ?? 0) + 1);
+  // numbers). A panel that straddles two rows reads as both of them
+  // ("3 & 4") rather than being given a row of its own - see panelGridRefs.
+  // Row and column references, ALWAYS read from the front of the wall - the
+  // side you stand on to build it - whichever way the view happens to be
+  // facing. Columns are therefore mirrored out of the layout's own (back-view)
+  // geometry; rows need nothing, since flipping the wall left-to-right does
+  // not move a panel up or down.
+  //
+  // This is what the test pattern has always printed (see drawTestPattern's
+  // colLabel), so the number chalked on a panel, the number in the report and
+  // the number lit up on the wall are now the same number. They were not
+  // before: the workspace and the PDF counted columns from the back, so panel
+  // "1" here was panel "37" on the pattern.
+  const panelRowLabel = (cell: Cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.rows);
+  const panelColLabel = (cell: Cell) => gridRefLabel(mirrorGridRef(gridRefs.refs.get(cell.id)?.cols, gridRefs.cols));
+  // Where a panel sits measured from the TOP-LEFT CORNER OF THE WHOLE LAYOUT
+  // AS SEEN FROM THE FRONT: its offset in mm, and the same offset in content
+  // pixels (each panel type has its own pitch, so the pixel figure uses that
+  // panel's own mm->px ratio - finalCanvasPositionOf, with the wall's own
+  // bounding box as the origin).
+  //
+  // Mirrored, like the row/column references and like the test pattern, which
+  // is the whole point of the figure: it answers "which pixel of my content
+  // lands on this panel", and content is authored for the front. Read off the
+  // back it named the mirror-image pixel - the far end of the canvas - which
+  // is the one place a content op must not be sent. Fixed whichever way the
+  // view is facing, so the Front/Back toggle never renumbers a panel.
+  const panelLayoutPosition = (cell: Cell) => {
+    const rect = cellRect(cell);
+    const spec = PANEL_TYPES[cellPanelType(cell)];
+    const px = finalCanvasPositionOf(cell, wallBBox, 0, 0);
+    // cellRect has already swapped the footprint for a quarter turn, so the
+    // panel's pixel width has to swap with it - otherwise a rotated panel
+    // mirrors about the wrong edge and lands a pixel block off.
+    const turned = Math.abs(rect.w - spec.w * 1000) > 1;
+    const pixW = turned ? spec.pixH : spec.pixW;
+    return {
+      xMm: Math.round(wallBBox.w - (rect.x - wallBBox.x) - rect.w),
+      yMm: Math.round(rect.y - wallBBox.y),
+      xPx: Math.max(0, wallPixelW - px.x - pixW),
+      yPx: px.y,
+    };
+  };
 
-  // Cable hops (one per adjacent panel pair) in display pixels, shared by the
-  // behind-panels line layer and the in-front arrowhead layer so both stay in
-  // sync. Signal hops are offset -4px, power hops +4px so the two runs separate.
-  type CableHop = { key: string; pts: Array<{ x: number; y: number }>; color: string; dir: { x: number; y: number } };
-  const cableHops: CableHop[] = [];
-  const centerOf = (r: RectMm) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
-  Object.entries(signalPortStats).forEach(([portId, stat]) => {
-    if (!stat.path || stat.path.length < 2) return;
-    const color = PORT_COLORS[(Number(portId) - 1) % PORT_COLORS.length];
-    stat.path.forEach((cell, idx) => {
-      if (idx === 0) return;
-      const a = rectToPx(displayRectOf(stat.path[idx - 1]));
-      const b = rectToPx(displayRectOf(cell));
-      const ca = centerOf(a);
-      const cb = centerOf(b);
-      cableHops.push({ key: `sig-${portId}-${idx}`, pts: routeCablePx(a, b, -4), color, dir: { x: cb.x - ca.x, y: cb.y - ca.y } });
-    });
-  });
-  powerPorts.forEach((port) => {
-    const stat = powerPortStats[port.id];
-    const path = stat?.path ?? [];
-    if (path.length < 2) return;
-    path.forEach((cell, idx) => {
-      if (idx === 0) return;
-      const a = rectToPx(displayRectOf(path[idx - 1]));
-      const b = rectToPx(displayRectOf(cell));
-      const ca = centerOf(a);
-      const cb = centerOf(b);
-      cableHops.push({ key: `pow-${port.id}-${idx}`, pts: routeCablePx(a, b, 4), color: POWER_COLOR, dir: { x: cb.x - ca.x, y: cb.y - ca.y } });
-    });
-  });
-  // Arrowhead polygon at the destination end of a hop, pointing along the last
-  // route segment. When adjacent panels touch, that segment collapses to a point,
-  // so fall back to the source->destination centre direction (e.g. a panel wired
-  // to the one above it points the arrow upward).
-  const cableArrowHead = (hop: CableHop, size = 9) => {
-    const pts = hop.pts;
-    const p2 = pts[pts.length - 1];
-    const p1 = pts[pts.length - 2];
-    const segDx = p2.x - p1.x;
-    const segDy = p2.y - p1.y;
-    const ang = Math.hypot(segDx, segDy) < 1 ? Math.atan2(hop.dir.y, hop.dir.x) : Math.atan2(segDy, segDx);
-    const x1 = p2.x - size * Math.cos(ang - Math.PI / 6);
-    const y1 = p2.y - size * Math.sin(ang - Math.PI / 6);
-    const x2 = p2.x - size * Math.cos(ang + Math.PI / 6);
-    const y2 = p2.y - size * Math.sin(ang + Math.PI / 6);
-    return (
-      <polygon
-        key={`ah-${hop.key}`}
-        points={`${p2.x},${p2.y} ${x1},${y1} ${x2},${y2}`}
-        fill={hop.color}
-        stroke="black"
-        strokeWidth={1}
-        strokeLinejoin="round"
-      />
-    );
+  // Cable hops in display pixels, from the very same builder the PDF uses (see
+  // cableRoutesIn / routeCablePx), so the two renders show identical cabling:
+  // one run per hop, drawn over the panel graphics, kept off the panel labels
+  // by the route itself, and collapsed to a single "both" run wherever signal
+  // and power follow the same hop.
+  const cableScale = Math.min(1, Math.max(0.6, mmToPx(MODULE_MM) / CELL_SIZE));
+  const cableHops = cableRoutesIn((cell) => rectToPx(displayRectOf(cell)));
+
+  // One run, stroked outermost-first from the kind's own recipe.
+  const cableStrokeLayers = (key: string, pts: CablePoint[], kind: CableKind, scale: number) => (
+    pts.length < 2 ? null : (
+    <g key={key}>
+      {cableStrokes(kind, cableScale * scale).map(({ color, width, dash }, i) => (
+        <polyline
+          key={i}
+          points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+          fill="none"
+          stroke={color}
+          strokeWidth={width}
+          strokeDasharray={dash ? dash.join(" ") : undefined}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      ))}
+    </g>
+    )
+  );
+
+  // Direction marker: a single outline ">" sitting where the run crosses into
+  // the panel it feeds, drawn as an open stroke rather than a filled
+  // arrowhead. One per panel entered - and one, not two, where signal and
+  // power share the run.
+  const cableChevron = (hop: { key: string; kind: CableKind; route: CableRoute }) => {
+    if (!hop.route.entry) return null;
+    return cableStrokeLayers(`ch-${hop.key}`, cableChevronPoints(hop.route.entry, CABLE_STROKE.chevron * cableScale), hop.kind, 1);
   };
 
   return (
@@ -5934,6 +7945,14 @@ const exportJson = () => {
         <DownloadFormatModal
           format={downloadFormat}
           onFormatChange={setDownloadFormat}
+          fps={videoFps}
+          onFpsChange={setVideoFps}
+          targetMbps={mp4TargetMbps}
+          onTargetMbpsChange={setMp4TargetMbps}
+          maxMbps={mp4MaxMbps}
+          onMaxMbpsChange={setMp4MaxMbps}
+          encodedWidth={movingPatternEncodedSize.w}
+          encodedHeight={movingPatternEncodedSize.h}
           onCancel={() => setShowDownloadFormatModal(false)}
           onDownload={() => {
             setShowDownloadFormatModal(false);
@@ -6027,7 +8046,7 @@ const exportJson = () => {
                 {isEncodingMp4
                   ? `Encoding MP4… ${Math.round(mp4EncodeProgress * 100)}%`
                   : isRecordingVideo
-                    ? `Recording… ${videoRecordSeconds.toFixed(0)}/${LOOP_SECONDS}s`
+                    ? `Recording… ${videoRecordSeconds.toFixed(0)}/${Math.round(videoRecordTotal)}s`
                     : "Download Moving Test Pattern"}
               </Button>
             </div>
@@ -6043,6 +8062,9 @@ const exportJson = () => {
               </Button>
               <Button intent="secondary" onClick={openQuickPanelLayoutTab} title="Open a standalone panel-count calculator in a new tab">
                 <LayoutGrid className="h-4 w-4" />Quick Panel Layout
+              </Button>
+              <Button intent="secondary" onClick={openTestPatternGenerator} title="Open the Test Pattern Generator with this project: its Output Canvas, sub-screens and their positions, each running this layout's LED test pattern">
+                <Video className="h-4 w-4" />Test Pattern Generator
               </Button>
               <Button intent="ghost" onClick={() => setShowHelp(true)}>
                 <HelpCircle className="h-4 w-4" />Help
@@ -6230,7 +8252,31 @@ const exportJson = () => {
                   <input type="checkbox" checked={snakeAlternates} onChange={() => setSnakeAlternates((prev) => !prev)} />
                   <span>Snake / alternate</span>
                 </label>
+                {/* Only worth offering once there is more than one screen to
+                    keep apart. */}
+                {subScreens.length > 1 ? (
+                  <label
+                    className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                    title="Walk each sub-screen as its own wall. Without this a row of panels running across two screens is patched as one row, straight from one screen into the next."
+                  >
+                    <input type="checkbox" checked={snakePerSubScreen} onChange={() => setSnakePerSubScreen((prev) => !prev)} />
+                    <span>Each sub-screen separately</span>
+                  </label>
+                ) : null}
+                <label
+                  className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                  title="Draw the path Auto Snake would patch over the layout, with its start, direction and panel order"
+                >
+                  <input type="checkbox" checked={snakePreview} onChange={() => setSnakePreview((prev) => !prev)} />
+                  <span>Preview path</span>
+                </label>
                 <Button intent="primary" onClick={snakePatch}><Wand2 className="h-4 w-4" />Auto Snake</Button>
+                {snakePreview && snakePreviewSegments.length ? (
+                  <StatusChip tone="violet">
+                    {`Preview: ${snakePreviewSegments.reduce((sum, seg) => sum + seg.points.length, 0)} panels`}
+                    {snakePreviewSegments.length > 1 ? ` · ${snakePreviewSegments.length} runs` : ""}
+                  </StatusChip>
+                ) : null}
                 <Button intent="secondary" onClick={clearSelectedPortPatching}>
                   Clear Selected {patchMode === "signal" ? (activePort > 0 ? `Port ${activePort}` : "Port") : (activePowerPort > 0 ? `Plug ${activePowerPort}` : "Plug")}
                 </Button>
@@ -6250,17 +8296,27 @@ const exportJson = () => {
               <div className="grid gap-4 md:grid-cols-3">
                 <div className="rounded border border-slate-700 bg-slate-900 p-3">
                   <div className="mb-2 font-bold">Wall Details</div>
-                  <div>Panels: {totalPanels} active across {panelBands.length} row band{panelBands.length === 1 ? "" : "s"}</div>
+                  <div>Panels: {totalPanels} active across {gridRefs.rows} row{gridRefs.rows === 1 ? "" : "s"} × {gridRefs.cols} column{gridRefs.cols === 1 ? "" : "s"}</div>
                   <div>{wallSizeLabel}: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
+                  {/* The lit pixels, not the rectangle they stand in. On
+                      anything that is not a full rectangle the bounding box
+                      counts the holes and the steps as screen - this is the
+                      figure that does not. The extent is kept right under it
+                      because content is still authored to that rectangle. */}
+                  <div title="Every active panel's own resolution, added up. Black space in a hole or a step is not counted.">
+                    {isMtOnlyWall ? "LED Wall Resolution" : "Resolution"}: {formatNumber(activePixelCount)} active px
+                  </div>
+                  <div className={blackSpacePixels > 0 ? "text-slate-400" : undefined}>
+                    Extent: {wallPixelW} × {wallPixelH}
+                    {blackSpacePixels > 0 ? ` · ${formatNumber(blackSpacePixels)} px of it black` : ""}
+                  </div>
                   {isMtOnlyWall ? (
                     <>
-                      <div>LED Wall Resolution: {wallPixelW} × {wallPixelH}</div>
                       <div>Recommended Content Resolution: {contentPixelW} × {contentPixelH}</div>
                       <div>Physical Aspect Ratio: {physicalRatioLabel}</div>
                     </>
                   ) : (
                     <>
-                      <div>Resolution: {wallPixelW} × {wallPixelH}</div>
                       <div>Aspect: {aspectRatio}</div>
                       <div>Ratio: {ratioLabel}</div>
                     </>
@@ -6279,7 +8335,7 @@ const exportJson = () => {
                   <div className="mb-2 font-bold">Signal + Output</div>
                   <div>Ports used: {effectiveSignalPortsUsed}{backupSignalLoop ? ` (${signalPortsUsed} main + ${signalPortsUsed} backup)` : ""}</div>
                   <div>Pixels per port: {formatNumber(panelPixels)}</div>
-                  <div>Port capacity use: {formatNumber((wallPixelW * wallPixelH) / Math.max(signalPortsUsed, 1), 0)} px avg</div>
+                  <div>Port capacity use: {formatNumber(activePixelCount / Math.max(signalPortsUsed, 1), 0)} px avg</div>
                   <div>VX1000 max use: {formatNumber(vx1000Percent, 1)}%</div>
                   <div>VX2000 max use: {formatNumber(vx2000Percent, 1)}%</div>
                 </div>
@@ -6315,7 +8371,11 @@ const exportJson = () => {
                   <div className="mb-2 font-bold">Power</div>
                   <div>Max: {formatNumber(totalPowerMaxW, 0)} W / {formatNumber(totalPowerMaxA, 2)} A</div>
                   <div>Avg: {formatNumber(totalPowerAvgW, 0)} W / {formatNumber(totalPowerAvgA, 2)} A</div>
-                  <div>Circuits used (max): {circuitsUsedMax}</div>
+                  <div title="Power outlets the patch actually uses - one 15m PowerCON each. The figure in brackets is the fewest it could run on with every outlet filled to the panels-per-outlet limit.">
+                    {powerPortsUsed > 0
+                      ? `Outlets in use: ${powerPortsUsed}${circuitsUsedMax !== powerPortsUsed ? ` (${circuitsUsedMax} if filled to the limit)` : ""}`
+                      : `Outlets needed: ${circuitsUsedMax} if filled to the limit`}
+                  </div>
                   <div>Per outlet: {formatNumber(powerPerCircuitMaxW, 0)} W / {formatNumber(powerPerCircuitMaxA, 2)} A</div>
                   <div>Active support span: {activeColsCount} cols × {activeRowsCount} rows</div>
                 </div>
@@ -6502,6 +8562,18 @@ const exportJson = () => {
                 </Button>
                 <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
                 <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
+                {/* What those panels ARE, one chip per physical part, in the
+                    same terms Stock Calculations orders them - a selection of
+                    24 that is 20 standard panels and 4 corners is two
+                    different pulls, and the count alone never said so. */}
+                {selectedMix.map((entry) => (
+                  <StatusChip key={entry.key} tone="sky">
+                    <span title={entry.detail}>
+                      {entry.count} x {entry.label}
+                      {entry.removed ? ` (${entry.removed} inactive)` : ""}
+                    </span>
+                  </StatusChip>
+                ))}
                 {editMode === "move" ? (
                   <>
                     <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
@@ -6560,14 +8632,20 @@ const exportJson = () => {
                     <option key={key} value={key}>{PANEL_TYPES[key].name} panel</option>
                   ))}
                 </select>
+                {/* Only the variants the selected panel's own type has: every
+                    shape for MG9, standard or corner for MT. An MT corner is
+                    the same MT panel, so it changes no panel count - it only
+                    adds its corner hardware to the stock list. */}
                 <select
                   className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                  disabled={selectedCount === 0 || (selectedPanel ? cellPanelType(selectedPanel) !== "MG9" : false)}
+                  disabled={selectedCount === 0 || selectedVariantChoices.length < 2}
                   value={selectedPanel?.panelVariant ?? "STANDARD"}
                   onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
                 >
-                  {(Object.keys(PANEL_VARIANTS) as PanelVariantKey[]).map((key) => (
-                    <option key={key} value={key}>{PANEL_VARIANTS[key].label}</option>
+                  {selectedVariantChoices.map((key) => (
+                    <option key={key} value={key}>
+                      {variantLabelFor(selectedPanel ? cellPanelType(selectedPanel) : "MG9", key)}
+                    </option>
                   ))}
                 </select>
                 <Button intent="secondary" size="sm" onClick={copySelectedPanels} disabled={selectedCount === 0} title="Copy selected panels (Ctrl/Cmd+C)">Copy</Button>
@@ -6709,6 +8787,7 @@ const exportJson = () => {
                 onMouseDown={onWorkspaceMouseDown}
                 onMouseMove={onWorkspaceMouseMove}
                 onMouseUp={onWorkspaceMouseUp}
+                onMouseLeave={() => setHoveredPanelId(null)}
               >
                 {/* Metre grid + ruler labels. Lines are anchored to the wall origin so
                     the 1m (major, dashed) and 0.5m (minor, fainter dashed) lines line up
@@ -6734,10 +8813,16 @@ const exportJson = () => {
                         />,
                       );
                     }
-                    const kyStart = Math.floor((workspaceOrigin.y - wallBBox.y) / MODULE_MM);
-                    const kyEnd = Math.ceil((workspaceOrigin.y + workspaceSizeMm.h - wallBBox.y) / MODULE_MM);
+                    // Measured UP FROM THE WALL'S BOTTOM, not down from its top:
+                    // heights are read off the floor, and a wall an odd number of
+                    // half-modules high (three 0.5m panels, say) would otherwise put
+                    // its whole-metre lines - and the numbers beside them - half a
+                    // panel off the ground.
+                    const wallBottom = wallBBox.y + wallBBox.h;
+                    const kyStart = Math.floor((wallBottom - workspaceOrigin.y - workspaceSizeMm.h) / MODULE_MM);
+                    const kyEnd = Math.ceil((wallBottom - workspaceOrigin.y) / MODULE_MM);
                     for (let k = kyStart; k <= kyEnd; k += 1) {
-                      const y = mmToPx(wallBBox.y + k * MODULE_MM - workspaceOrigin.y);
+                      const y = mmToPx(wallBottom - k * MODULE_MM - workspaceOrigin.y);
                       const major = k % 2 === 0;
                       lines.push(
                         <line
@@ -6754,11 +8839,17 @@ const exportJson = () => {
                     }
                     return lines;
                   })()}
+                  {/* The metre numbers sit on the EDGE OF THE WORKSPACE, not tight
+                      against the wall: the band just above a wall is where each
+                      sub-screen's name label goes, and the two were landing on top of
+                      each other. They still line up with the metre grid lines above,
+                      which run the full height and width, so nothing is lost by
+                      moving them out to the edge. */}
                   {Array.from({ length: Math.floor(wallBBox.w / 1000) + 1 }).map((_, m) => (
                     <text
                       key={`rx-${m}`}
                       x={mmToPx(wallBBox.x + m * 1000 - workspaceOrigin.x)}
-                      y={mmToPx(wallBBox.y - workspaceOrigin.y) - 8}
+                      y={12}
                       fill="#94a3b8"
                       fontSize="10"
                       textAnchor="middle"
@@ -6766,19 +8857,22 @@ const exportJson = () => {
                       {m}m
                     </text>
                   ))}
-                  {/* Height ruler reads bottom-up (0m at the wall's base, increasing
-                      upward) to match how a physical wall is measured/built - the line
-                      positions themselves are unchanged, only the printed label. */}
+                  {/* Height ruler reads bottom-up: 0m IS the bottom of the wall,
+                      counting upward, the way a wall is measured on site. It used to
+                      be laid out from the top and merely relabelled, so on a wall
+                      that is not a whole number of metres high - three 0.5m panels
+                      being the plain case - 0m landed between two panels instead of
+                      on the ground. */}
                   {Array.from({ length: Math.floor(wallBBox.h / 1000) + 1 }).map((_, m) => (
                     <text
                       key={`ry-${m}`}
-                      x={mmToPx(wallBBox.x - workspaceOrigin.x) - 10}
-                      y={mmToPx(wallBBox.y + m * 1000 - workspaceOrigin.y) + 3}
+                      x={4}
+                      y={mmToPx(wallBBox.y + wallBBox.h - m * 1000 - workspaceOrigin.y) + 3}
                       fill="#94a3b8"
                       fontSize="10"
-                      textAnchor="end"
+                      textAnchor="start"
                     >
-                      {Math.floor(wallBBox.h / 1000) - m}m
+                      {m}m
                     </text>
                   ))}
                 </svg>
@@ -6823,36 +8917,6 @@ const exportJson = () => {
                   </svg>
                 ) : null}
 
-                {/* Cable LINES sit behind the panels (z-[1], panels are z-10+) so they
-                    never obscure panel labels. Each line is drawn twice: a wider black
-                    stroke underneath for a thin outline, then the coloured stroke on top.
-                    Arrowheads are drawn separately in front of the panels (below). */}
-                <svg className="absolute inset-0 z-[1] pointer-events-none" width={svgW} height={svgH}>
-                  {cableHops.map((hop) => {
-                    const pointStr = hop.pts.map((p) => `${p.x},${p.y}`).join(" ");
-                    return (
-                      <g key={`line-${hop.key}`}>
-                        <polyline
-                          points={pointStr}
-                          fill="none"
-                          stroke="black"
-                          strokeWidth="6"
-                          strokeLinejoin="round"
-                          strokeLinecap="round"
-                        />
-                        <polyline
-                          points={pointStr}
-                          fill="none"
-                          stroke={hop.color}
-                          strokeWidth="4"
-                          strokeLinejoin="round"
-                          strokeLinecap="round"
-                        />
-                      </g>
-                    );
-                  })}
-                </svg>
-
                 {grid.map((cell) => {
                   // Sub-screen isolation: while a sub-screen is active, every panel not
                   // assigned to it (including unassigned panels - reassignment is done
@@ -6896,6 +8960,7 @@ const exportJson = () => {
                         onPanelMouseDown(cell, event);
                       }}
                       onMouseEnter={() => onPanelMouseEnter(cell)}
+                      onMouseLeave={() => onPanelMouseLeave(cell)}
                       style={{
                         position: "absolute",
                         left: rect.x,
@@ -6969,50 +9034,6 @@ const exportJson = () => {
                               ) : null}
                             </svg>
                           ) : null}
-                          {/* Port-number badges: small filled circles with the port number, all
-                              in the panel's own top-left corner as actually displayed (front or
-                              back view - rect/left/top already reflect whichever is showing, so
-                              no extra mirroring here) - signal (blue) first, then power (orange),
-                              side by side in one neatly-spaced, non-overlapping row. Deliberately
-                              NOT rotated with the panel (unlike the shape-fill div above) so the
-                              digit stays upright and legible on a rotated panel. A chain's first
-                              panel gets its primary port number; when the backup signal loop is
-                              enabled, the chain's last panel also gets a badge with the backup
-                              port number (see getPanelIndicators) - a single-panel chain shows
-                              both signal badges plus the power badge, all in the same row. */}
-                          {signalBadges.length || powerBadge ? (() => {
-                            const badgeD = Math.max(12, Math.round(Math.min(rect.w, rect.h) * 0.3));
-                            const pad = Math.max(2, Math.round(badgeD * 0.18));
-                            const badgeStyle: React.CSSProperties = {
-                              position: "absolute",
-                              top: pad,
-                              width: badgeD,
-                              height: badgeD,
-                              borderRadius: "50%",
-                              border: "1px solid #0f172a",
-                              color: "#ffffff",
-                              fontSize: Math.round(badgeD * 0.55),
-                              fontWeight: 700,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              lineHeight: 1,
-                              zIndex: 20,
-                              printColorAdjust: "exact",
-                              WebkitPrintColorAdjust: "exact",
-                            };
-                            const cornerBadges: Array<{ color: string; text: number }> = signalBadges.map((portNum) => ({ color: SIGNAL_START_COLOR, text: portNum }));
-                            if (powerBadge) cornerBadges.push({ color: POWER_START_COLOR, text: powerBadge });
-                            return cornerBadges.map((b, i) => (
-                              <div key={`cb-${i}`} style={{ ...badgeStyle, left: pad + i * (badgeD + pad), background: b.color }}>
-                                {b.text}
-                              </div>
-                            ));
-                          })() : null}
-                          <div className="relative z-10">{`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`}</div>
-                          {cell.assignedPort ? <div className="relative z-10 whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
-                          {cell.assignedPowerPort ? <div className="relative z-10 whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
-                          {getPanelSymbol(cell) ? <div className="relative z-10 text-[11px]">{getPanelSymbol(cell)}</div> : null}
                         </>
                       )}
                     </div>
@@ -7050,11 +9071,262 @@ const exportJson = () => {
                   );
                 })}
 
-                {/* Cable ARROWHEADS sit in front of the panels (z-[35]) so the signal /
-                    power direction stays visible even over a selected panel. */}
-                <svg className="pointer-events-none absolute inset-0 z-[35]" width={svgW} height={svgH}>
-                  {cableHops.map((hop) => cableArrowHead(hop))}
+                {/* Cable runs sit IN FRONT of the panel graphics (z-[33], panels are
+                    z-10..30) so a run is never hidden by the panel it crosses. Nothing
+                    here is allowed to land on a panel label: routeCablePx keeps every
+                    run in the clear lanes above / beside the centred label block, and
+                    the port-number badges and label text are drawn back over the top in
+                    the overlay below.
+
+                    Signal is always blue, power always orange, and a hop both of them
+                    share is ONE blue run with the power orange dashed over it rather
+                    than a parallel pair. Every run carries a single outline ">" where
+                    it enters each panel - one for a shared run, not two - and no marker
+                    anywhere else. */}
+                <svg className="pointer-events-none absolute inset-0 z-[33]" width={svgW} height={svgH}>
+                  {cableHops.map((hop) => cableStrokeLayers(`line-${hop.key}`, hop.route.pts, hop.kind, 1))}
+                  {cableHops.map((hop) => cableChevron(hop))}
                 </svg>
+
+                {/* Auto Snake preview: the path the button would patch, as it
+                    stands. Above the panel fills and the cable runs so it reads
+                    over a busy wall, below the selection marks so it never
+                    hides what is selected. Drawn from the SAME walk the button
+                    performs (snakePreviewSegments -> snakeOrderSegments), so
+                    this is the order, not an illustration of one. */}
+                {snakePreviewSegments.length ? (
+                  <svg className="pointer-events-none absolute inset-0 z-[38]" width={svgW} height={svgH}>
+                    {snakePreviewSegments.map((segment) => {
+                      const screenIndex = subScreens.findIndex((sc) => sc.name === segment.screenName);
+                      const color = segment.screenName
+                        ? normalizeSubScreenColor(subScreens[screenIndex]?.color, Math.max(screenIndex, 0))
+                        : SNAKE_PREVIEW_COLOR;
+                      const pts = segment.points.map((p) => ({ ...p, px: mmToPx(p.x - workspaceOrigin.x), py: mmToPx(p.y - workspaceOrigin.y) }));
+                      const first = pts[0];
+                      if (!first) return null;
+                      // Numbers need a panel's worth of room to be readable;
+                      // below that the line and its arrows carry the order on
+                      // their own rather than turning into a grey smear.
+                      const cellPx = mmToPx(MODULE_MM);
+                      const showNumbers = cellPx >= 46;
+                      const numberFont = Math.max(8, Math.min(13, Math.round(cellPx * 0.22)));
+                      return (
+                        <g key={`snake-${segment.segmentIndex}`}>
+                          <polyline
+                            points={pts.map((p) => `${p.px},${p.py}`).join(" ")}
+                            fill="none"
+                            stroke="#020617"
+                            strokeWidth={5}
+                            strokeOpacity={0.45}
+                            strokeLinejoin="round"
+                            strokeLinecap="round"
+                          />
+                          <polyline
+                            points={pts.map((p) => `${p.px},${p.py}`).join(" ")}
+                            fill="none"
+                            stroke={color}
+                            strokeWidth={2.5}
+                            strokeLinejoin="round"
+                            strokeLinecap="round"
+                          />
+                          {/* One arrowhead per hop, at its midpoint - which way
+                              the run travels, readable without following the
+                              whole line back to its start. */}
+                          {pts.slice(1).map((p, i) => {
+                            const prev = pts[i];
+                            const angle = (Math.atan2(p.py - prev.py, p.px - prev.px) * 180) / Math.PI;
+                            const mx = (prev.px + p.px) / 2;
+                            const my = (prev.py + p.py) / 2;
+                            return (
+                              <polygon
+                                key={`arrow-${p.id}`}
+                                points="-5,-4 6,0 -5,4"
+                                fill={color}
+                                stroke="#020617"
+                                strokeWidth={0.75}
+                                transform={`translate(${mx} ${my}) rotate(${angle})`}
+                              />
+                            );
+                          })}
+                          {showNumbers
+                            ? pts.map((p) => (
+                                <g key={`num-${p.id}`}>
+                                  <circle cx={p.px} cy={p.py} r={numberFont * 0.95} fill="#020617" fillOpacity={0.72} stroke={color} strokeWidth={1} />
+                                  <text x={p.px} y={p.py + numberFont * 0.36} textAnchor="middle" fontSize={numberFont} fontWeight="bold" fill="#f8fafc">
+                                    {p.order}
+                                  </text>
+                                </g>
+                              ))
+                            : null}
+                          {/* Where this run begins. */}
+                          <circle cx={first.px} cy={first.py} r={Math.max(9, numberFont * 1.5)} fill="none" stroke={color} strokeWidth={3} />
+                          <text
+                            x={first.px}
+                            y={first.py - Math.max(9, numberFont * 1.5) - 5}
+                            textAnchor="middle"
+                            fontSize={Math.max(9, numberFont)}
+                            fontWeight="bold"
+                            fill={color}
+                            stroke="#020617"
+                            strokeWidth={3}
+                            paintOrder="stroke"
+                          >
+                            {snakePreviewSegments.length > 1
+                              ? `START ${segment.segmentIndex + 1}${segment.screenName ? ` · ${segment.screenName}` : ""}`
+                              : "START"}
+                          </text>
+                        </g>
+                      );
+                    })}
+                  </svg>
+                ) : null}
+
+                {/* Panel TEXT + port-number badges, lifted out of the panel divs into
+                    their own layer above the cable runs (z-[34]) so nothing a cable
+                    crosses can ever end up unreadable - the routes already steer clear
+                    of the label block, and this is what guarantees it for the corner
+                    badges the lanes do pass through. The box matches the panel div
+                    exactly (same rect, same 2px border, here transparent) so the label
+                    stack and the badges land in precisely the same places as before.
+
+                    Badges sit in the panel's own top-left corner as actually displayed
+                    (front or back view - rect/left/top already reflect whichever is
+                    showing, so no extra mirroring here): signal (blue) first, then power
+                    (orange), side by side in one neatly-spaced, non-overlapping row, and
+                    deliberately NOT rotated with the panel so the digit stays upright and
+                    legible. A chain's first panel gets its primary port number; with the
+                    backup signal loop enabled the chain's last panel also gets a badge
+                    with the backup port number (see getPanelIndicators) - a single-panel
+                    chain shows both signal badges plus the power badge, all in one row. */}
+                {grid.map((cell) => {
+                  if (isPanelDimmed(cell) || cell.isRemoved) return null;
+                  const rect = rectToPx(displayRectOf(cell));
+                  const { signalBadges, powerBadge } = getPanelIndicators(cell);
+                  const badgeD = Math.max(12, Math.round(Math.min(rect.w, rect.h) * 0.3));
+                  const badgePad = Math.max(2, Math.round(badgeD * 0.18));
+                  const badgeStyle: React.CSSProperties = {
+                    position: "absolute",
+                    top: badgePad,
+                    width: badgeD,
+                    height: badgeD,
+                    borderRadius: "50%",
+                    border: "1px solid #0f172a",
+                    color: "#ffffff",
+                    fontSize: Math.round(badgeD * 0.55),
+                    fontWeight: 700,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    lineHeight: 1,
+                    printColorAdjust: "exact",
+                    WebkitPrintColorAdjust: "exact",
+                  };
+                  const cornerBadges: Array<{ color: string; text: number }> = signalBadges.map((portNum) => ({ color: SIGNAL_START_COLOR, text: portNum }));
+                  if (powerBadge) cornerBadges.push({ color: POWER_START_COLOR, text: powerBadge });
+                  // 9px on a full panel at 100% zoom or more, exactly as before;
+                  // smaller (or, once nothing readable fits, dropped entirely)
+                  // on a zoomed-out workspace or a narrow poster section, where
+                  // the old fixed size spilled out over the neighbours.
+                  // 5.5 = the flex gaps + the 2px border the overlay carries.
+                  const baseFontPx = panelLabelFontPx(rect.w, rect.h, 9, 5, PANEL_LABEL_BOTTOM_PX + 5.5);
+                  // The same lines the block below renders, in the same order,
+                  // so the placement is measured on what is actually drawn.
+                  const labelLines = [
+                    `↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`,
+                    cell.assignedPort ? `🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})` : null,
+                    cell.assignedPowerPort ? `⚡ Plug ${cell.assignedPowerPort}` : null,
+                    getPanelSymbol(cell) || null,
+                  ].filter((line): line is string => Boolean(line));
+                  // On a triangle or quarter circle the foot of the panel can
+                  // be its empty corner - the text moves onto the lit part,
+                  // exactly as it does in the PDF and the PNG exports.
+                  const placement = panelLabelPlacement(
+                    rect.w,
+                    rect.h,
+                    PANEL_VARIANTS[cell.panelVariant ?? "STANDARD"].shape,
+                    cell.rotation ?? 0,
+                    isFlippedView,
+                    labelLines,
+                    baseFontPx,
+                    PANEL_LABEL_BOTTOM_PX - 2,
+                    1.18,
+                  );
+                  const fontPx = placement.fontPx;
+                  // Inset from the left by whatever the vertical cable lanes
+                  // claim, so the centred flex block lands beside the runs
+                  // instead of under them - the same offset the PDF uses (see
+                  // panelLabelCentreX). The shaped-panel case keeps measuring
+                  // its translate against the element's own centre, which this
+                  // inset has already moved.
+                  const laneInset = cableLaneClearPx(rect.w);
+                  const blockCentre = panelLabelCentreX(rect.w);
+                  const blockStyle: React.CSSProperties = placement.centre
+                    ? {
+                        position: "absolute",
+                        left: laneInset,
+                        right: PANEL_LABEL_SIDE_PAD,
+                        top: placement.centre.y - (labelLines.length * fontPx * 1.18) / 2,
+                        transform: `translateX(${placement.centre.x - blockCentre}px)`,
+                      }
+                    : { position: "absolute", left: laneInset, right: PANEL_LABEL_SIDE_PAD, bottom: PANEL_LABEL_BOTTOM_PX - 2 };
+                  return (
+                    <div
+                      key={`labels-${cell.id}`}
+                      style={{
+                        position: "absolute",
+                        left: rect.x,
+                        top: rect.y,
+                        width: rect.w,
+                        height: rect.h,
+                        zIndex: 34,
+                        border: "2px solid transparent",
+                        color: "#020617",
+                        fontSize: fontPx,
+                        pointerEvents: "none",
+                      }}
+                      className="select-none px-0.5 pt-0.5 font-semibold leading-tight tracking-tight"
+                    >
+                      {cornerBadges.map((b, i) => (
+                        <div key={`cb-${i}`} style={{ ...badgeStyle, left: badgePad + i * (badgeD + badgePad), background: b.color }}>
+                          {b.text}
+                        </div>
+                      ))}
+                      {fontPx ? (
+                        <div style={blockStyle} className="flex flex-col items-center gap-px px-0.5">
+                          <div>{`↓ ${panelRowLabel(cell)} → ${panelColLabel(cell)}`}</div>
+                          {cell.assignedPort ? <div className="whitespace-nowrap">{`🔌 P${cell.assignedPort} (${cell.sequence ?? "-"})`}</div> : null}
+                          {cell.assignedPowerPort ? <div className="whitespace-nowrap">{`⚡ Plug ${cell.assignedPowerPort}`}</div> : null}
+                          {getPanelSymbol(cell) ? <div style={{ fontSize: fontPx + 2 }}>{getPanelSymbol(cell)}</div> : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+
+                {/* Position readout for the panel under the pointer: where that panel's
+                    top-left corner sits relative to the top-left corner of the whole
+                    layout, in mm and in content pixels. Sits above every other layer so
+                    it is never clipped by a neighbouring panel, and is pointer-transparent
+                    so it can't steal the hover it is reporting on. */}
+                {(() => {
+                  const hovered = hoveredPanelId ? grid.find((cell) => cell.id === hoveredPanelId) : null;
+                  if (!hovered || hovered.isRemoved || isPanelDimmed(hovered)) return null;
+                  const rect = rectToPx(displayRectOf(hovered));
+                  const pos = panelLayoutPosition(hovered);
+                  // Above the panel by default, below it when the panel is hard against
+                  // the top of the workspace and there is no room.
+                  const above = rect.y >= 46;
+                  return (
+                    <div
+                      className="pointer-events-none absolute z-[45] whitespace-nowrap rounded-md border border-sky-400/70 bg-slate-950/95 px-2 py-1 text-[10px] font-semibold leading-tight text-sky-50 shadow-lg"
+                      style={{ left: Math.max(0, rect.x), top: above ? rect.y - 44 : rect.y + rect.h + 6 }}
+                    >
+                      <div><span className="text-sky-300">X</span>{` ${pos.xMm} mm · ${pos.xPx} px`}</div>
+                      <div><span className="text-sky-300">Y</span>{` ${pos.yMm} mm · ${pos.yPx} px`}</div>
+                      <div className="text-[9px] font-normal text-slate-400">from layout top-left</div>
+                    </div>
+                  );
+                })()}
 
                 {/* Vertical centre indicator: marks the horizontal centre of the whole
                     layout's TRUE outer bounds (trueOuterBBox - includes any panel
@@ -7193,12 +9465,15 @@ const exportJson = () => {
         <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker collapsible>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Signal Patching</CardTitle>
-            <div className="mt-1 text-xs text-slate-300">Manual assignment follows the current Panels per Signal Port maximum.</div>
+            <div className="mt-1 text-xs text-slate-300">
+              Manual assignment follows the current Panels per Signal Port maximum; the bars show each port against its own
+              650,000px capacity.
+            </div>
           </CardHeader>
           <CardContent className="grid grid-cols-2 gap-2 md:grid-cols-5 xl:grid-cols-10">
             {signalPorts.map((port) => {
               const stat = signalPortStats[port.id];
-              const loadPercent = safePanelsPerSignalPort > 0 ? (stat.panels / safePanelsPerSignalPort) * 100 : 0;
+              const loadPercent = stat.utilisation;
               const indicator = getStatusColor(loadPercent);
               // Reserved for the backup signal loop (the second half of the
               // port range, only when the loop is enabled) - not selectable
@@ -7230,6 +9505,10 @@ const exportJson = () => {
                   {isBackupPort ? (
                     <div className="text-[10px] text-slate-300">{`Backup for S${port.id - primarySignalPortCount}`}</div>
                   ) : null}
+                  {/* The figure behind the bar, the way the power tiles print
+                      their W / A - so the bar can be checked rather than taken
+                      on trust. */}
+                  <div className="mt-1 text-[11px]">{`${formatNumber(stat.pixels)} px`}</div>
                   <div className="mt-2 h-2 rounded border border-white/30 bg-black/30">
                     <div style={{ width: `${Math.min(loadPercent, 100)}%`, background: indicator, height: "100%" }} />
                   </div>
@@ -7378,7 +9657,7 @@ const exportJson = () => {
         {testPatternPicker ? (
           <ExportSectionsModal
             title="Test Pattern PNGs"
-            intro="One PNG per selected item, each at its own true output resolution."
+            intro={`One PNG per selected item, each at its own true output resolution, tagged ${PNG_EXPORT_DPI} DPI for print.`}
             sections={testPatternPicker}
             confirmLabel="Download PNGs"
             onClose={() => setTestPatternPicker(null)}
@@ -7393,9 +9672,31 @@ const exportJson = () => {
           <CardHeader>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Stock Calculations</CardTitle>
-              <Button variant="outline" className="no-print" onClick={(e) => { e.stopPropagation(); exportStockCsv(); }}>
-                <Download className="mr-2 h-4 w-4" />Download CSV
-              </Button>
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Manual changes are shown and undone HERE, at the top of the
+                    card, so a list somebody has been editing can never be read
+                    as the tool's own answer - the count says how many rows are
+                    no longer what the layout works out, and one click puts
+                    every one of them back. */}
+                {stockEditsApplied > 0 ? (
+                  <>
+                    <StatusChip tone="amber">
+                      {stockEditsApplied} row{stockEditsApplied === 1 ? "" : "s"} edited by hand
+                    </StatusChip>
+                    <Button
+                      variant="outline"
+                      className="no-print"
+                      title="Drop every manual quantity change and every removed row - back to exactly what the tool works out from the layout"
+                      onClick={(e) => { e.stopPropagation(); resetAllStockEdits(); }}
+                    >
+                      <Undo2 className="mr-2 h-4 w-4" />Reset to calculated
+                    </Button>
+                  </>
+                ) : null}
+                <Button variant="outline" className="no-print" onClick={(e) => { e.stopPropagation(); exportStockCsv(); }}>
+                  <Download className="mr-2 h-4 w-4" />Download CSV
+                </Button>
+              </div>
             </div>
           </CardHeader>
           <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
@@ -7564,10 +9865,15 @@ const exportJson = () => {
                     <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.spareRounded}</th>
                     <th className="px-3 py-2 text-right">{STOCK_COUNT_LABELS.total}</th>
                     <th className="px-3 py-2 text-right">{stockOverridesApplied ? "Rentman Stock" : "Stock"}</th>
-                    {availabilityByCode ? <th className="px-3 py-2 text-right">Other Projects</th> : null}
+                    {availabilityByCode ? (
+                      <th className="px-3 py-2 text-right" title="The most of this item out on other jobs on any ONE day of your range - not the sum of every job that touches it. Cancelled jobs do not count.">
+                        Out on the day
+                      </th>
+                    ) : null}
                     {repairsByCode ? <th className="px-3 py-2 text-right">Broken / Repair</th> : null}
                     {rentmanChecked ? <th className="px-3 py-2 text-right">Available Stock</th> : null}
                     <th className="px-3 py-2 text-right">{rentmanChecked ? "Result" : "Net"}</th>
+                    <th className="px-3 py-2 text-right no-print">Edit</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -7581,16 +9887,33 @@ const exportJson = () => {
                     // Code, Equipment, Required, Spares, Spares Rounded,
                     // Total, Stock, Result = 8 fixed, plus whichever Rentman
                     // columns are currently showing.
-                    const detailColSpan = 8 + (availabilityByCode ? 1 : 0) + (repairsByCode ? 1 : 0) + (rentmanChecked ? 1 : 0);
+                    const detailColSpan = 9 + (availabilityByCode ? 1 : 0) + (repairsByCode ? 1 : 0) + (rentmanChecked ? 1 : 0);
                     return (
                       <Fragment key={`${row.code}-${row.name}`}>
                         <tr className={`border-t border-slate-700 ${short ? "bg-red-500/10" : low ? "bg-amber-500/10" : ""}`}>
                           <td className={`px-3 py-2 whitespace-nowrap ${short ? "text-red-200" : ""}`}>{row.code}</td>
-                          <td className="px-3 py-2">{row.name}</td>
+                          <td className="px-3 py-2">
+                            {row.name}
+                            {row.manual ? (
+                              <span className="ml-2 rounded-full border border-sky-400/60 px-2 py-0.5 text-[10px] font-semibold text-sky-200">
+                                added by hand
+                              </span>
+                            ) : null}
+                          </td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.required)}</td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.spare ?? 0)}</td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.spareRounded ?? row.spare ?? 0)}</td>
-                          <td className="px-3 py-2 text-right font-semibold">{formatNumber(entry.totalRequired)}</td>
+                          {/* The one figure a manual edit replaces. The
+                              calculated number stays on the row beside it, so
+                              nobody has to take the new one on trust. */}
+                          <td className={`px-3 py-2 text-right font-semibold whitespace-nowrap ${row.edited ? "text-amber-200" : ""}`}>
+                            {formatNumber(entry.totalRequired)}
+                            {row.edited && !row.manual ? (
+                              <div className="text-[10px] font-normal text-amber-300/80">
+                                edited - tool says {formatNumber(row.calculated ?? 0)}
+                              </div>
+                            ) : null}
+                          </td>
                           <td className="px-3 py-2 text-right">{formatNumber(row.stock)}</td>
                           {availabilityByCode ? (
                             <td className="px-3 py-2 text-right">
@@ -7638,22 +9961,98 @@ const exportJson = () => {
                                 : entry.result
                               : formatNumber(row.net)}
                           </td>
+                          {/* Type a quantity over the calculated one, or take
+                              the row off the list entirely. Both travel with
+                              the project and reach every export. */}
+                          <td className="px-3 py-2 text-right no-print">
+                            <div className="flex items-center justify-end gap-1">
+                              <Input
+                                type="number"
+                                min={0}
+                                className="w-20 py-1 text-right text-sm"
+                                value={String(entry.totalRequired)}
+                                aria-label={`Quantity for ${row.name}`}
+                                title="Quantity to pull for this job - type over the calculated figure"
+                                onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                  const raw = e.target.value.trim();
+                                  setStockQty(row.code, raw === "" ? null : Number(raw), row.calculated ?? calculatedTotalOf(row));
+                                }}
+                              />
+                              {row.edited && !row.manual ? (
+                                <button
+                                  type="button"
+                                  onClick={() => resetStockRow(row.code)}
+                                  title="Put this row's calculated quantity back"
+                                  aria-label={`Reset ${row.name} to the calculated quantity`}
+                                  className="rounded p-1 text-slate-300 hover:bg-slate-700 hover:text-white"
+                                >
+                                  <Undo2 className="h-4 w-4" />
+                                </button>
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => setStockRowRemoved(row.code, true)}
+                                title={row.manual ? "Take this item back off the stock list" : "Take this item off the stock list for this project"}
+                                aria-label={`Remove ${row.name} from the stock list`}
+                                className="rounded p-1 text-slate-300 hover:bg-red-500/20 hover:text-red-200"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                            </div>
+                          </td>
                         </tr>
                         {openKind === "projects" ? (
                           <tr className="border-t border-slate-800 bg-slate-950/60">
                             <td colSpan={detailColSpan} className="px-3 py-2">
+                              {/* The peak and the day it falls on, then every
+                                  booking that touches the range with the ones
+                                  making up that peak marked - so the figure can
+                                  be argued with rather than taken on trust. */}
                               <div className="mb-1 text-xs font-semibold text-slate-300">
-                                Other Projects: {formatNumber(entry.otherProjects ?? 0)}
+                                {formatNumber(entry.otherProjects ?? 0)} out on other jobs at once
+                                {entry.usage?.peakStart ? (
+                                  <span className="font-normal text-slate-400">
+                                    {" "}- peak {entry.usage.peakStart === entry.usage.peakEnd
+                                      ? formatDateLabel(entry.usage.peakStart)
+                                      : `${formatDateLabel(entry.usage.peakStart)} to ${formatDateLabel(entry.usage.peakEnd)}`}
+                                  </span>
+                                ) : null}
                               </div>
+                              {entry.usage?.overstated ? (
+                                <div className="mb-1 text-[11px] text-slate-400">
+                                  {formatNumber(entry.usage.total)} is booked across the whole range, but these jobs do not all run
+                                  together - only {formatNumber(entry.usage.peak)} is ever out on one day.
+                                </div>
+                              ) : null}
+                              {/* Cancelled jobs keep their equipment lines in
+                                  Rentman, so they still come back from the date
+                                  query. They are listed - somebody may want to
+                                  know the kit was earmarked - but they are not
+                                  demand, and saying so is better than silently
+                                  dropping a booking the planner can see in
+                                  Rentman. */}
+                              {entry.usage?.cancelled.length ? (
+                                <div className="mb-1 text-[11px] text-slate-400">
+                                  {formatNumber(entry.usage.cancelledQuantity)} on{" "}
+                                  {entry.usage.cancelled.length} cancelled job{entry.usage.cancelled.length === 1 ? "" : "s"} is not
+                                  counted - that kit is on the shelf.
+                                </div>
+                              ) : null}
                               <ul className="space-y-0.5 text-xs text-slate-300">
-                                {entry.projects.map((project, index) => (
-                                  <li key={index}>
-                                    #{project.projectNumber} - {project.projectName} -{" "}
-                                    <span className="font-semibold">{project.status ?? "No status"}</span> -{" "}
-                                    {formatNumber(project.quantity)} - {formatDateLabel(project.planPeriodStart)} to{" "}
-                                    {formatDateLabel(project.planPeriodEnd)}
-                                  </li>
-                                ))}
+                                {entry.projects.map((project, index) => {
+                                  const cancelled = isCancelledStatus(project.status);
+                                  const inPeak = entry.usage?.peakBookings.includes(project) ?? false;
+                                  return (
+                                    <li key={index} className={inPeak ? "" : "text-slate-500"}>
+                                      #{project.projectNumber} - {project.projectName} -{" "}
+                                      <span className="font-semibold">{project.status ?? "No status"}</span> -{" "}
+                                      {formatNumber(project.quantity)} - {formatDateLabel(project.planPeriodStart)} to{" "}
+                                      {formatDateLabel(project.planPeriodEnd)}
+                                      {inPeak ? <span className="ml-1 text-amber-300">- in the peak</span> : null}
+                                      {cancelled ? <span className="ml-1 text-slate-500">- cancelled, not counted</span> : null}
+                                    </li>
+                                  );
+                                })}
                               </ul>
                             </td>
                           </tr>
@@ -7686,9 +10085,94 @@ const exportJson = () => {
                 </tbody>
               </table>
             </div>
+            {/* Items the tool works out no requirement for - deployment parts
+                for a wall it does not model, a connector somebody knows the job
+                needs - put on the list by hand. Everything the catalogue holds
+                a code for is offered; what is already on the list is not. */}
+            {addableStockItems.length ? (
+              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 no-print">
+                <label className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Add an item</div>
+                  <select
+                    className="w-[28rem] max-w-full rounded-lg border border-slate-500 bg-white p-2 text-sm text-black"
+                    value={stockAddCode}
+                    onChange={(e) => setStockAddCode(e.target.value)}
+                  >
+                    <option value="">Choose an item from the catalogue...</option>
+                    {addableStockItems.map((item) => (
+                      <option key={item.code} value={item.code}>{item.code} - {item.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Qty</div>
+                  <Input
+                    type="number"
+                    min={0}
+                    className="w-24 text-right"
+                    value={stockAddQty}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setStockAddQty(e.target.value)}
+                  />
+                </label>
+                <Button
+                  intent="primary"
+                  size="sm"
+                  disabled={!stockAddCode}
+                  onClick={() => {
+                    if (!stockAddCode) return;
+                    addStockRow(stockAddCode, Number(stockAddQty) || 0);
+                    setStockAddCode("");
+                    setStockAddQty("1");
+                  }}
+                >
+                  Add to list
+                </Button>
+                <div className="text-xs text-slate-400">
+                  Nothing here is calculated from the layout - an added row is yours, and says so on the list.
+                </div>
+              </div>
+            ) : null}
+
+            {/* Rows taken off the list. They are gone from the table and from
+                every export, but not hidden from the person who took them off:
+                each one says what it was and goes back with one click. */}
+            {stockRowsRemoved.length ? (
+              <div className="space-y-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 no-print">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                  Removed from this project&apos;s list
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {stockRowsRemoved.map((row) => (
+                    <div
+                      key={`removed-${row.code}-${row.name}`}
+                      className="flex items-center gap-2 rounded-full border border-slate-600 bg-slate-800 px-3 py-1 text-xs"
+                    >
+                      <span className="text-slate-400">{row.code}</span>
+                      <span>{row.name}</span>
+                      <span className="text-slate-400">({formatNumber(calculatedTotalOf(row))})</span>
+                      <button
+                        type="button"
+                        onClick={() => setStockRowRemoved(row.code, false)}
+                        className="rounded px-1 font-semibold text-sky-300 hover:bg-slate-700 hover:text-sky-200"
+                        title="Put this item back on the stock list"
+                      >
+                        Put back
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {stockEditsApplied ? (
+              <div className="text-xs text-amber-300/90">
+                {stockEditsApplied} row{stockEditsApplied === 1 ? "" : "s"} on this list {stockEditsApplied === 1 ? "is" : "are"} set by hand
+                rather than calculated - the CSV, the PDF and the shortfall list all use the edited figures, and the PDF says which rows they are.
+              </div>
+            ) : null}
             {rentmanChecked ? (
               <div className="text-xs text-slate-400">
-                Available Stock = Rentman Stock - Other Projects - Broken / Repair, compared against this project&apos;s{" "}
+                Available Stock = Rentman Stock - what is out on other jobs on the worst single day of your range - Broken / Repair,
+                compared against this project&apos;s{" "}
                 {STOCK_COUNT_LABELS.total}. <span className="font-semibold text-emerald-300">OK</span> = comfortably covered,{" "}
                 <span className="font-semibold text-amber-300">LOW</span> = covered by under 10%,{" "}
                 <span className="font-semibold text-red-300">SHORT</span> = not enough.

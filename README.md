@@ -1,10 +1,12 @@
 # LED Cabling Web App
 
-Version `0.43.0`
+Version `0.72.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
 ## What It Does
+
+- **Test Pattern Generator** (`generator.html`, also opened from the planner's toolbar) - a standalone page for any video output, projector, monitor or LED screen. See [Test Pattern Generator](#test-pattern-generator) below
 
 - Build LED walls by rows and columns, or place panels freely (non-uniform layouts) with drag, edge-snap and joining
 - Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
@@ -13,16 +15,26 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Select a **NovaStar processor model** (`VX1000 Pro` / `VX2000 Pro`), see its live pixel/port capacity vs. current usage, assign a video input per sub-screen or one input for the whole canvas, and generate a real, importable `.uprj` processor configuration file - validated against the selected processor's port count, per-port and total pixel limits, and canvas size, with a summary of what will be exported and any blocking errors or warnings before download
 - Import projects from the Creative Layout Tool
 - Patch signal and power manually or with auto-snake / automatic letter-patching routing, scoped to the active sub-screen when one is selected. The first panel of each signal chain shows its port number in a blue circle (top-left) and the first panel of each power chain shows its port number in an orange circle (top-right), in both the Panel Layout and the PDF Report. With **Do backup signal loop** enabled, the chain's last panel also shows the backup port number (the second half of the available signal ports, e.g. port 11 backs up port 1 on a 20-port setup) - the number of signal ports itself follows the selected NovaStar processor (10 for VX1000 Pro, 20 for VX2000 Pro, 20 if none is selected), and the backup half is hatched and unselectable in the Signal Patching panel
+- See every signal and power run drawn over the panels, routed around the panel text so no label is ever covered. **Signal is always blue, power always orange**, and a hop both of them share is drawn as **one cable, with one arrow**, rather than a parallel pair. Every run carries a single outline `>` where it enters each panel. Identical on screen and in the PDF
+- Hover any panel to read its **X / Y position** from the top-left corner of the layout, in mm and in content pixels
+- Every panel carries its **row and column reference**, counted off the wall's own module grid - so a panel set half a module out reads as `row 5 & 6` instead of throwing the numbering of everything after it
 - Flip the panel layout between `Back View` and `Front View`
+- Both PDF Panel Layout pages draw each **sub-screen's boundary and name**, and **Generate PDF** can limit those pages to the sub-screens you pick - the page is then rebuilt around just those panels and says on its face that it shows part of the wall
+- The PDF report carries an **Output Canvas page** - the full canvas resolution, every screen drawn to scale where it sits on it, and the same numbers as a table - plus a **key** on both Panel Layout views explaining every mark on the drawing
+- A PDF **Weight breakdown** page: panels by type, every rigging and cable allowance with the arithmetic behind it, what is left out of the total, and a per-sub-screen panel weight
 - Export a PDF report with portrait detail pages, a per-sub-screen summary page, plus both layout views in landscape - **Generate PDF** first asks which sections to include (everything ticked by default)
-- Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
+- Export native-resolution Test Pattern images - the whole wall and/or one per sub-screen, each at its own true output resolution - a full-screen canvas-only live Moving Test Pattern rendered pixel-for-pixel at its true output resolution (never scaled/stretched to fit the window - see [Pixel-Accurate Test Pattern](#pixel-accurate-test-pattern) below), or a downloadable looping WebM or MP4 video of it. The **MP4 is written to fixed delivery settings** - constant frame rate, High profile at a level the wall actually fits, half-second keyframes, no B-frames, Rec.709 limited range, exactly one loop long - and the download dialog lists them, with the frame rate and bitrate editable to match your show. Both the live view and the video ask which single surface to show first - the full canvas (where each sub-screen runs its own independent pattern) or one sub-screen on its own, at that screen's own resolution
+- **Connectors are counted from the edges panels actually share** - one row per connector, per shared edge, with exposed edges adding nothing. Shape panels, corner panels and flat-laid corner panels each pull their own part, and a rotated panel's connectors move with its edges
+- An **MG9 Corner panel can be laid in flat**: the same part off the same shelf, drawn without the corner hatch, needing the flat connector instead of the corner one
+- Shaped panels (`MG12` triangle, `MG13` quarter circle) print the orientation code of the part they actually are - `LU` / `LD` / `RU` / `RD`, read from the front - so the drawing names the same stock line Stock Calculations counts. Left/Right is the corner the right angle is drawn in; Up/Down is the shelf's own vertical sense, which runs the opposite way (see `TRIANGLE_ORIENTATION`)
 - Rotate panels by 45°, 90° or any custom angle, individually or as a multi-selected group (spacing/arrangement preserved); copy and paste panel groups with Ctrl/Cmd+C/V, with a cursor-following placement preview that snaps to the grid and nearby panels
 - Toggle a vertical centre-line indicator on the Panel Layout (accounts for rotated panels' true outer bounds) with one control in **Overlays & displays** that governs both the on-screen layout and the PDF's Panel Layout pages
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
-- Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
+- **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
+- Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
 
-## Recent Changes In v0.43.0
+## Recent Changes In v0.72.0
 
 **Obstructions**
 
@@ -46,6 +58,920 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Shows the **whole screen including every separate piece**, with real gaps left as gaps, and can outline and label each piece with its pixel size
 - Fill it with a **solid colour** or an **uploaded image stretched across the full surface**, so each piece shows the part of the picture it will actually receive
 - **Obstructions are drawn over it** and labelled in pixels and metres, so it is immediately clear what the content loses to them
+
+## Recent Changes In v0.55.0
+
+**The Moving Test Pattern MP4 is a delivery file now**
+
+It used to be whatever a constant-quality encode happened to produce, at the
+live view's own 24fps. It is now written to fixed settings, and the download
+dialog lists them before you commit to the encode:
+
+| Setting | What the file gets |
+| --- | --- |
+| Format | MP4 / H.264 |
+| Frame rate | **Constant** 60 fps by default - pick 24/25/30/50/60 to match your show |
+| Resolution | The project's own content resolution |
+| Profile / level | High / 4.2, or the lowest level that **can** carry the wall |
+| Pixel format | 8-bit 4:2:0 (`yuv420p`) |
+| Scan | Progressive |
+| Keyframes | Every half second - 30 frames at 60fps, 15 at 30fps |
+| B-frames | 0, for easier seeking |
+| Bitrate | 8 Mbps target, 12 Mbps ceiling - both editable |
+| Colour | Rec.709, limited (TV) range, tagged in the stream **and** in the file |
+
+- **The frame rate is real, not a tag.** The pattern is now drawn at the rate
+  the file is being made at, rather than the live view's gentler 24fps, and the
+  output is forced to constant frame rate - a wall too big to redraw in time
+  repeats a frame instead of the file going variable
+- **The level follows the wall.** An LED wall is routinely wider than any
+  broadcast format: 6,216 x 1,344 at 60fps needs level 5.2, and tagging that
+  stream 4.2 would be a lie a hardware decoder is entitled to act on. 4.2 is
+  used wherever it fits, and the dialog says when it does not
+- **The colour conversion is spelled out** rather than inherited from whatever
+  the browser tagged its recording as - which is the one thing a test pattern
+  cannot afford to get wrong
+- **The file is exactly one loop.** A 20-second recording came back 19.22
+  seconds long, so the pattern jumped every time it repeated; the recording is
+  now made longer than the loop on purpose and cut back to exactly one
+
+Verified by reading the produced file's own boxes rather than trusting the
+command line: `High / 4.2`, `colr nclx bt709/bt709/bt709` limited range, a
+single frame-duration entry of **1200 frames at 60.000 fps**, 40 keyframes
+exactly 30 apart, and no composition-offset table (so no B-frames).
+
+## Recent Changes In v0.71.0
+
+**Wall Details counts lit pixels, not black space**
+
+The Resolution figure was the rectangle the wall stands in. On anything that
+is not a full rectangle that counts the holes and the steps as if they were
+screen. On a stepped 141-panel wall the bounding box is 6216 x 1344 =
+8,354,304px, of which **4,374,720px - more than half - is black**.
+
+- **Resolution** is now the lit pixel count: every active panel's own
+  resolution added up. That stepped wall reads **3,979,584 active px**
+- **Extent** sits right under it (`6216 x 1344 - 4,374,720 px of it black`),
+  because content is still authored to that rectangle and the test pattern
+  still renders at it. The black-space note only appears when there is some
+- **VX1000 / VX2000 use** and **Port capacity use** now measure against the
+  lit pixels too. A processor never drives an empty gap, and the old figures
+  said that stepped wall needed **128.5%** of a VX1000 when it really needs
+  **61.2%** - enough to push somebody onto a bigger processor for no reason
+
+| | Before | After |
+| --- | --- | --- |
+| Resolution | 6216 x 1344 | 3,979,584 active px |
+| VX1000 use | 128.5% | 61.2% |
+| VX2000 use | 64.3% | 30.6% |
+
+A note on how: a "packed" width and height - the holes closed up - sounds like
+the obvious answer, but it only works when **every row loses the same number
+of panels**. Six holes in one row, or a stepped corner, pack to exactly the
+bounding box and keep every one of those black pixels. A straight sum is the
+only figure that is right whatever the shape, which is why the headline is a
+pixel count rather than a width x height.
+
+Unchanged on purpose: the test pattern, sub-screen resolutions, the output
+canvas and the recommended content resolution all still use the full extent -
+content has to span the whole rectangle, gaps included (see v0.59.0).
+
+**Also:** the PDF's Wall box was already exactly full, so the extra line
+silently dropped `Reduced ratio` off the bottom - `drawInfoBox` clips without
+saying so. The four top-row boxes are a line taller now.
+
+## Recent Changes In v0.70.0
+
+**15m PowerCON Cable was under-ordered**
+
+The cable count came off `ceil(panels / panels-per-outlet)` - the FEWEST
+outlets the wall could run on if every one were filled to the limit. The real
+patch also has to respect the 16A ceiling and keeps chains together, so it
+routinely sits on more outlets than that floor, and every extra outlet is a
+cable nobody ordered.
+
+On the report this was found in - 84 panels, a 21-panel outlet limit - the
+sheet asked for **4** cables while the patch was on **6 outlets**. Two short.
+
+- It is now **one cable per outlet actually patched**, which is the same
+  figure the weight page (`6 outlets in use x 3kg`) and the distro row were
+  already using. The report no longer disagrees with itself
+- Before anything is patched there are no real outlets to count, so the old
+  floor stands in as an estimate - and the row says which it is giving you
+- The Power summary now reads **Outlets in use: 6 (4 if filled to the limit)**
+  instead of `Circuits used: 4`, on screen and in the PDF. The old figure was
+  never a count of anything; it was a planning floor wearing the wrong label
+
+**Long project names no longer run over the page**
+
+A name like *7582 Investment Services Group Limited - Shaw and Partners
+Appreciation Event* ran the Panel Layout title **48mm off the right edge** of
+the page, and the `Project name:` line **57mm into the second column**, right
+through `Size: 7.5m x 3m`.
+
+Headings and that line are drawn at fixed positions in two columns, so there
+is nowhere to wrap to - a second line would land on the one below it. Text
+that will not fit is now **shrunk first, then clipped with an ellipsis**, with
+jsPDF's own font metrics deciding. The title above went 325mm → 271mm (18pt
+down to 15pt, nothing lost); the project line went 149mm → 91mm. Every page
+heading in the report goes through the same rule.
+
+**Drag slowness: it is the dev server, not the app**
+
+Profiled a drag on a 141-panel wall. **88% of the time was `jsxDEV`** -
+React's development-mode JSX factory, which validates every prop and builds a
+debug task per element. None of that exists in the production bundle.
+
+| | Median per mouse move |
+| --- | --- |
+| `vite` dev server | **1374 ms** |
+| Production build | **33 ms** |
+
+The deployed site has never been doing the slow thing. Earlier figures in this
+changelog's v0.69.0 notes were measured against the dev server and overstate
+the real cost by about 40x.
+
+One genuine inefficiency turned up and is fixed: `formatNumber` built a fresh
+`Intl.NumberFormat` on every call, from inside the render of every panel, port
+tile and table row. It is cached per digit count now. It was the top
+app-level cost in the dev profile, though it does not measurably move the
+production figure (still 33 ms) - the win was mostly dev-mode amplification.
+
+## Recent Changes In v0.69.0
+
+**Auto Snake: each sub-screen on its own, and a live preview**
+
+**Each sub-screen separately** walks every screen as its own wall. Without it
+the band finder sees the whole layout at once, so two screens sitting at the
+same height - touching or not - fall into one row band and the snake runs
+straight out of one screen and into the next. The panels are split up *before*
+any banding, which is what keeps each path inside its own screen, and each
+screen's run starts on a fresh port.
+
+On the two-screen layout this was built against, patching with the option on
+leaves **no port carrying panels from more than one screen**; with it off,
+**5 of the 7 ports** mix the two.
+
+- Screens are walked in the order the Sub-Screens list shows them
+- Panels in no sub-screen are a run of their own, walked last - not dropped,
+  and not folded into a screen they are not part of
+- The checkbox only appears once there is more than one screen to keep apart
+
+**Preview path** draws what Auto Snake would do, before it does it:
+
+- The **start** of each run is ringed and labelled - `START`, or
+  `START 1 · Left` when there is more than one
+- **Direction** from an arrowhead on every hop
+- **Panel order** as a numbered chip on each panel (hidden when zoomed out too
+  far to read, where the line and arrows carry it instead)
+- Each run is drawn in its **sub-screen's own colour**
+- It updates as the options change, and follows a panel being dragged
+
+The preview and the button are **one function** (`snakeOrderSegments`) - a
+preview drawn by its own copy of the walk is a preview of nothing. It is also
+scoped by the button's own scope helper, so previewing inside one open
+sub-screen shows that screen's path and nothing else.
+
+One performance note: Letter patching walks the connected groups to find its
+letters, which costs about 200ms over a 141-panel wall. The preview computes
+the *order* only when the layout or an option changes, and reads panel
+*positions* at draw time - so dragging a panel does not re-band the wall on
+every mouse move.
+
+## Recent Changes In v0.68.0
+
+**Panels join on quarters and halves, and nothing else**
+
+Dragging a panel to sit **exactly half a module** down its neighbour never
+worked: it would land looking right and count as **not joined** - no connector
+ordered for it, and the two panels moved independently afterwards.
+
+The connector anchors sat at fractions of the edge - `±0.8, ±0.4, 0` - which on
+a 500mm edge put them every **100mm**. That is not a lattice any panel can be
+built on:
+
+| Offset | Is it a half or quarter? | Old | New |
+| --- | --- | --- | --- |
+| 100mm, 200mm, 300mm | no | joined | not joined |
+| 125mm (quarter) | yes | no anchor pair | joined |
+| 250mm (half) | yes | **no anchor pair** | joined |
+| 375mm (three quarters) | yes | no anchor pair | joined |
+
+- Anchors now sit every **125mm - a quarter module - measured in millimetres**,
+  not as a fraction of the edge. So an **MT panel's 1m edge carries the same
+  lattice as an MG9's 500mm one**, and the two can meet on a quarter; before,
+  they could not meet at all
+- A **brick bond** (half a module across, one row down) is a real join and is
+  counted as one. It was in the "what this does not count" list; it is not any
+  more
+- Dragging now always lands on a quarter, whether it snaps to a neighbour or
+  falls through to the 250mm grid
+- Two panels that only **touch at a corner** are still not joined. The anchors
+  now include the edge ends, and a corner belongs to two edges - left as two
+  entries it would have read as the two coincident anchors a join needs, so
+  they are de-duplicated
+
+On the 141-panel layout this was reported from, joined pairs go **210 → 214**:
+8 brick-bond joins found that were being missed, and 4 dropped that were
+offset 200mm or 300mm - the ones that had been dragged at a half and landed
+somewhere else.
+
+**Exported PNGs are tagged 300 DPI**
+
+A PNG says how big its pixels are meant to be on paper in a `pHYs` chunk.
+Canvas never writes one, so every test pattern this app exported arrived with
+**no resolution at all**, and a reader with nothing to go on assumes 72 DPI -
+placed in a document it came out about four times too big.
+
+- Exports now carry **300 DPI** - both the planner's test pattern PNGs and the
+  Test Pattern Generator's stills
+- **Not a single pixel changes.** A test pattern is mapped one-for-one onto the
+  wall's own resolution, so resampling it to "make it 300 DPI" would destroy
+  the thing it exists to show. The pixels are the pixels; the tag only says how
+  big they are meant to be on paper
+- The PDF's own layout image is unaffected - it is placed at an explicit size
+  on the page, and still rendered at 600 DPI for enlarged printing
+
+## Recent Changes In v0.67.0
+
+**Test Pattern Generator: output controls on the main page, full-length videos**
+
+- Video downloads are drawn and encoded frame by frame (WebCodecs) instead of
+  recorded against the clock, so every file is exactly one loop with every
+  frame in it, whatever else the computer is doing - and the sync beeps sit
+  on their flash frames in WebM as well as MP4. Browsers without WebCodecs (or
+  odd pixel sizes) still record in real time
+- The playback bar has separate **Play** and **Pause** buttons, and an
+  **Output** row: Fullscreen, Bouncing logo, Fit to display, Status box,
+  Beeps here / Beeps in output window and a labelled **Beep delay (ms)**. The
+  output window follows these, and its own keys (H, L, S) change them here too
+- An output window that isn't fullscreen shows a click-to-go-fullscreen
+  banner, and the editor says so too
+- The bouncing logo now bounces inside each sub-screen, not across the whole
+  canvas
+
+## Recent Changes In v0.66.0
+
+**The planner opens the Test Pattern Generator with its project**
+
+- The planner's **Test Pattern Generator** button now takes the open project
+  with it: the generator opens on the project's Output Canvas, with every
+  sub-screen at its canvas position and resolution, each running the planner's
+  LED layout test pattern for its panels (or one Whole Layout screen when the
+  project has no sub-screens). Undo goes back to what the generator had before
+- **Planner project** in the generator brings that project in again, and
+  **Default project** goes back to the four-screen starting setup
+
+## Recent Changes In v0.65.0
+
+**Test Pattern Generator: sound, movement, auto cycle, clock and photo faces**
+
+- **AV Sync Flash and Beep**: a flash and a beep together every second (or
+  every few), a countdown ring that steps one segment per frame, and a frame
+  ruler that lights the offset from the flash, for checking lip sync through a
+  camera or a show system. **Timecode & Sync Flash** now beeps with its flash too
+- **Sync beeps** play live in the editor and the output window (each with its
+  own on/off and an offset in milliseconds) and go into WebM and MP4 downloads
+  as the soundtrack; in MP4 they sit on the exact flash frames
+- **Movement** for every pattern: scroll left, right, up, down or diagonally,
+  a whole number of passes per loop, wrapping round so the loop stays seamless
+- **Auto cycle all patterns** steps every screen through the whole pattern
+  list every few seconds, all together or a different one per screen
+- **Clock** overlay: an analogue clock with a seconds hand and the time in
+  digits, in the top-right of the screen
+- **Photo Faces**: 24 portraits on grey, picked at random to fill the screen in
+  square cells (faces down, gap, variation and reshuffles are settable). Faces
+  are never stretched; what the cells leave over is filled with grey
+
+## Recent Changes In v0.64.0
+
+**A standalone Test Pattern Generator**
+
+The planner's Output Canvas and Moving Test Pattern, opened up into their own
+page at `generator.html` for any output - no LED panels needed. See
+[Test Pattern Generator](#test-pattern-generator).
+
+## Recent Changes In v0.63.0
+
+**Every reference number is read from the front**
+
+Row and column numbers were counted off the layout's own geometry, which is
+the wall seen from the BACK. The test pattern already counted from the front,
+so the panel the workspace called `C1` lit up as `37` on the wall - the two
+numbers a crew actually compares were the two that disagreed.
+
+- The **↓ row → column** labels, the PDF's chain tables (`R2 C37`) and the test
+  pattern now all count columns **from the front**, the side you stand on to
+  build the wall. One panel, one number, wherever you read it
+- **Rows are untouched.** Flipping a wall left to right moves nothing up or
+  down
+- The number is fixed to the panel, so the Front/Back view toggle still never
+  renumbers anything - it just changes which end you are looking at
+
+**The hover readout is front-referenced too**
+
+Hovering a panel gives its offset from the top-left of the layout **as seen
+from the front**, in mm and in content pixels. That is the whole point of the
+figure: it answers "which pixel of my content lands on this panel", and content
+is authored for the front. Read off the back it named the mirror-image pixel -
+the far end of the canvas - which is the one place a content op must not be
+sent.
+
+The front-left panel one row down now reads exactly what it should:
+
+```
+X 0 mm · 0 px
+Y 500 mm · 168 px
+from layout top-left
+```
+
+and the column number on that panel is `1`, so the label and the position can
+no longer tell you different things.
+
+## Recent Changes In v0.62.0
+
+**Port bars show the port's own capacity, not your planning limit**
+
+A signal port's load bar was drawn against the **Panels per Signal Port** box.
+Typing a smaller number there painted a half-empty port red, and a bigger one
+painted a full port green - the bar moved when nothing about the wall had.
+
+- Each signal port now reads its **pixels against the 650,000 a port can
+  drive**, exactly the way the power tiles already read amps against the 16A
+  outlet. The px figure is printed under the panel count, so the bar can be
+  checked rather than taken on trust
+- It also counts a **mixed port** correctly: an MT panel is 16,384px against an
+  MG9's 28,224, which no panel count can tell apart
+- The **Panels per Signal Port** and **Panels per Power Outlet** boxes still do
+  what they always did - they cap manual and auto patching. They just no longer
+  decide what "full" looks like
+- Power needed no change: its tiles and the phase bars were already drawn
+  against the outlet and distro limits
+
+**Shaped panel orientation codes**
+
+`LU` / `LD` / `RU` / `RD` are read from the **front** of the wall. Left/Right is
+the corner the right angle is drawn in; **Up/Down follows the shelf's own
+vertical sense**, which runs the opposite way - a rotation-0 triangle draws its
+right angle at the bottom and is the part named `LU`. The labels, the stock
+lines and the pull sheet all go through one table, so they cannot disagree.
+
+| Rotation | Triangle | Quarter circle |
+| --- | --- | --- |
+| 0 | `LU` | `RU` |
+| 90 | `LD` | `LU` |
+| 180 | `RD` | `LD` |
+| 270 | `RU` | `RD` |
+
+**Selections name the exact shaped part**
+
+The selection chips split shaped panels by orientation - `2 x MG9 Triangle LU`,
+`1 x MG9 Curved RD` - because each orientation is its own one-way part off its
+own shelf, which is how Stock Calculations counts them. Four triangles facing
+four ways are four different parts, and one line saying "4" was the wrong pull
+every time.
+
+## Recent Changes In v0.61.0
+
+**Spare mesh modules on an MT wall**
+
+| Code | Name | Quantity |
+| --- | --- | --- |
+| `12626` | YES TECH MT P3.9-7.8 LED Mesh Module | 3% of the MT panels, rounded up |
+
+- Any MT panel on the layout puts the module on the list. It is **pure spare**:
+  the row reads **Required 0**, with the 3% in the Spares column, because the
+  modules go out fitted inside the panels - what travels separately is a
+  handful to swap a dead one out on site
+- Rounded **up**, so there is always at least one wherever there is any MT at
+  all. A 192-panel wall takes **6**; 34 panels takes 2; 33 takes 1
+- This is why MT panels themselves carry a **0% spare ratio** - nobody takes a
+  spare mesh panel, they take the module that fails
+- An MG9 or poster wall never sees the row
+
+## Recent Changes In v0.60.0
+
+**The selection says what it is made of**
+
+Panel Tools showed "24 selected" and nothing else, so a selection of 20 standard
+panels and 4 corners read the same as 24 plain ones - two different pulls, one
+number.
+
+- A chip per **physical part** now sits beside the count: `7 x MG9`,
+  `1 x MG9 Triangle`, `2 x MT Corner`, biggest group first
+- The split is the one **Stock Calculations** orders against, so a selection
+  reads in the same terms as the pull sheet. The catalogue's own name for the
+  part is on each chip's tooltip
+- **Posters count as whole posters**, not the eight sections that selecting one
+  pulls in
+- A group holding inactive panels says so - `4 x MG9 (2 inactive)` - so Delete
+  and Restore hold no surprises
+
+**Copied panels open the workspace up**
+
+The workspace stopped 300mm past the wall, and the pointer cannot reach past
+the workspace, so there was nowhere to drop a copy except on top of what it
+came from.
+
+- With panels on the clipboard the workspace **opens out by the size of what is
+  waiting to be pasted**, on all four sides, so a copy can be placed clear of
+  the wall in any direction
+- Per axis, so copying a wide, short strip does not open up a tall empty
+  workspace it will never use
+- It comes straight back off when the clipboard is cleared
+
+**Sub-screen names on the test pattern**
+
+- The **full-wall** test pattern PNG was the one export that showed no
+  sub-screen names at all. It now outlines and names each screen in its own
+  colour, the same way the moving pattern already did
+- A **single sub-screen** rendered on its own now carries its name too. The
+  boundary-and-name pass used to bail out whenever there was only one surface,
+  which is exactly the case where the name matters most - the shape alone no
+  longer says which screen you are looking at
+- A plain wall with no sub-screens still has nothing drawn over it
+
+## Recent Changes In v0.59.0
+
+**A sub-screen's pixel count is the rectangle it stands in**
+
+A sub-screen with a gap or a step in it was quoted one module column short on
+the Output Canvas and in the PDF, while the test pattern rendered the right
+figure. On the file this came from, the Left screen read **3,528 x 1,344** in
+both places and **3,696 x 1,344** on the test pattern - a 168px column, one
+whole panel, missing from the number the content gets built to.
+
+- A sub-screen's resolution is now its **footprint**, the same way the wall's
+  own Resolution already was. The two agree exactly on a solid rectangle and
+  part company the moment the shape is stepped, which is where the footprint
+  is the right answer
+- The **Complete layout resolution** line and the whole-layout entry had the
+  same fault when a project has no sub-screens: 5,880 where the wall is 6,216
+- This is also the only figure consistent with where the panels are actually
+  drawn on the canvas, which has always used their physical mm offsets - a
+  sub-screen's own panels could sit outside the box the canvas view drew
+  around them
+- The **packed** space is unchanged and still right where it is used: the
+  NovaStar cabinet topology in the `.uprj` export, where a processor has no
+  such thing as an empty gap pixel
+
+**Vertical cable runs sit on the panel, not on its edge**
+
+A vertical run was drawn about 0.9px from a panel's left edge, close enough
+that its outline actually overhung the boundary and the run read as if it
+belonged to the join rather than the panel.
+
+- Both lanes now sit **12% of the way in**, the same inset the horizontal lanes
+  already used - the signal run moves from 0.9px to 7.1px off the edge on a
+  full panel, roughly eight times further in, beside the text rather than on
+  the border
+- **No label got smaller.** A full panel still prints at 10px in the PDF and
+  9px on screen, and a poster section still gets its 6px
+- That is paid for by centring the label block on the space **beside** the
+  lanes instead of on the panel itself. Centring on the panel meant reserving
+  the same band twice - once on the left where the runs are, and once on the
+  right purely to stay symmetrical - and it was that second, empty reservation
+  that used to decide how big the text could be
+- The rule that a run never crosses a panel's text still holds, and is now
+  tested against where the text really sits
+
+## Recent Changes In v0.58.0
+
+**Cancelled jobs no longer hold stock**
+
+Rentman keeps a cancelled job's equipment lines rather than deleting them, so
+they kept coming back from the date-overlap query and were counted like any
+other booking. A job called off months ago could still show its panels as out,
+and the tool reported a shortage over kit sitting on the shelf.
+
+- A booking whose job is **cancelled is never counted** - not in **Out on the
+  day**, not in the sum beside it, not in **Available Stock**
+- It is still **listed**, marked *cancelled, not counted*, with a line saying
+  what it would have added: *"200 on 1 cancelled job is not counted - that kit
+  is on the shelf."* A planner can see the booking in Rentman, so silently
+  dropping it would raise the same question the old behaviour did
+- The PDF's Other Projects & Repairs page says the same, and its intro now
+  spells it out
+- Matching is on the status **stem**, because Rentman spells it two ways: the
+  API's status name is the US "Canceled" while the UI shows "Cancelled".
+  Checked against this account's real status list - Pending, Canceled,
+  Confirmed, Prepped, On location, Returned, Inquiry, Concept
+- **Only cancelled is dropped.** A Pending or Inquiry job is kit somebody is
+  seriously expecting to send out, and quietly freeing it would be the same
+  mistake in the other direction
+- The Worker has the same rule, so its own `peakRequired` and `remaining`
+  agree - but the app works this out from the bookings it is given, so it is
+  right **without redeploying**
+
+**Levelling packers on anything that stands on the floor**
+
+| Code | Name | When |
+| --- | --- | --- |
+| `12374` | Assorted Levelling Packers & Shims | Every deployment except **Flown** |
+
+One assorted set, which is how Rentman stocks it (quantity 1) - not a
+per-panel count. A flown wall hangs off the bar and has nothing to pack;
+ground support, floor and no-support walls all sit on whatever the venue's
+floor happens to be doing. With no deployment type chosen the row stays off
+the list, same as every other deployment-driven item.
+
+**Also:** the VX2000 Pro's shelf quantity is now `3`, confirmed against
+Rentman along with both processor codes and the packers' - all four read back
+exactly as entered.
+
+## Recent Changes In v0.57.0
+
+**The processor is now on the equipment list**
+
+Picking a Processor Model puts that processor on the stock list, 1 per project:
+
+| Processor Model | Code | Name |
+| --- | --- | --- |
+| NovaStar VX1000 Pro | `12247` | NovaStar VX1000 Pro LED Processor |
+| NovaStar VX2000 Pro | `12353` | NovaStar VX2000 Pro LED Processor Rack |
+
+- The row **follows the selection**, so changing model swaps the line rather
+  than leaving two processors on the sheet, and **None selected** (manual port
+  planning) leaves the processor off the list entirely
+- Quantity is **1** - deliberately not one per 13.1MP. The Processor Capacity
+  readout and the NovaStar validation already say when a wall is too big for
+  the model picked, and the answer to that is a bigger processor, not a second
+  unit appearing quietly on the pull sheet
+- Both are catalogue items, so they reach the on-screen table, the CSV, the PDF
+  stock table and the Rentman stock check like anything else - and either can
+  be added by hand from **Add an item** when the unit going out is not the one
+  the project was planned on
+- Shelf quantities are the MG9 catalogue's own `vx1000`/`vx2000` figures (2
+  each), read from there rather than retyped, so a stock check updates one
+  number
+
+**Also: every catalogue code is now tested.** No two items may sit on one code
+(a duplicate reads as a doubled requirement and breaks the Rentman comparison),
+every shelf quantity has to be a whole number, and the codes that read
+backwards on purpose - triangle `12399` above quarter-circle `12398`, the floor
+parts on `12250`/`12251`/`12252` - are pinned, so a future tidy-up cannot swap
+them back.
+
+## Recent Changes In v0.56.0
+
+**Fixed: availability was adding up jobs that never clash**
+
+The Rentman availability check asked "what is booked in this window" and added
+it all together. Two jobs of 100 panels, one on the 4th and one on the 8th,
+came back as **200 unavailable** - though the first lot is on the shelf again
+days before the second goes out. On a busy month that reported shortages that
+did not exist.
+
+- It now asks the question that matters: **the most of an item out on any ONE
+  day of your range**. Two jobs of 100 on different days are 100 unavailable;
+  two that share a day are 200
+- The column is **Out on the day**, and opening it names the peak day, the
+  bookings that make it up, and - when the two differ - says what the old sum
+  would have been and why it is not the answer: *"260 is booked across the
+  whole range, but these jobs do not all run together - only 160 is ever out on
+  one day"*
+- The PDF's Other Projects & Repairs page says the same, marking the bookings
+  in the peak with a `*`
+- **Days, not hours.** Two jobs sharing a day are competing for the same panels
+  even when one derigs in the morning and the other rigs in the afternoon, and
+  a planner wants that flagged rather than smoothed away by a clock
+- A booking only counts for the days it **shares with your range** - a
+  month-long sub-rental running either side of your job takes up your days, not
+  its own
+- The app works this out from the bookings the proxy already returns, so it is
+  right **without redeploying the Worker**. The Worker has been fixed too - it
+  now returns `peakRequired` alongside the old sum, and its `remaining` uses
+  the peak - but nothing waits on that going live
+
+## Connector Rules
+
+Connectors are counted from the edges panels **actually share**, found from their
+real rotated positions. Each shared edge is counted **once**, never once per
+panel, and an edge with nothing on the other side adds nothing.
+
+A **horizontal edge** is a horizontal line, so one panel sits on top of the
+other; a **vertical edge** is a vertical line, so they sit side by side.
+
+| Panels joined | Edge | Connector | Per edge |
+| --- | --- | --- | --- |
+| Plain MG9 + Plain MG9 | Stacked (horizontal edge) | **none** | - |
+| Plain MG9 + Plain MG9 | Side by side (vertical edge) | **none** | - |
+| Plain MG9 + MG9 Corner (folded) | Stacked (horizontal edge) | 150 Connector | 3 |
+| Plain MG9 + MG9 Corner (folded) | Side by side (vertical edge) | 150 Connector | 3 |
+| Plain MG9 + MG9 Corner (laid flat) | Stacked (horizontal edge) | 150 Connector | 3 |
+| Plain MG9 + MG9 Corner (laid flat) | Side by side (vertical edge) | 150 Connector | 3 |
+| Plain MG9 + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 150 Connector | 3 |
+| Plain MG9 + MG12 triangle / MG13 curve | Side by side (vertical edge) | Horizontal Connector | 2 |
+| MG9 Corner (folded) + MG9 Corner (folded) | Stacked (horizontal edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG9 Corner (folded) | Side by side (vertical edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG9 Corner (laid flat) | Stacked (horizontal edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG9 Corner (laid flat) | Side by side (vertical edge) | MG9 Corner Connector | 3 |
+| MG9 Corner (folded) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 180 Connector | 3 |
+| MG9 Corner (folded) + MG12 triangle / MG13 curve | Side by side (vertical edge) | 150 Connector | 2 |
+| MG9 Corner (laid flat) + MG9 Corner (laid flat) | Stacked (horizontal edge) | 150 Connector | 3 |
+| MG9 Corner (laid flat) + MG9 Corner (laid flat) | Side by side (vertical edge) | 150 Connector | 3 |
+| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 180 Connector | 3 |
+| MG9 Corner (laid flat) + MG12 triangle / MG13 curve | Side by side (vertical edge) | 150 Connector | 2 |
+| MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | Stacked (horizontal edge) | 180 Connector | 3 |
+| MG12 triangle / MG13 curve + MG12 triangle / MG13 curve | Side by side (vertical edge) | 180 Connector | 2 |
+
+The order of the pair never changes the answer. A corner panel meeting a shape
+has its own rule - 3 x 180 stacked, 2 x 150 side by side - whether it is folded
+round the corner or laid flat.
+
+**MT panels** are not in this table: an MT join needs no connector. An MT panel
+can be marked as a **corner** (the same panel off the same shelf, so the panel
+count does not change), and each MT corner adds **2 x MT Corner Connecting
+Bracket and 8 x Bolt** - counted per corner panel, not per joined edge.
+
+### What this does not count, and why
+
+Each of these is pinned as a test in `src/connectors.test.ts`:
+
+- **Plain MG9 to plain MG9 adds nothing.** MG9 panels ship with their own
+  vertical connectors and three horizontals, so a plain panel-to-panel join
+  needs nothing pulled from the shelf
+- **MG9 Vertical Connector (12480)** is never chosen by a join rule for the
+  same reason - it comes only from the Modular Frame Bottom Beam allowance, 4
+  per 1m beam
+- **An offset that is not a quarter of a module is not a join.** Connector
+  anchors sit every **125mm** along every edge, so panels meet flush, a quarter
+  off, half off or three quarters off - and nowhere in between. There is no
+  connector for a wall built a tenth of a panel out, so there is no anchor pair
+  for one either. (Brick bonds and MT-to-MG9 joins used to fall in that gap;
+  they do not any more.)
+- **Panels turned to an odd angle** (45 degrees, say) are not seen as joined.
+  Those joins are made with hardware outside this catalogue
+- **A triangle never joins along its hypotenuse**, nor a quarter circle along
+  its arc - correctly, since there is nothing there to bolt to
+
+
+## Recent Changes In v0.54.0
+
+**Corner panels meeting a shape have their own rule**
+
+- A corner panel against an MG12 triangle or MG13 quarter circle now takes
+  **3 x 180 Connector stacked** and **2 x 150 Connector side by side**, whether
+  the corner is folded round the corner or laid flat. It used to count as a
+  plain MG9 there, which pulled the wrong part for both orientations
+- A **plain** MG9 against a shape is unchanged: 3 x 150 stacked, 2 x Horizontal
+  Connector side by side
+
+**MT panels can be marked as corners**
+
+- The panel variant picker now offers each panel type only what it physically
+  has: every shape for MG9, **Standard or Corner for MT**
+- An MT corner is the **same MT panel off the same shelf**, so the panel count
+  does not change. What it adds is hardware: **2 x MT Corner Connecting Bracket
+  (12274) and 8 x Bolt (12275) per corner panel**, counted per panel rather
+  than per joined edge, which is how the part is fitted
+- MT joins otherwise need no connector, which is why MT is not in the connector
+  table
+
+**The rest of the audit, settled**
+
+- Side-by-side corner joins stay at **3 per edge** - confirmed, not an oversight
+- Plain MG9 to plain MG9 stays at **nothing**: the panels ship with their own
+  vertical connectors and three horizontals
+- The MG9 Vertical Connector comes in the panels too, so no join rule asks for one
+- Odd-angle joins are made with hardware outside this catalogue and are not counted
+- All of it is written down under [Connector Rules](#connector-rules) and pinned in the tests
+
+## Recent Changes In v0.53.0
+
+**Shape to shape is always the 180 Connector**
+
+- Two shaped panels (MG12 triangle, MG13 quarter circle) meeting leg to leg now take the **180 Connector whichever way the edge runs**. Stacked was already 3 x 180; side by side took the *150 Connector* and now takes **2 x 180**
+
+**The whole connector table, written down**
+
+- Every pair of panel kinds and both edge orientations - 20 rows - are listed under [Connector Rules](#connector-rules) below, and pinned row by row in `src/connectors.test.ts`, so the table and the code cannot drift apart
+- The **limits of the model** are pinned there too, as tests: what the edge finder does not see is now recorded rather than assumed (see the list under the table)
+
+## Recent Changes In v0.52.1
+
+**Panel Layout pages print sharply at A3**
+
+- The layout drawing is a picture, and it was rendered at **300 DPI for the A4 page it sits on**. Print that A4 page enlarged onto A3 and the same pixels are stretched 1.41x - 212 DPI - and the panel text, which is only about a millimetre tall to begin with, went to pieces
+- It now renders at **600 DPI**, so an A3 print lands at 424 DPI and even A2 still has 300 to work with
+- The cost is the file: a 141-panel wall goes from about 0.9MB to 2.0MB, and the report takes roughly ten seconds longer to build. Everything else in the PDF is vector and was always sharp at any size
+- A ceiling on the image size guards the canvas: the print area is fixed, so at 600 DPI nothing can exceed about 23 megapixels, and a future DPI rise cannot quietly hand the browser a canvas too big to allocate - which fails by returning a blank image rather than by raising an error
+
+## Recent Changes In v0.52.0
+
+**Fixed: the height ruler started in the wrong place**
+
+- The metre marks up the side of the wall were laid out from the **top** and merely relabelled, so on a wall that is not a whole number of metres high - three 0.5m panels being the plain case - **`0m` landed between two panels instead of on the ground**
+- The ruler is now measured **up from the bottom of the wall**: `0m` is the bottom edge, always, and the whole-metre grid lines move with it so the numbers sit on the lines they belong to
+- Fixed in the Panel Layout and in the PDF's layout pages alike
+
+**A weight breakdown page in the PDF**
+
+- New **Weight breakdown** section in Generate PDF: panels type by type (count x each = weight), then every rigging and cable allowance with the sum that produced it - `12 x 1.9kg (MG9) + 0 x 5.9kg (MT)`, `3 outlets in use x 3kg` - and the grand total
+- Allowances that are switched **off** are listed too, greyed, with "No" in the "In the total" column. An allowance nobody can see is one nobody can question
+- With sub-screens, a per-screen panel-weight table follows. Panels only: the rigging allowances are worked out across the whole wall, and splitting them per screen would be inventing a number
+
+## Recent Changes In v0.51.0
+
+**Sub-screens on the PDF's Panel Layout pages**
+
+- Both Panel Layout pages now draw each **sub-screen's boundary** the way the workspace does: a dashed box just outside that screen's panels, in the screen's own colour, with its name above it. The key gained a row explaining the mark
+- **Generate PDF** now lists every sub-screen. Untick one and its panels are left off those pages, which are then built around what is left - its own bounding box, its own rulers, its own centre line - exactly as the workspace does when a sub-screen is opened for editing. Panels in no sub-screen are their own entry
+- A page showing only part of the wall says so on its face: *"Showing Main Screen, Side Right only - 38 of 46 panels. The figures below are the whole wall's."*
+- A cable run to a panel the page does not show is left out whole, rather than drawn heading off into white space
+- Everything stays ticked by default, so a report nobody touches is the same report as before
+
+**Metre marks moved out of the way**
+
+- In the Panel Layout and in the PDF, the metre numbers now sit at the **edge of the canvas** rather than tight against the wall. That band belongs to the sub-screen name labels, and the two were landing on top of each other. The grid lines and ticks still line up with the numbers, so nothing is lost by moving them out
+
+**Moving test pattern**
+
+- The **black outline around the wall info text is gone** - at a distance it read as a smear around every letter
+- The info text now lands **on panels**. On a stepped or ring-shaped wall the middle of the bounding box has no LED in it, and the text hung in the air where it could not be read at all; it now moves to the nearest spot that is actually covered
+- **Panel numbers are much bigger on MT.** Their size came from the panel's short side, so a 256 x 64 MT panel carried 6px text - unreadable on the wall it was made for, with the 256px of width beside it unused. The size now has a pixel floor and is capped by what the two-line block can fit, which leaves MG9 close to where it was and roughly triples MT
+
+## Recent Changes In v0.50.0
+
+**Items can be added to the stock list, not just edited**
+
+- A new **Add an item** control under the Stock Calculations table puts any item in the catalogue on this project's list, with whatever quantity you type
+- Added rows are marked **added by hand** on the list and carry a `*` in the PDF, which prints `Put on this list by hand - nothing on this wall asks for it` underneath with the item and quantity - the same treatment an edited quantity gets
+- They go into the CSV, the shortfall list and the Rentman stock check like any other row, and are saved with the project
+- Only the item's **code** is stored, so its name and shelf quantity are read from the catalogue each time the list is built rather than frozen into the project file
+- An item already on the list is not offered, so the same code can never appear twice
+
+**Three items added to the catalogue**
+
+| Code | Item | Stock |
+| --- | --- | --- |
+| `12272` | YES TECH Patch F/M - F/M Signal Cable | 14 |
+| `12274` | YES TECH MT Corner Connecting Bracket | 100 |
+| `12275` | YES TECH MT Corner Connecting Bracket Bolt | 400 |
+
+- These are the items whose codes this catalogue had against its own floor parts until v0.49.1. **Nothing works out a requirement for them** - the deployment-hardware formulas cover MG9 only, and the signal count has its own joiner and joiner cable - so they never appear on a list by themselves. They are in the catalogue so they can be added to one by hand, and so a stock check knows the codes
+- **32A 3Ph PDL Power Adaptor (`6650`) stock is now 10**, so a project needing one no longer reads as a shortfall
+
+## Recent Changes In v0.49.1
+
+**Stock codes corrected**
+
+- **Triangle is `12399`, quarter circle is `12398`** - the opposite way round to what the names suggest, and the opposite way round to what this catalogue had. A stock check on the old codes was returning each other's item
+- Three floor items were on codes that belong to something else entirely. They now read:
+
+| Item | Was | Now |
+| --- | --- | --- |
+| 500mm x 500mm Tempered Glass Floor Cover | `12272` | `12250` |
+| Modular Frame Floor Reinforcement Bar | `12274` | `12251` |
+| Modular Frame Floor Taper Mounting Pin | `12275` | `12252` |
+
+- `12272`, `12274` and `12275` are the **Patch F/M - F/M Signal Cable**, the **MT Corner Connecting Bracket** and its **Bolt** - none of which this app calculates a requirement for, so they are not in the catalogue
+- Their shelf quantities go back to the catalogue's own figures (`384`, `384`, `1,536`): the `14`, `100` and `400` that came back in the stock check were counts of those other three items, not of these
+- If a **Get Current Stock** result was applied before this, its confirmed figures are stored against the old codes and no longer match anything - run the check again to refresh them
+
+## Recent Changes In v0.49.0
+
+**The stock list can be edited by hand**
+
+- Every row of Stock Calculations now has its **quantity in a box you can type in**, and an **X** to take the item off this project's list altogether
+- A **Reset to calculated** button at the top of the card puts every one of them back, and a chip beside it says how many rows are currently set by hand - so a list somebody has been editing can never be mistaken for the tool's own answer
+- An edited row shows the figure the tool worked out beside the new one (`edited - tool says 10`), and the Required / Spares columns still show where that figure came from
+- Removed rows are listed under the table with a **Put back** button, so taking one off is never a one-way door
+- Edits reach **everything**: the CSV, the PDF Stock Summary, the shortfall list. The PDF marks each edited row with `*` and prints, under the table, exactly what was changed and what was taken off - a printed pull sheet never differs silently from what the tool calculated
+- They are saved **with the project** (`formatVersion` 7), because they are decisions about this job. Rentman's confirmed stock figures still live per browser, because those are facts about the warehouse
+
+**Panel text stays on the panel in the workspace too**
+
+- v0.48.0 moved the text inside the shape for the PNG exports and the PDF. The on-screen Panel Layout now uses the **same rule**: the foot of the panel first, because that is the band the cable router keeps clear, and a point inside the silhouette only when that foot is the shape's empty corner
+
+**Stock figures updated**
+
+- Shelf quantities updated from a Rentman stock check: 150 Flat Connector `320`, 180 Connector `80`, Horizontal Connector `1,170`, Dance Floor Feet `576`, Floor Reinforcement Bar `100`, Floor Taper Pin `400`, Tempered Glass Floor Cover `14`, MG9 panels `320`, 15m PowerCON `93`, 15m Signal `57`
+- The distros and the two 15m cables are one stock line each for the business, not one per panel type - they used to read `0` on an MT wall, reporting every cable as a full shortfall
+- Five codes in that check came back under a different name than this catalogue had for them. They were the catalogue's codes that were wrong, and they are corrected in v0.49.1 below
+
+## Recent Changes In v0.48.0
+
+**Row and column numbers a stepped wall can actually use**
+
+- Row and column references are now read off the **wall's own module grid** rather than by grouping panels that happen to line up. A panel dropped half a module out used to be given a row of its own, so a three-high wall counted as five rows and **every number after that panel was wrong**
+- A panel that straddles two rows now says so: **`row 5 & 6`**, the way a crew would say it on site. A panel spanning more than two reads as a range (`3-5`), and every panel that does sit on the grid keeps the number it always had
+- The grid's cell size follows what the wall is mostly built from, so a wall of 1m-wide `MT` panels still numbers them 1, 2, 3 - not 1&2, 3&4
+- The same numbers now appear everywhere they are read: on the panel in the workspace, in the PNG and moving test patterns, on the PDF layout pages, and in the signal/power chain columns (`R1 C1 -> R3 C1`)
+- The reported wall size follows them too - **"Panels: 141 active across 8 rows x 37 columns"** - so the header and the panel labels can no longer disagree, and it matches the Active support span beside it
+
+**Panel text stays on the panel**
+
+- On a **triangle** or **quarter circle**, one corner of the panel's rectangle is empty. The label was drawn there regardless, so in the PNG exports it fell outside the shape - cut off with it, or sitting over the panel next door
+- Shaped panels now place their text **inside the silhouette**, on a point that turns with the panel, so it lands on the lit area at every rotation and in both front and back views
+- In the PDF, the text still starts at the **foot of the panel**, where the cable router already leaves it room; it only moves inward - shrinking to fit first - when the foot of that shape has nothing to sit on, such as a triangle standing on its point
+- Rectangular and corner panels are untouched
+
+## Recent Changes In v0.47.0
+
+**Fixed: the PDF could fail outright**
+
+- The 32A distro adaptor added in v0.46.0 carries a **Greek phi** in its name (`3Φ`). jsPDF's built-in fonts only cover WinAnsi, so that one character made the line print as `3 2 A  3 |  P D L ...` - spaced-out nonsense - and pushed jsPDF onto a wide-encoding path that can fail the whole export
+- Every string in the report now passes through one guard on its way into the document: `3Φ` prints as `3Ph`, arrows and dashes become their ASCII equivalents, and anything left that the font cannot set is dropped rather than corrupting the line it is in. **Nothing had to be remembered at each of the hundred places the report writes text**
+- When a PDF does fail, the message now **names the error** instead of saying "check console" - so the one person who can report the fault has something to report
+
+**Output Canvas in the PDF**
+
+- A new **Output Canvas** page: the **full canvas resolution**, the canvas drawn as a frame with **every screen to scale where it has been placed on it**, and the same figures as a table - canvas X, canvas Y, resolution, right/bottom edge and panel count per screen
+- Each screen is outlined in its own identity colour, the same colour it carries in the workspace
+- Drawn as **outlines on white, no solid fills** - it is a page to print, and a page of solid dark is a page of ink
+- Anything that will not map is called out underneath: a screen hanging off the canvas, a negative position, or two screens sharing pixels
+- Ticked by default in **Generate PDF**, and untickable like every other section
+
+**A key on the Panel Layout pages**
+
+- Both the Back View and Front View pages now carry a **key** in the top-right corner, where the header already left the page empty - so the drawing keeps its full size
+- It covers the signal line, the power line, a run carrying both, the `>` direction mark, the centre line, the signal and power chain-start badges, and how to read `1 > 2`, `P1 (3)` and the `LU/LD/RU/RD` shape codes
+- Drawn from the same colours and the same chevron the layout itself uses, so the key cannot drift from what it is explaining
+
+## Recent Changes In v0.46.0
+
+**Connectors are now worked out from the layout**
+
+- Connector quantities come from the **edges panels actually share**, found from panel positions, so free-form layouts and rotated panels are handled the same as a plain grid. Each shared edge is counted **once**, not once per panel, and an exposed edge - one with nothing on the other side - adds nothing
+- A **horizontal edge** is a horizontal line, so one panel sits on top of the other; a **vertical edge** is a vertical line, so they sit side by side. It is read off the panels' real rotated positions, so **turning a panel turns the edges it joins along** and its connectors change with it
+- Horizontal edges, 3 per edge: corner-to-corner **both flat** takes the *150 Connector*, corner-to-corner **otherwise** the *MG9 Corner Connector*, shape-to-MG9 the *150 Connector*, shape-to-shape the *180 Connector*
+- Vertical edges, 2 per edge: shape-to-MG9 takes the *Horizontal Connector*, shape-to-shape the *150 Connector*
+- Everything not in those rules keeps the behaviour it had: corner-to-plain-MG9 is still 3 × *150 Connector*, and two plain MG9 panels still need nothing
+- Several rules share one stock item, so each item gets **one row** with the rules that asked for it spelled out in its method text - two rows on one code would have read as a duplicate requirement
+
+> **Two codes, not one.** The brief gave both the *150 Connector* and the *MG9 Corner Connector* code **12260**. The catalogue has them as separate items - 12260 for the 150 Connector and **12258** for the MG9 Corner Connector, each with its own shelf quantity - so they are kept apart. Pulling one code for both rules would have ordered the wrong part for half of them.
+
+**MG9 Corner panels can be used flat**
+
+- **MG9 LED Corner Panel (flat)** is a new choice wherever the panel variant is set. It is the **same physical part** - same stock line, same shelf, same spare - laid in flat instead of folded round a corner
+- Drawn without the corner hatch, so which panels are actually turning a corner reads at a glance
+- A corner-to-corner join counts as **flat only when both panels are set flat**; one panel still folded means the corner part is what fits
+
+**Accessories that come with the equipment**
+
+- A **32A distro** brings **1 × 32A 3Φ PDL - 32A 3Φ Ceeform Power Adaptor** (`6650`) per distro
+- A **Modular Frame Bottom Beam 1m** brings **4 × MG9 Vertical Connector** (`12480`) per beam
+- Both move with the equipment they hang off, and both appear in the stock totals and the CSV export like any other line
+
+> Three of the new items - the *180 Connector* (12476), the *Horizontal Connector* (12623), the *MG9 Vertical Connector* (12480) and the *distro adaptor* (6650) - have no shelf quantity in this catalogue yet, so they start at **0** and read as a full shortfall until Rentman fills them in or an override is set.
+
+**PDF labels are easier to read**
+
+- Panel labels, metre markings and the view heading in the PDF's Panel Layout pages now carry a **thin white casing behind the text**. The fill colour is unchanged and the outline is stroked underneath it, so characters stay sharp - it just lifts them off the panel fill and the cabling crossing it
+
+## Recent Changes In v0.45.0
+
+**A cable that doubles back on itself now shows as two cables**
+
+- Where a chain turns back on itself, or a return leg retraces one that went out earlier, the two runs landed on the same lane. That drew as a **single line with two arrows piled on it** - it looked like one cable
+- The second run now **steps clear onto its own lane and keeps its own arrow**, so both read. It keeps its true end points and moves only in between, so it still joins the hops either side of it. The step is always **away** from the panel's text, so it can never cost the clearance the label size is worked out against
+
+**Wall Resolution was under-reporting a stepped layout**
+
+- The wall's **Resolution** was taken from the longest single row of panels. On a stepped or L-shaped wall that is narrower than the wall itself: the 18.5m test layout reported `5880 × 1344` when it stands across all 37 module columns - `6216 × 1344`
+- Resolution, aspect ratio, reduced ratio, recommended content resolution and best standard output are now measured from the wall's **physical footprint** at its finest pixel pitch. **A rectangular wall is unchanged** - the two figures agree exactly there
+- The NovaStar `.uprj` export is deliberately **not** affected: a processor's cabinet topology has no such thing as an empty gap pixel, so it keeps its own packed space (see `canvasModel.ts`)
+
+**Shaped panels name the part they are**
+
+- An `MG12` triangle or `MG13` quarter circle is a one-way piece: where its rotation puts the right-angle corner decides which physical part it is. Each panel now prints that code - **`LU`, `LD`, `RU` or `RD`, read from the front** - next to its shape symbol, instead of a generic "rotated" marker
+- Same four buckets Stock Calculations already counts against the shelf, so the drawing and the stock list name the same thing
+
+## Recent Changes In v0.44.0
+
+**Cabling is far easier to follow on a complicated layout**
+
+- **Signal is always blue and power always orange**, whatever port they belong to. The port is already named by the panel fill and by the numbered badge on the chain's first panel, so one colour per service is worth more than twelve colours per port once a wall gets busy
+- **Where signal and power run between the same two panels, they are now drawn as ONE cable, with ONE arrow** - a blue run with the power orange dashed over it - instead of two lines side by side. On a wall patched with **Match Power To Signal Pattern** that is almost all of the cabling (about nine out of ten hops on the 141-panel test layout), so the drawing has roughly half as many lines on it
+- Where the two genuinely do part company they stay separate, side by side, exactly as before
+- **Signal runs now carry direction arrows too** - the same single outline `>` where the run enters each panel that power already had. One per panel entered, one for a shared run, and never repeated along a run
+- **Runs no longer zigzag.** Each panel now has one anchor point where the two clear bands of the panel meet, so a hop is a straight line between anchors and a chain that turns a corner meets itself exactly, instead of stepping out to a side lane and back on every vertical hop
+- Cable lines are a little finer, and thin down further as you zoom out, so a wall no longer disappears under its own cabling at **Fit to View**
+
+## Recent Changes In v0.43.0
+
+**Signal and power cabling is drawn over the panels, and never over the text**
+
+- Cable runs now sit **in front of the panel graphics** instead of behind them. On a normal wall every panel touches its neighbours, so the old behind-the-panels runs were completely hidden - all you ever saw was an arrowhead on each seam, and those landed straight on top of the panel labels
+- The router keeps every run in the clear lanes a panel actually has: the strip **above the topmost label** for runs travelling left/right, and the **margin beside the centred text** for runs travelling up/down. Signal and power get a lane each, so the two never sit on top of one another either
+- **Signal is a plain line with no arrows at all.** **Power is a plain line with one outline `>`** where it enters each panel - drawn open, never a solid arrowhead, and never repeated along a run
+- Signal runs are drawn in a darker shade of their port colour. A signal run only ever crosses panels filled with its own port colour, so at full strength it was invisible now that it sits on top of them; the hue is unchanged, so a run still reads as that port's cable
+- **The Panel Layout pages of the PDF use exactly the same routing, line weights and `>` marks as the workspace**, so the two finally match
+- The port-number badges and the panel text are painted back over the cabling, so even where a run passes a badge the number stays readable
+
+**Panel text is sized to the panel it is in**
+
+- Panel labels were a fixed size, so they overflowed and overlapped once a panel got small - a zoomed-out workspace, or a narrow LED poster section, where the text was wider than the section itself
+- They now step down to whatever fits the panel clear of the cable lanes, and are dropped entirely below the point where there is nothing readable left to fit. **A full 0.5m panel at 100% zoom or more, and every panel in the PDF, keeps exactly the text size it always had**
+
+**Panel X / Y on hover**
+
+- Hovering a panel in the Panel Layout shows **X** and **Y** for that panel, measured from the **top-left corner of the whole layout**, in mm and in content pixels. Like the row/column reference numbers, the figures come from the layout's true geometry, so Front View doesn't renumber anything
+
+**Stray text gone from the PDF**
+
+- The Panel Layout pages printed a `CX ... CY ...` line inside each panel whenever sub-screens or output-canvas positioning were in use - raw output-canvas coordinates that meant nothing on a cabling drawing. It is gone; the hover readout above is where a panel's position lives now
 
 ## Recent Changes In v0.42.0
 
@@ -566,6 +1492,89 @@ To publish:
 5. Wait for the `Deploy GitHub Pages` workflow to finish.
 
 The site uses a relative Vite base path so it works on repository Pages URLs.
+
+## Test Pattern Generator
+
+Live at `https://underdog1234.github.io/LED-Cabling-Web-App/generator.html`
+(the **Test Pattern Generator** button in the planner opens it). It needs no
+project and no panels: start from a resolution.
+
+**Canvas and sub-screens**
+
+- One main canvas of any whole-pixel size (presets for 1280 x 720, 1920 x 1080,
+  1920 x 1200, 2560 x 1440, 3840 x 2160, 4096 x 2160, their portrait versions and
+  the planner's wide canvases, or anything you type, with an optional aspect
+  lock and your own named presets). Unused canvas is black, or any colour
+- Any number of **sub-screens**, each with its own name, colour, resolution,
+  X/Y, test pattern, pattern settings, overlays and animation offset - so
+  different patterns run side by side. Add, duplicate, delete, rename, hide and
+  lock them; overlap them and set the layer order
+- Drag to move, drag the handles to resize (Shift keeps the ratio), or type
+  exact numbers. Arrow keys nudge the selection (Shift for the bigger step;
+  both steps are settable). Every position and size is a whole pixel
+- Snap to canvas edges, canvas centre, other screens and an optional grid, with
+  guides shown while you drag (hold Alt to place freely)
+- Select several screens (Ctrl/Cmd-click, Shift-click, or drag a box) and
+  align left / centre / right / top / middle / bottom to the canvas, the
+  selection or a reference screen; match a reference's size; distribute evenly
+  (gaps differ by at most one pixel when the space doesn't divide); space them
+  with a fixed gap; or arrange in a row, a column or a grid with pixel gaps
+- The planner's Output Canvas warnings: off-canvas, negative positions,
+  overlaps, and a layout bigger than the canvas
+- Optional LED maths: a calculator for resolution from panel rows, columns and
+  panel pixel size, and a per-screen panel grid that drives the LED Moving
+  Pattern. NovaStar processor input assignment (whole canvas or per screen) is
+  kept too
+- Opened from the planner's **Test Pattern Generator** button, the generator
+  starts on the planner's open project (and **Planner project** brings it in
+  again); **Default project** returns to the four-screen starting setup
+- **Import LED Planner project** opens a saved planner file: its Output Canvas
+  resolution, each sub-screen at its canvas position and footprint resolution,
+  running the planner's own Moving Test Pattern, with its processor inputs
+
+**Patterns**: Screen ID & Resolution, SMPTE and EBU bars, colour checker
+patches, grid / crosshatch, circles with safe areas and aspect frames,
+checkerboard, greyscale steps, gradient ramps, solid fields, colour field
+cycle, moving bar, timecode with sync flash and beep, AV sync flash and beep,
+pixel structure, zone plate, fictional faces (illustrations from a seed,
+across twelve skin tones, each labelled fictional), photo faces (24 portraits
+filling the screen in square cells, grey round the edge, never stretched), the
+LED Moving Pattern, and the planner's own layout pattern for imported screens.
+Animated patterns all loop exactly on the canvas's loop length. Any pattern
+can also scroll (left, right, up, down or diagonally, a whole number of passes
+per loop), and **Auto cycle all patterns** steps every screen through the list.
+Overlays: border, name, resolution, centre crosshair and an analogue clock.
+
+**Sound**: the timecode and AV sync patterns beep with their flashes. The
+editor and the output window each have a Sync beeps switch and an offset in
+milliseconds (the output window starts with it off; press S). Video downloads
+carry the beeps as their soundtrack - in MP4 on the exact flash frames.
+
+**Output and playback**
+
+- Play / pause / restart, a playlist of steps (each step remembers every
+  screen's pattern and settings, for a set number of seconds, looping or not)
+- **Output window** opens the whole canvas or one screen, at native
+  resolution, on the display you choose (same display picker as the planner);
+  it follows the editor live. **Fullscreen** shows it full screen in place.
+  Both report whether the output is really 1:1, with Fit to output and the
+  live-only bouncing logo
+
+**Downloads** - choose before exporting:
+
+- **Entire canvas** at its exact resolution with every visible screen
+- **One sub-screen** at its own resolution - rendered on its own, so a
+  neighbour that overlaps it never appears in the file
+- **Selected sub-screens** as separate files in one ZIP
+
+as a PNG still (at a chosen point in the loop), a WebM loop, or an MP4 loop
+written with the planner's delivery settings. Files are named
+`<screen>_<pattern>_<width>x<height>.<ext>`.
+
+**Saving**: the working setup is autosaved in the browser; named
+configurations can be saved and reloaded there, and any setup saved to or
+opened from a `.testpattern.json` file - every screen's position, resolution,
+pattern, settings, overlays and layer order, the playlist and your presets.
 
 ## Pixel-Accurate Test Pattern
 
