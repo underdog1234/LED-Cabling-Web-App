@@ -26,6 +26,8 @@ import {
   tracePanelShapePath,
 } from "../App";
 import { activeBBox, bandPanels, bandPanelsByColumn, type RectMm } from "../model/panels";
+import { type Obstruction } from "../obstructions/obstructionModel";
+import { drawObstructions } from "../obstructions/drawObstructions";
 
 export type TestPatternProject = {
   projectName: string;
@@ -35,6 +37,8 @@ export type TestPatternProject = {
   panels: Cell[];
   /** The project's sub-screens, so each one can be given its own independently-animating pattern (see TestPatternSurface). Omit for a single-surface wall. */
   subScreens?: Array<{ id: string; name: string; color: string }>;
+  /** Things standing in front of the LED, drawn as opaque blocks over the finished pattern. Omit when there are none. */
+  obstructions?: Obstruction[];
 };
 
 /**
@@ -94,6 +98,8 @@ export type TestPatternLayout = {
   surfaces: TestPatternSurface[];
   rowLabel: (cell: Cell) => number;
   colLabel: (cell: Cell) => string;
+  /** Obstructions over this surface, in workspace mm - converted to pixels at draw time against wallBBox. */
+  obstructions: Obstruction[];
 };
 
 // Pixel rect in canvas/output space (post front-view mirror). Snap both edges
@@ -374,6 +380,7 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     tileWidthPx,
     tileHeightPx,
     surfaces,
+    obstructions: project.obstructions ?? [],
     rowLabel: (cell) => (bandIndexById.get(cell.id) ?? 0) + 1,
     // Column numbers must read from the FRONT (the pattern is always
     // rendered mirrored - see dispRectPx below), not the panel's raw
@@ -838,6 +845,15 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
   drawSurfaceBoundaries(ctx, layout);
   drawAlignmentOverlay(ctx, layout);
   drawInfoText(ctx, layout);
+  // Last, so nothing is drawn over an obstruction - it is opaque precisely
+  // because the LED behind it cannot be seen.
+  drawObstructions(ctx, layout.obstructions, {
+    wallBBoxMm: layout.wallBBox,
+    W: layout.W,
+    H: layout.H,
+    // The pattern is always rendered front view (see dispRectPx).
+    mirror: true,
+  });
 };
 
 // Each sub-screen's own boundary and name, in its own colour - drawn only

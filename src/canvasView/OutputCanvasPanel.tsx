@@ -1,7 +1,15 @@
 import React, { useMemo, useState } from "react";
 import { type RectMm, activeBBox } from "../model/panels";
 import { Button, Card, CardContent, CardHeader, CardTitle, ControlGroup, Input, Select } from "../components/ui";
-import { OUTPUT_CANVAS_PRESETS, type Cell, type SubScreen, PORT_COLORS, cellRect } from "../App";
+import {
+  MIN_CUSTOM_RESOLUTION_PX,
+  OUTPUT_CANVAS_PRESETS,
+  SUB_SCREEN_ASPECT_PRESETS,
+  type Cell,
+  type SubScreen,
+  PORT_COLORS,
+  cellRect,
+} from "../App";
 import { subScreenBBoxOf } from "../subScreens/subScreenModel";
 import { resolutionOf, subScreenResolutionOf } from "./canvasModel";
 import type { ProcessorInput } from "../novastar/processorModels";
@@ -15,6 +23,10 @@ type ScreenEntry = {
   canvasY: number;
   bboxMm: RectMm;
   resolution: { w: number; h: number };
+  /** The size the panels themselves make, regardless of any custom override. */
+  panelResolution: { w: number; h: number };
+  /** True when `resolution` came from a hand-entered custom region, not from the panels. */
+  isCustom: boolean;
 };
 
 type Props = {
@@ -29,6 +41,8 @@ type Props = {
   onToggleSnap: () => void;
   /** id === null updates the whole-layout position. */
   onPositionChange: (id: string | null, x: number, y: number) => void;
+  /** Sets (or clears, with null) a sub-screen's hand-entered content region. Never called for the whole-layout entry. */
+  onCustomResolutionChange: (id: string, resolution: { w: number; h: number } | null) => void;
   /** Available video inputs for the currently-selected NovaStar processor (empty if none selected). */
   processorInputs: ProcessorInput[];
   /** Per-entry input assignment, keyed by sub-screen id or "__whole__" - see keyOf below. Used when inputMode is "perEntry". */
@@ -58,6 +72,7 @@ export default function OutputCanvasPanel({
   snapEnabled,
   onToggleSnap,
   onPositionChange,
+  onCustomResolutionChange,
   processorInputs,
   canvasInputs,
   onInputChange,
@@ -73,16 +88,23 @@ export default function OutputCanvasPanel({
 
   const entries: ScreenEntry[] = useMemo(() => {
     if (subScreens.length) {
-      return subScreens.map((screen) => ({
-        id: screen.id,
-        name: screen.name,
-        canvasX: screen.canvasX,
-        canvasY: screen.canvasY,
-        bboxMm: subScreenBBoxOf(grid, screen.id, cellRect),
-        resolution: subScreenResolutionOf(grid, screen.id),
-      }));
+      return subScreens.map((screen) => {
+        const panelResolution = subScreenResolutionOf(grid, screen.id);
+        const custom = screen.customResolution ?? null;
+        return {
+          id: screen.id,
+          name: screen.name,
+          canvasX: screen.canvasX,
+          canvasY: screen.canvasY,
+          bboxMm: subScreenBBoxOf(grid, screen.id, cellRect),
+          resolution: custom ?? panelResolution,
+          panelResolution,
+          isCustom: custom !== null,
+        };
+      });
     }
     const activePanels = grid.filter((cell) => !cell.isRemoved);
+    const wholeResolution = resolutionOf(activePanels);
     return [
       {
         id: null,
@@ -90,7 +112,9 @@ export default function OutputCanvasPanel({
         canvasX: wholeLayoutCanvasX,
         canvasY: wholeLayoutCanvasY,
         bboxMm: activeBBox(activePanels.map(cellRect)),
-        resolution: resolutionOf(activePanels),
+        resolution: wholeResolution,
+        panelResolution: wholeResolution,
+        isCustom: false,
       },
     ];
   }, [subScreens, grid, wholeLayoutCanvasX, wholeLayoutCanvasY]);
@@ -326,6 +350,79 @@ export default function OutputCanvasPanel({
                 <span className="text-xs text-slate-500">
                   right {entry.canvasX + entry.resolution.w}, bottom {entry.canvasY + entry.resolution.h}
                 </span>
+                {/* Custom content region. Sub-screens only: the whole-layout
+                    entry has no SubScreen record to store it on, and the
+                    content for a whole wall IS the wall. */}
+                {entry.id ? (
+                  <div className="flex w-full flex-wrap items-center gap-2 border-t border-slate-700 pt-2">
+                    <label className="flex items-center gap-1 text-xs text-slate-300">
+                      W px
+                      <Input
+                        className="w-24 bg-white text-black"
+                        type="number"
+                        min={MIN_CUSTOM_RESOLUTION_PX}
+                        value={entry.resolution.w}
+                        onChange={(e) =>
+                          onCustomResolutionChange(entry.id as string, {
+                            w: Math.max(MIN_CUSTOM_RESOLUTION_PX, Number(e.target.value) || MIN_CUSTOM_RESOLUTION_PX),
+                            h: entry.resolution.h,
+                          })
+                        }
+                      />
+                    </label>
+                    <label className="flex items-center gap-1 text-xs text-slate-300">
+                      H px
+                      <Input
+                        className="w-24 bg-white text-black"
+                        type="number"
+                        min={MIN_CUSTOM_RESOLUTION_PX}
+                        value={entry.resolution.h}
+                        onChange={(e) =>
+                          onCustomResolutionChange(entry.id as string, {
+                            w: entry.resolution.w,
+                            h: Math.max(MIN_CUSTOM_RESOLUTION_PX, Number(e.target.value) || MIN_CUSTOM_RESOLUTION_PX),
+                          })
+                        }
+                      />
+                    </label>
+                    {/* Presets keep the current WIDTH and solve for height, so
+                        picking a ratio reshapes the region instead of resizing
+                        it to some arbitrary new width. */}
+                    {SUB_SCREEN_ASPECT_PRESETS.map((preset) => (
+                      <Button
+                        key={preset.label}
+                        intent="ghost"
+                        size="sm"
+                        title={`Keep the current width and set the height to ${preset.label}`}
+                        onClick={() =>
+                          onCustomResolutionChange(entry.id as string, {
+                            w: entry.resolution.w,
+                            h: Math.max(MIN_CUSTOM_RESOLUTION_PX, Math.round((entry.resolution.w * preset.h) / preset.w)),
+                          })
+                        }
+                      >
+                        {preset.label}
+                      </Button>
+                    ))}
+                    {entry.isCustom ? (
+                      <>
+                        <span className="text-xs text-amber-300">
+                          Custom region - panels make {entry.panelResolution.w} × {entry.panelResolution.h}
+                        </span>
+                        <Button
+                          intent="secondary"
+                          size="sm"
+                          title="Go back to the size the physical panels make"
+                          onClick={() => onCustomResolutionChange(entry.id as string, null)}
+                        >
+                          Match panels
+                        </Button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-slate-500">Matches the panels. Type a size or pick a ratio to set a custom region.</span>
+                    )}
+                  </div>
+                ) : null}
                 <div className="flex flex-wrap gap-1">
                   <Button intent="ghost" size="sm" onClick={() => onPositionChange(entry.id, 0, entry.canvasY)}>⇤ Left</Button>
                   <Button intent="ghost" size="sm" onClick={() => onPositionChange(entry.id, outputCanvasW - entry.resolution.w, entry.canvasY)}>Right ⇥</Button>

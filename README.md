@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.42.0`
+Version `0.43.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -21,6 +21,31 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - Save and reopen settings as JSON (v5 format adds NovaStar processor/input selection; v3 sub-screens and output-canvas positioning, v2 free-panel and legacy grid formats still open)
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range, and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.43.0
+
+**Obstructions**
+
+- A new **Obstructions** panel: add as many as you like, each with a name and its size in **metres** (speaker stacks, truss legs, pillars - anything standing in front of the LED)
+- **Drag them around the Panel Layout** to position them. Deliberately free movement: no panel-grid or edge snapping, because a PA stack does not line up with a 500mm module and pretending it does would put it in the wrong place on the map someone works from
+- They appear on **every test pattern** - the static PNGs, the live Moving Test Pattern and the recorded video - and on the Basic LED Map, drawn as **opaque** blocks (the LED behind them genuinely cannot be seen) labelled with the name and the size in **both pixels and metres**
+- Each surface converts the obstruction into its own pixel space, so a sub-screen's own test pattern shows it in the right place at that screen's resolution. An obstruction that misses a surface entirely is left off it rather than clamped to its edge
+- Obstructions **never** touch panel counts, power, weight, patching or resolution. They are saved with the project and sit on the same undo stack as everything else
+
+**Custom sub-screen sizes**
+
+- A sub-screen's **content region can now be typed in directly, in pixels**, instead of always being derived from its panels - so a sub-screen can be a different size and shape from the LED it lands on
+- **Aspect presets: 16:9, 16:10, 4:3 and 1:1.** Each keeps the current width and solves for the height, so picking a ratio reshapes the region rather than resizing it to some arbitrary new width
+- **Match panels** puts it back to the size the physical panels make. Sub-screens with no custom region behave exactly as before
+- Positioning was already free of the panels (X/Y in canvas pixels, with snapping only to other screens' edges and a toggle to turn even that off) - the out-of-canvas and overlap warnings now check the custom region too
+- The **NovaStar export is deliberately unaffected**: it keeps reading real cabinet topology from the panels themselves, because a processor config built from a hand-typed content size would not match the hardware
+
+**Basic LED Map PNG**
+
+- A new **Basic LED Map** export button next to Test Pattern: a plain picture of the finished surface at its content resolution, with no patching, numbering or test pattern on it - the thing you hand to whoever is making the content
+- Shows the **whole screen including every separate piece**, with real gaps left as gaps, and can outline and label each piece with its pixel size
+- Fill it with a **solid colour** or an **uploaded image stretched across the full surface**, so each piece shows the part of the picture it will actually receive
+- **Obstructions are drawn over it** and labelled in pixels and metres, so it is immediately clear what the content loses to them
 
 ## Recent Changes In v0.42.0
 

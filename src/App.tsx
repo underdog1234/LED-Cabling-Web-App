@@ -11,6 +11,7 @@ import {
   bandPanels,
   bandPanelsByColumn,
   computeAnchorSnapDelta,
+  connectedGroups,
   connectedGroupsByGeom,
   findOverlaps,
   joinedGroupIdsByGeom,
@@ -20,6 +21,15 @@ import {
 } from "./model/panels";
 import { parseYesTechLayout, type ImportResult } from "./import/yesTechLayout";
 import SubScreenPanel from "./subScreens/SubScreenPanel";
+import ObstructionsPanel from "./obstructions/ObstructionsPanel";
+import {
+  type Obstruction,
+  makeObstruction,
+  normalizeObstructions,
+  obstructionMetresLabel,
+} from "./obstructions/obstructionModel";
+import { renderBasicLedMap } from "./exports/basicLedMap";
+import { drawObstructions } from "./obstructions/drawObstructions";
 import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
 import { finalCanvasPositionOf, subScreenResolutionOf } from "./canvasView/canvasModel";
@@ -41,6 +51,7 @@ import {
 } from "./rentman/rentmanClient";
 import StockComparisonModal from "./rentman/StockComparisonModal";
 import ExportSectionsModal, { type ExportSection } from "./exports/ExportSectionsModal";
+import BasicLedMapModal, { type BasicLedMapSettings } from "./exports/BasicLedMapModal";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -54,7 +65,7 @@ const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.42.0";
+const APP_VERSION = "0.43.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -368,6 +379,43 @@ export type SubScreen = {
    * normalizeSubScreens fills those in from SUB_SCREEN_COLORS by position.
    */
   color: string;
+  /**
+   * Optional CONTENT region, in pixels, entered by hand instead of being
+   * derived from the member panels.
+   *
+   * The physical panels are unchanged by this - it is the canvas the content
+   * is authored and positioned at, which often is not the same shape as the
+   * LED (a 16:9 feed landing on a 2:1 wall, say). Deliberately NOT used by
+   * the NovaStar export, which must keep reading real cabinet topology from
+   * the panels themselves (see exportBuilder's resolutionOf) or it would
+   * write a processor config that does not match the hardware.
+   *
+   * null / absent = derive from the panels, which is what every project did
+   * before this existed.
+   */
+  customResolution?: { w: number; h: number } | null;
+};
+
+/** Aspect-ratio presets for a custom sub-screen region - the shapes content actually arrives in. */
+export const SUB_SCREEN_ASPECT_PRESETS: Array<{ label: string; w: number; h: number }> = [
+  { label: "16:9", w: 16, h: 9 },
+  { label: "16:10", w: 16, h: 10 },
+  { label: "4:3", w: 4, h: 3 },
+  { label: "1:1", w: 1, h: 1 },
+];
+
+/** Smallest custom region we accept, in pixels. */
+export const MIN_CUSTOM_RESOLUTION_PX = 16;
+
+/** Reads a stored custom resolution, rejecting anything unusable. */
+export const normalizeCustomResolution = (raw: unknown): { w: number; h: number } | null => {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { w?: unknown; h?: unknown };
+  const w = Math.round(Number(r.w));
+  const h = Math.round(Number(r.h));
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+  if (w < MIN_CUSTOM_RESOLUTION_PX || h < MIN_CUSTOM_RESOLUTION_PX) return null;
+  return { w, h };
 };
 
 // Default sub-screen identity colours, handed out in order as screens are
@@ -407,6 +455,8 @@ type LayoutSnapshot = {
   outputCanvasH: number;
   wholeLayoutCanvasX: number;
   wholeLayoutCanvasY: number;
+  /** Obstructions ride the same single undo stack as panels and sub-screens. */
+  obstructions: Obstruction[];
 };
 
 // Hand-off payload from the standalone Quick Panel Layout tab (see
@@ -493,6 +543,8 @@ type OpenJsonPayload = {
   };
   /** v3: named sub-screen groupings. */
   subScreens?: SubScreen[];
+  /** v7: physical things in front of the LED - see obstructionModel.ts. */
+  obstructions?: unknown;
   /** v3: output-canvas resolution. */
   outputCanvas?: { w?: number; h?: number };
   /** v3: whole-layout canvas position, used only when subScreens is empty. */
@@ -756,6 +808,9 @@ export const normalizeSubScreens = (raw: unknown): SubScreen[] => {
       canvasY: Number.isFinite(Number(entry.canvasY)) ? Number(entry.canvasY) : 0,
       createdAt: Number.isFinite(Number(entry.createdAt)) ? Number(entry.createdAt) : index,
       color: normalizeSubScreenColor(entry.color, index),
+      // v7: absent on every project saved before custom regions existed,
+      // which normalizes to null = derive from the panels, as before.
+      customResolution: normalizeCustomResolution(entry.customResolution),
     });
   });
   return subScreens;
@@ -1792,6 +1847,11 @@ export default function App() {
   // on a wall with several screens they add a lot of ink, and the whole-wall
   // centre is what most rigs are set out from.
   const [showSubScreenCentreLines, setShowSubScreenCentreLines] = useState(false);
+  // Physical things in front of the LED. Kept entirely separate from `grid`:
+  // they are not panels and must never reach a panel count, a power or weight
+  // total, patching or a resolution - only the pictures of the wall.
+  const [obstructions, setObstructions] = useState<Obstruction[]>([]);
+  const [obstructionDrag, setObstructionDrag] = useState<{ id: string; startX: number; startY: number; dx: number; dy: number } | null>(null);
   const [clipboard, setClipboard] = useState<ClipboardSelection | null>(null);
   const [isPasting, setIsPasting] = useState(false);
   const [pasteAnchor, setPasteAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -1870,6 +1930,7 @@ export default function App() {
   // null = closed (see ExportSectionsModal).
   const [pdfSectionPicker, setPdfSectionPicker] = useState<ExportSection[] | null>(null);
   const [testPatternPicker, setTestPatternPicker] = useState<ExportSection[] | null>(null);
+  const [showBasicLedMap, setShowBasicLedMap] = useState(false);
   // Surface picker for the Moving Test Pattern. Single-choice, because both
   // destinations can only carry one surface: the live view fills one display,
   // and the video is one file. `next` is what to do once a surface is picked -
@@ -1964,6 +2025,7 @@ export default function App() {
     outputCanvasH,
     wholeLayoutCanvasX,
     wholeLayoutCanvasY,
+    obstructions: obstructions.map((o) => ({ ...o })),
   });
   const restoreLayout = (snapshot: LayoutSnapshot) => {
     setGrid(cloneGrid(snapshot.panels));
@@ -1972,6 +2034,10 @@ export default function App() {
     setOutputCanvasH(snapshot.outputCanvasH);
     setWholeLayoutCanvasX(snapshot.wholeLayoutCanvasX);
     setWholeLayoutCanvasY(snapshot.wholeLayoutCanvasY);
+    // Older snapshots (captured before obstructions existed) have no list;
+    // treat that as "none" rather than leaving the current ones behind, which
+    // would make undo silently skip an obstruction edit.
+    setObstructions((snapshot.obstructions ?? []).map((o) => ({ ...o })));
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
@@ -1979,6 +2045,7 @@ export default function App() {
     setIsSelectingPanels(false);
     setMoveDrag(null);
     setCanvasDrag(null);
+    setObstructionDrag(null);
   };
   const pushUndoSnapshot = (snapshot = captureLayout()) => {
     setUndoStack((prev) => [...prev.slice(-49), snapshot]);
@@ -3504,16 +3571,17 @@ export default function App() {
 
 const exportJson = () => {
   try {
-    // formatVersion 6: adds the Rentman availability date range (v1-v5
-    // files still open, see openJson - the number bump itself is purely
-    // documentation, there's no branching logic tied to it anywhere).
+    // formatVersion 7: adds obstructions and per-sub-screen custom
+    // resolutions (v1-v6 files still open, see openJson - the number bump
+    // itself is purely documentation, there's no branching logic tied to it
+    // anywhere).
     // stockRows here is always the plain catalog-based numbers (this file
     // snapshots the theoretical required/spare/rounded math, not a live
     // Rentman read that would just go stale the moment the file is
     // reopened) - the equipment mapping that drives live data is account-
     // wide and lives in localStorage instead, not in this per-project file.
     const payload = {
-      formatVersion: 6,
+      formatVersion: 7,
       appVersion: APP_VERSION,
       projectName: safeProjectName,
       surfaceName,
@@ -3527,6 +3595,8 @@ const exportJson = () => {
       patching: { signalPortsUsed, powerPortsUsed },
       stockRows,
       subScreens,
+      // formatVersion 7: obstructions.
+      obstructions,
       outputCanvas: { w: outputCanvasW, h: outputCanvasH },
       wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
       processorModel,
@@ -3643,6 +3713,9 @@ const exportJson = () => {
       panelType,
       panels: surface.panels,
       subScreens: isFullCanvas ? testPatternSubScreens : testPatternSubScreens.filter((s) => s.id === surface.key),
+      // The same obstruction list goes to every surface; each one converts it
+      // into its own pixel space and skips any that miss it entirely.
+      obstructions,
     };
   };
 
@@ -3673,6 +3746,8 @@ const exportJson = () => {
       if (!ctx) throw new Error("Canvas context unavailable");
       ctx.imageSmoothingEnabled = false;
       ctx.scale(1, layout.contentPixelH / H);
+      // Obstructions are drawn at the very end of this function, after every
+      // panel and label, because they are opaque by definition.
 
       ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, W, H);
@@ -3734,7 +3809,58 @@ const exportJson = () => {
         ctx.fillText(label, W / 2, borderPx + padPx);
       }
 
+      // Opaque, so last - after every panel, label and border.
+      drawObstructions(ctx, obstructions, { wallBBoxMm: layout.wallBBox, W, H, mirror: true });
+
       return canvas;
+  };
+
+  // --- Basic LED Map --------------------------------------------------------
+  // One PNG of the WHOLE surface (not one per sub-screen): the point is to
+  // see the complete shape, including every separate piece and what the
+  // obstructions take out of it, in the space the content is authored in.
+  const openBasicLedMap = () => {
+    if (!grid.some((cell) => isActiveCell(cell))) {
+      alert("No active panels to map.");
+      return;
+    }
+    setShowBasicLedMap(true);
+  };
+
+  const basicLedMapSummary = (): string => {
+    const panels = grid.filter((cell) => isActiveCell(cell));
+    const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName, panelType, panels });
+    const pieces = new Set(connectedGroups(panels, cellRect).values()).size;
+    const obstructionPart = obstructions.length
+      ? `${obstructions.length} obstruction${obstructions.length === 1 ? "" : "s"} drawn over it`
+      : "no obstructions added yet";
+    return `${layout.contentPixelW} × ${layout.contentPixelH} px · ${panels.length} panels in ${pieces} separate piece${pieces === 1 ? "" : "s"} · ${obstructionPart}.`;
+  };
+
+  const exportBasicLedMap = (settings: BasicLedMapSettings) => {
+    try {
+      const panels = grid.filter((cell) => isActiveCell(cell));
+      if (!panels.length) return;
+      const canvas = renderBasicLedMap({
+        projectName: safeProjectName,
+        surfaceName,
+        panels,
+        panelType,
+        obstructions,
+        backgroundColor: settings.backgroundColor,
+        backgroundImage: settings.backgroundImage,
+        showPieceOutlines: settings.showPieceOutlines,
+      });
+      const link = document.createElement("a");
+      link.href = canvas.toDataURL("image/png");
+      link.setAttribute("download", `${fileSafeProjectName}-${fileSafePanelType}-Basic-LED-Map.png`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (err) {
+      console.error("Basic LED Map failed", err);
+      alert("Basic LED Map failed - check console");
+    }
   };
 
   const exportTestPatternPngs = (selectedKeys: Set<string>) => {
@@ -4005,6 +4131,8 @@ const exportJson = () => {
         // no date range set (Rentman availability just stays off).
         setProjectDateFrom(typeof data.rentmanDateFrom === "string" ? data.rentmanDateFrom : "");
         setProjectDateTo(typeof data.rentmanDateTo === "string" ? data.rentmanDateTo : "");
+        // formatVersion 7: older projects have no obstructions at all.
+        setObstructions(normalizeObstructions(data.obstructions));
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -4813,6 +4941,14 @@ const exportJson = () => {
   };
 
   const onWorkspaceMouseMove = (event: React.MouseEvent) => {
+    if (obstructionDrag) {
+      const mm = eventToDisplayMm(event);
+      if (!mm) return;
+      setObstructionDrag((prev) =>
+        prev ? { ...prev, dx: mm.x - prev.startX, dy: mm.y - prev.startY } : prev,
+      );
+      return;
+    }
     if (moveDrag) {
       const mm = eventToDisplayMm(event);
       if (!mm) return;
@@ -4884,10 +5020,45 @@ const exportJson = () => {
 
   const onWorkspaceMouseUp = () => {
     if (moveDrag) commitMoveDrag();
+    if (obstructionDrag) commitObstructionDrag();
     setSnapGuide(null);
     setIsSelectingPanels(false);
     setSelectionStart(null);
     setSelectionEnd(null);
+  };
+
+  // --- Obstruction dragging -------------------------------------------------
+  // Deliberately free: no grid snap and no edge snap. An obstruction is a real
+  // object standing wherever it stands - a speaker stack does not line up with
+  // a 500mm panel module, and pretending it does would put it in the wrong
+  // place on the map someone works from.
+  const onObstructionMouseDown = (obstruction: Obstruction, event: React.MouseEvent) => {
+    event.stopPropagation();
+    const mm = eventToDisplayMm(event);
+    if (!mm) return;
+    setObstructionDrag({ id: obstruction.id, startX: mm.x, startY: mm.y, dx: 0, dy: 0 });
+  };
+
+  const commitObstructionDrag = () => {
+    const drag = obstructionDrag;
+    setObstructionDrag(null);
+    if (!drag) return;
+    if (Math.abs(drag.dx) < 1 && Math.abs(drag.dy) < 1) return;
+    // A flipped (front) view shows everything mirrored, so dragging right on
+    // screen has to move the obstruction LEFT in workspace mm, or it would
+    // run away from the cursor.
+    const dx = isFlippedView ? -drag.dx : drag.dx;
+    commitObstructionsUpdate((prev) =>
+      prev.map((o) => (o.id === drag.id ? { ...o, xMm: o.xMm + dx, yMm: o.yMm + drag.dy } : o)),
+    );
+  };
+
+  /** Workspace-mm rect of an obstruction, including any in-progress drag, in DISPLAY space. */
+  const obstructionDisplayRect = (obstruction: Obstruction): RectMm => {
+    const base: RectMm = { x: obstruction.xMm, y: obstruction.yMm, w: obstruction.wMm, h: obstruction.hMm };
+    const display = isFlippedView ? mirrorRectX(base, wallBBox) : base;
+    if (obstructionDrag?.id !== obstruction.id) return display;
+    return { ...display, x: display.x + obstructionDrag.dx, y: display.y + obstructionDrag.dy };
   };
 
   // --- Copy / paste ---------------------------------------------------------
@@ -5430,6 +5601,30 @@ const exportJson = () => {
     setSelectedCells(new Set());
   };
 
+  // Obstruction CRUD routes through the same single undo stack as panel and
+  // sub-screen edits (see commitSubScreensUpdate's comment).
+  const commitObstructionsUpdate = (updater: (prev: Obstruction[]) => Obstruction[]) => {
+    const snapshot = captureLayout();
+    setObstructions((prev) => updater(prev));
+    pushUndoSnapshot(snapshot);
+  };
+  const addObstruction = (name: string) => {
+    // Drop it in the middle of the wall, where it is immediately visible and
+    // can be dragged from - off in a corner it reads as a rendering glitch.
+    const wMm = Math.max(500, Math.min(2000, wallBBox.w / 4 || 1000));
+    const hMm = Math.max(500, Math.min(2000, wallBBox.h / 4 || 1000));
+    commitObstructionsUpdate((prev) => [
+      ...prev,
+      makeObstruction(name, wallBBox.x + wallBBox.w / 2 - wMm / 2, wallBBox.y + wallBBox.h / 2 - hMm / 2, wMm, hMm),
+    ]);
+  };
+  const updateObstruction = (id: string, patch: Partial<Obstruction>) => {
+    commitObstructionsUpdate((prev) => prev.map((o) => (o.id === id ? { ...o, ...patch } : o)));
+  };
+  const deleteObstruction = (id: string) => {
+    commitObstructionsUpdate((prev) => prev.filter((o) => o.id !== id));
+  };
+
   const createSubScreen = (name: string) => {
     const snapshot = captureLayout();
     const screen = makeSubScreen(name, Date.now() + subScreens.length, subScreens.length);
@@ -5440,6 +5635,15 @@ const exportJson = () => {
     // panels and dim/lock everything else, which looks like the whole
     // layout vanished. The user assigns panels to it first, then switches in.
     pushUndoSnapshot(snapshot);
+  };
+
+  // A hand-entered content region for one sub-screen. null clears it, going
+  // back to deriving the size from the panels. Routed through the shared
+  // sub-screen commit so it lands on the same undo stack as everything else.
+  const updateSubScreenCustomResolution = (id: string, resolution: { w: number; h: number } | null) => {
+    commitSubScreensUpdate((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, customResolution: resolution ? normalizeCustomResolution(resolution) : null } : s)),
+    );
   };
 
   const renameSubScreen = (id: string, name: string) => {
@@ -5807,6 +6011,9 @@ const exportJson = () => {
               </Button>
               <Button intent="primary" onClick={() => setTestPatternPicker(testPatternSectionOptions())}>
                 <ImageDown className="h-4 w-4" />Test Pattern
+              </Button>
+              <Button intent="primary" onClick={openBasicLedMap}>
+                <ImageDown className="h-4 w-4" />Basic LED Map
               </Button>
               <Button intent="primary" onClick={() => startMovingPattern("open")}>
                 <Video className="h-4 w-4" />Moving Test Pattern
@@ -6217,6 +6424,13 @@ const exportJson = () => {
             onRecolor={recolorSubScreen}
             onDelete={deleteSubScreen}
             onSelectAllInSubScreen={selectAllInSubScreen}
+          />
+
+          <ObstructionsPanel
+            obstructions={obstructions}
+            onAdd={addObstruction}
+            onChange={updateObstruction}
+            onDelete={deleteObstruction}
           />
           </div>
         </div>
@@ -6805,6 +7019,37 @@ const exportJson = () => {
                   );
                 })}
 
+                {/* Obstructions sit above everything (z-[40]) and are opaque, because
+                    that is exactly what they are: something physically in front of the
+                    LED. Dragged freely - no panel-grid or edge snapping (see
+                    commitObstructionDrag) - since a real object stands where it stands. */}
+                {obstructions.map((obstruction) => {
+                  const r = rectToPx(obstructionDisplayRect(obstruction));
+                  const isDragging = obstructionDrag?.id === obstruction.id;
+                  return (
+                    <div
+                      key={obstruction.id}
+                      onMouseDown={(event) => onObstructionMouseDown(obstruction, event)}
+                      title={`${obstruction.name} - ${obstructionMetresLabel(obstruction)}. Drag to reposition.`}
+                      style={{
+                        position: "absolute",
+                        left: r.x,
+                        top: r.y,
+                        width: Math.max(2, r.w),
+                        height: Math.max(2, r.h),
+                        zIndex: 40,
+                        background: "repeating-linear-gradient(135deg, #0f172a 0 10px, #1e293b 10px 20px)",
+                        border: `2px solid ${isDragging ? "#fbbf24" : "#f43f5e"}`,
+                        boxShadow: isDragging ? "0 0 0 2px rgba(251,191,36,0.4)" : undefined,
+                      }}
+                      className="flex cursor-move select-none flex-col items-center justify-center gap-0.5 overflow-hidden p-1 text-center text-[10px] font-semibold leading-tight text-white"
+                    >
+                      <div className="truncate max-w-full">{obstruction.name}</div>
+                      <div className="text-[9px] font-normal text-rose-200">{obstructionMetresLabel(obstruction)}</div>
+                    </div>
+                  );
+                })}
+
                 {/* Cable ARROWHEADS sit in front of the panels (z-[35]) so the signal /
                     power direction stays visible even over a selected panel. */}
                 <svg className="pointer-events-none absolute inset-0 z-[35]" width={svgW} height={svgH}>
@@ -7072,6 +7317,7 @@ const exportJson = () => {
           snapEnabled={canvasSnapEnabled}
           onToggleSnap={() => setCanvasSnapEnabled((prev) => !prev)}
           onPositionChange={updateCanvasPosition}
+          onCustomResolutionChange={updateSubScreenCustomResolution}
           processorInputs={processorModel ? PROCESSOR_SPECS[processorModel].inputs : []}
           canvasInputs={canvasInputs}
           onInputChange={updateCanvasInput}
@@ -7116,6 +7362,16 @@ const exportJson = () => {
               }
               setMovingPatternSurfaceKey(key);
               setShowDownloadFormatModal(true);
+            }}
+          />
+        ) : null}
+        {showBasicLedMap ? (
+          <BasicLedMapModal
+            summary={basicLedMapSummary()}
+            onClose={() => setShowBasicLedMap(false)}
+            onConfirm={(settings) => {
+              setShowBasicLedMap(false);
+              exportBasicLedMap(settings);
             }}
           />
         ) : null}
