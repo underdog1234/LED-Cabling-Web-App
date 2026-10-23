@@ -25,6 +25,8 @@ export type BasicLedMapOptions = {
   panels: Cell[];
   panelType: TestPatternProject["panelType"];
   obstructions: Obstruction[];
+  /** The whole layout's bbox in mm, which obstruction offsets are measured against. */
+  obstructionLayoutBBoxMm?: { x: number; y: number; w: number; h: number };
   /** Flat fill behind the LED shape. Used on its own, or as the backdrop while an image loads. */
   backgroundColor: string;
   /** Optional artwork, stretched to cover the FULL surface (not per piece, not per panel). */
@@ -160,6 +162,7 @@ export const renderBasicLedMap = (options: BasicLedMapOptions): HTMLCanvasElemen
     W,
     H,
     mirror: true,
+    layoutBBoxMm: options.obstructionLayoutBBoxMm ?? layout.wallBBox,
   });
 
   return canvas;

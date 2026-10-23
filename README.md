@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.72.0`
+Version `0.73.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -33,6 +33,42 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.73.0
+
+**Obstructions**
+
+- Now drawn on the **moving test pattern** (live and recorded) and **in the PDF report's layout pages** as well as the static PNGs and the Basic LED Map - the PDF is what goes to site, so leaving them off it is where a surprise comes from
+- **Semi-transparent everywhere**, including on the Panel Layout: the panels, their numbering and any cable run underneath stay readable, so you can see what an obstruction is actually covering. The border and the label stay solid so it is never mistaken for a tint on the picture
+- New **Show obstructions** tick-box under Overlays & displays, governing the layout, the PDF, the test patterns and the Basic LED Map in one place. Unticking only hides them - nothing is deleted
+- **X 0, Y 0 now means centred on the wall with the bottom edge level with the bottom of the layout** - a stack on the floor in the middle of the screen, which is where you usually start. X and Y are offsets from there (right and down positive), measured against the wall, so adding panels no longer strands an obstruction where the wall used to be. Projects saved before this are converted on opening, so their obstructions stay exactly where they were
+
+**Auto-patching**
+
+- The path preview is **off by default**, **turns itself on whenever a patching option changes** (direction, start-from-bottom, snake, per-sub-screen) so you can see what the change did, and **turns itself off once Auto Snake has run** - a path drawn over a finished patch just hides the patch
+- The direction list no longer carries the same walks twice. **Left to Right, Right to Left, Columns, Loop together, Letter patching**, plus a separate **Start from bottom** tick-box
+- **Start from bottom is set from the deployment type**: ground-supported and floor-stacked walls start at the bottom, flown walls at the top - the end the wall is actually built from. Freely changeable afterwards
+- While previewing, a second chip shows the **maximum panels per port (or outlet) and how many ports the walk needs** - the drawn path never said where a run would be forced to break
+
+**Interface**
+
+- **Auto patching and Patch mode moved down into the Panel Layout panel**, so the tools and the canvas they act on are on screen together instead of a scroll apart - the path preview is drawn on that canvas
+- **All the layout buttons and selection controls now sit under the layout**, where they are read after looking at the wall rather than before it
+- **Full browser width**: the fixed 1900px column left wide screens with a margin either side while the wall itself was still scrolling. Page padding reduced too
+- **Wall Summary tightened up** - it is read at a glance, and every row of height it took was a row the layout canvas did not get
+
+**Fit to View**
+
+- Now includes **everything on the canvas**, not just the axis-aligned box of the panels: a panel rotated off a right angle sticks out past that box, and an obstruction can stand clear of the wall entirely. Both were outside the scrollable area - unreachable, and missed by Fit to View
+
+**Exports**
+
+- **Test Pattern and Basic LED Map are now one Static Download button**, which asks which you want and then goes on to that output's own options
+- **Moving Test Pattern and Download Moving Test Pattern are now one Moving Test Pattern button**, which asks **View in Browser** or **Download**
+
+**Keyboard**
+
+- **Ctrl+C / Ctrl+V** copy and paste the selected panels (paste then follows the cursor; click to place). These stand aside while text is highlighted, so copying a figure out of the tool still copies the text
 
 ## Recent Changes In v0.72.0
 

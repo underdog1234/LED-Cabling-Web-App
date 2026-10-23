@@ -12,7 +12,22 @@
 export type Obstruction = {
   id: string;
   name: string;
-  /** Workspace mm, top-left origin - the same space as Cell.x / Cell.y. */
+  /**
+   * Position in mm, measured as an OFFSET FROM THE LAYOUT, not as an absolute
+   * workspace coordinate: 0, 0 puts the obstruction horizontally centred on
+   * the wall with its bottom edge level with the wall's bottom edge - a
+   * speaker stack on the floor in the middle of the screen, which is where
+   * one usually starts.
+   *
+   * It is relative because the wall moves. A panel added on the left shifts
+   * every absolute coordinate in the layout; an obstruction standing in front
+   * of the middle of the screen should still be in front of the middle of the
+   * screen afterwards. Converted to absolute mm at the point of use by
+   * obstructionRect (see below).
+   *
+   * xMm runs right-positive, yMm runs down-positive, matching Cell.x / Cell.y
+   * and every other measurement in the app.
+   */
   xMm: number;
   yMm: number;
   wMm: number;
@@ -46,6 +61,52 @@ export const makeObstruction = (
   wMm: Math.max(MIN_OBSTRUCTION_MM, wMm),
   hMm: Math.max(MIN_OBSTRUCTION_MM, hMm),
 });
+
+/**
+ * Where an obstruction actually sits, in absolute workspace mm.
+ *
+ * The anchor is the BOTTOM CENTRE of the layout: x 0 centres it on the wall,
+ * y 0 stands it on the wall's bottom edge. Everything that draws or hit-tests
+ * an obstruction goes through here, so the stored offset only ever has one
+ * meaning.
+ */
+export const obstructionRect = (
+  obstruction: Obstruction,
+  layoutBBoxMm: { x: number; y: number; w: number; h: number },
+): { x: number; y: number; w: number; h: number } => ({
+  x: layoutBBoxMm.x + layoutBBoxMm.w / 2 - obstruction.wMm / 2 + obstruction.xMm,
+  y: layoutBBoxMm.y + layoutBBoxMm.h - obstruction.hMm + obstruction.yMm,
+  w: obstruction.wMm,
+  h: obstruction.hMm,
+});
+
+/**
+ * The offset that would put an obstruction at a given absolute position -
+ * the inverse of obstructionRect, used when a drag finishes.
+ */
+export const obstructionOffsetFor = (
+  absolute: { x: number; y: number },
+  size: { wMm: number; hMm: number },
+  layoutBBoxMm: { x: number; y: number; w: number; h: number },
+): { xMm: number; yMm: number } => ({
+  xMm: absolute.x - (layoutBBoxMm.x + layoutBBoxMm.w / 2 - size.wMm / 2),
+  yMm: absolute.y - (layoutBBoxMm.y + layoutBBoxMm.h - size.hMm),
+});
+
+/**
+ * Converts obstructions saved BEFORE the offsets became relative (project
+ * files up to formatVersion 7, where x/y were absolute workspace mm) into the
+ * relative form. Without this an old file's obstructions would jump, because
+ * the same numbers now mean something else.
+ */
+export const migrateAbsoluteObstructions = (
+  obstructions: Obstruction[],
+  layoutBBoxMm: { x: number; y: number; w: number; h: number },
+): Obstruction[] =>
+  obstructions.map((obstruction) => ({
+    ...obstruction,
+    ...obstructionOffsetFor({ x: obstruction.xMm, y: obstruction.yMm }, obstruction, layoutBBoxMm),
+  }));
 
 const finiteOr = (raw: unknown, fallback: number): number => {
   const n = typeof raw === "string" ? Number.parseFloat(raw) : raw;
@@ -94,14 +155,24 @@ export const obstructionPixelRect = (
   wallBBoxMm: { x: number; y: number; w: number; h: number },
   W: number,
   H: number,
+  /**
+   * The layout the obstruction's offset is measured against - the WHOLE wall.
+   * It is a separate argument from wallBBoxMm because a sub-screen renders at
+   * its own bbox and resolution, but an obstruction is still positioned
+   * against the whole layout: it does not move because you opened one screen.
+   * Defaults to the surface itself, which is the whole wall in the common
+   * single-surface case.
+   */
+  layoutBBoxMm: { x: number; y: number; w: number; h: number } = wallBBoxMm,
 ): { x: number; y: number; w: number; h: number } => {
   const pxPerMmX = wallBBoxMm.w > 0 ? W / wallBBoxMm.w : 0;
   const pxPerMmY = wallBBoxMm.h > 0 ? H / wallBBoxMm.h : 0;
+  const absolute = obstructionRect(obstruction, layoutBBoxMm);
   return {
-    x: Math.round((obstruction.xMm - wallBBoxMm.x) * pxPerMmX),
-    y: Math.round((obstruction.yMm - wallBBoxMm.y) * pxPerMmY),
-    w: Math.max(1, Math.round(obstruction.wMm * pxPerMmX)),
-    h: Math.max(1, Math.round(obstruction.hMm * pxPerMmY)),
+    x: Math.round((absolute.x - wallBBoxMm.x) * pxPerMmX),
+    y: Math.round((absolute.y - wallBBoxMm.y) * pxPerMmY),
+    w: Math.max(1, Math.round(absolute.w * pxPerMmX)),
+    h: Math.max(1, Math.round(absolute.h * pxPerMmY)),
   };
 };
 

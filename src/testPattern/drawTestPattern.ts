@@ -46,8 +46,15 @@ export type TestPatternProject = {
   panels: Cell[];
   /** The project's sub-screens, so each one can be given its own independently-animating pattern (see TestPatternSurface). Omit for a single-surface wall. */
   subScreens?: Array<{ id: string; name: string; color: string }>;
-  /** Things standing in front of the LED, drawn as opaque blocks over the finished pattern. Omit when there are none. */
+  /** Things standing in front of the LED, drawn over the finished pattern. Omit when there are none. */
   obstructions?: Obstruction[];
+  /**
+   * The WHOLE layout's bbox in workspace mm, which obstruction offsets are
+   * measured against. Needed when `panels` is only part of the wall (one
+   * sub-screen): the obstruction has not moved just because one screen is
+   * being rendered. Omit for a whole-wall render.
+   */
+  obstructionLayoutBBoxMm?: RectMm;
 };
 
 /**
@@ -115,8 +122,10 @@ export type TestPatternLayout = {
   surfaces: TestPatternSurface[];
   rowLabel: (cell: Cell) => string;
   colLabel: (cell: Cell) => string;
-  /** Obstructions over this surface, in workspace mm - converted to pixels at draw time against wallBBox. */
+  /** Obstructions over this surface - offsets from obstructionLayoutBBox, converted to pixels at draw time. */
   obstructions: Obstruction[];
+  /** The whole layout the obstruction offsets are measured against (the wall itself for a whole-wall render). */
+  obstructionLayoutBBox: RectMm;
 };
 
 // Pixel rect in canvas/output space (post front-view mirror). Snap both edges
@@ -399,6 +408,7 @@ export const computeTestPatternLayout = (project: TestPatternProject): TestPatte
     tileHeightPx,
     surfaces,
     obstructions: project.obstructions ?? [],
+    obstructionLayoutBBox: project.obstructionLayoutBBoxMm ?? wallBBox,
     rowLabel: (cell) => gridRefLabel(gridRefs.refs.get(cell.id)?.rows),
     // Column numbers must read from the FRONT (the pattern is always
     // rendered mirrored - see dispRectPx below), not the panel's raw
@@ -978,6 +988,7 @@ export const drawTestPatternFrame = (ctx: CanvasRenderingContext2D, layout: Test
     H: layout.H,
     // The pattern is always rendered front view (see dispRectPx).
     mirror: true,
+    layoutBBoxMm: layout.obstructionLayoutBBox,
   });
 };
 

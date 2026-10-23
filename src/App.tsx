@@ -41,8 +41,10 @@ import ObstructionsPanel from "./obstructions/ObstructionsPanel";
 import {
   type Obstruction,
   makeObstruction,
+  migrateAbsoluteObstructions,
   normalizeObstructions,
   obstructionMetresLabel,
+  obstructionRect,
 } from "./obstructions/obstructionModel";
 import { renderBasicLedMap } from "./exports/basicLedMap";
 import { drawObstructions } from "./obstructions/drawObstructions";
@@ -84,6 +86,7 @@ import {
 import StockComparisonModal from "./rentman/StockComparisonModal";
 import ExportSectionsModal, { type ExportSection } from "./exports/ExportSectionsModal";
 import BasicLedMapModal, { type BasicLedMapSettings } from "./exports/BasicLedMapModal";
+import ExportChoiceModal from "./exports/ExportChoiceModal";
 
 const SIGNAL_PORT_COUNT = 20;
 const CELL_SIZE = 78;
@@ -97,7 +100,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.72.0";
+const APP_VERSION = "0.73.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1177,13 +1180,25 @@ const getPortPanelCount = (panels: Cell[], portField: "assignedPort" | "assigned
 // Reading order for auto-snake over a free layout: row bands (or column bands
 // for TB/BT) with optional alternation - the non-uniform generalisation of the
 // old rows x cols walk. LOOP_TOGETHER pairs row bands into left/right loops.
-const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAlternates = true): Cell[][] => {
+const orderPanelsForSnake = (
+  panels: Cell[],
+  snakeDirection: string,
+  snakeAlternates = true,
+  startFromBottom = false,
+): Cell[][] => {
+  // "Start from bottom" used to be baked into the direction code (LRB / RLB /
+  // BT), which meant the selector carried the same four walks twice over. It
+  // is one flag now, so every direction can start from either end and the
+  // list only names the direction. The old codes still resolve here, so any
+  // state or saved option that still holds one keeps working.
+  const fromBottom = startFromBottom || snakeDirection === "LRB" || snakeDirection === "RLB" || snakeDirection === "BT";
+
   if (snakeDirection === "TB" || snakeDirection === "BT") {
     const columns = bandPanelsByColumn(panels, cellRect) as Cell[][];
     return [
       columns.flatMap((column, index) => {
         let col = [...column];
-        if (snakeDirection === "BT") col.reverse();
+        if (fromBottom) col.reverse();
         if (snakeAlternates && index % 2 === 1) col.reverse();
         return col;
       }),
@@ -1214,9 +1229,8 @@ const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAltern
     return segments;
   }
 
-  const startFromBottom = snakeDirection === "LRB" || snakeDirection === "RLB";
   const rightToLeft = snakeDirection === "RL" || snakeDirection === "RLB";
-  const orderedRows = startFromBottom ? [...rows].reverse() : rows;
+  const orderedRows = fromBottom ? [...rows].reverse() : rows;
   return [
     orderedRows.flatMap((row, index) => {
       let out = [...row];
@@ -1249,17 +1263,19 @@ const orderPanelsForSnake = (panels: Cell[], snakeDirection: string, snakeAltern
 export type SnakeOrderOptions = {
   direction: string;
   alternates: boolean;
+  /** Walk the rows (or columns) bottom-up instead of top-down. */
+  startFromBottom?: boolean;
   perSubScreen: boolean;
   /** Sub-screen ids, in the order their paths should run. */
   subScreenIds: string[];
 };
 
 export const snakeOrderSegments = (panels: Cell[], options: SnakeOrderOptions): Cell[][] => {
-  const { direction, alternates, perSubScreen, subScreenIds } = options;
+  const { direction, alternates, startFromBottom, perSubScreen, subScreenIds } = options;
   const walk = (group: Cell[]): Cell[][] =>
     direction === "LETTERS"
       ? orderPanelsForLetters(group)
-      : orderPanelsForSnake(group, direction, alternates).filter((segment) => segment.length > 0);
+      : orderPanelsForSnake(group, direction, alternates, startFromBottom).filter((segment) => segment.length > 0);
   if (!perSubScreen || !subScreenIds.length) return walk(panels);
   const segments: Cell[][] = [];
   subScreenIds.forEach((id) => {
@@ -2630,11 +2646,25 @@ export default function App() {
   // on a wall with several screens they add a lot of ink, and the whole-wall
   // centre is what most rigs are set out from.
   const [showSubScreenCentreLines, setShowSubScreenCentreLines] = useState(false);
+  // One switch for every picture of the wall: the workspace, the PDF layout
+  // pages, the test patterns and the Basic LED Map. Obstructions themselves
+  // are kept either way - this only decides whether they are drawn.
+  const [showObstructions, setShowObstructions] = useState(true);
   // Physical things in front of the LED. Kept entirely separate from `grid`:
   // they are not panels and must never reach a panel count, a power or weight
   // total, patching or a resolution - only the pictures of the wall.
   const [obstructions, setObstructions] = useState<Obstruction[]>([]);
   const [obstructionDrag, setObstructionDrag] = useState<{ id: string; startX: number; startY: number; dx: number; dy: number } | null>(null);
+  /**
+   * Obstructions as the pictures of the wall should show them - empty while
+   * the overlay switch is off.
+   *
+   * Declared HERE, with the state it reads, rather than next to the other
+   * obstruction helpers further down: it is read inside useMemo bodies that
+   * run during render, and a `const` below them is still in its temporal dead
+   * zone at that point - which threw on first paint.
+   */
+  const visibleObstructions = showObstructions ? obstructions : [];
   const [clipboard, setClipboard] = useState<ClipboardSelection | null>(null);
   const [isPasting, setIsPasting] = useState(false);
   const [pasteAnchor, setPasteAnchor] = useState<{ x: number; y: number } | null>(null);
@@ -2659,12 +2689,21 @@ export default function App() {
   // still open the right tab after the user picks.
   const [screenPickerOptions, setScreenPickerOptions] = useState<ScreenDetailed[] | null>(null);
   const [pendingTestPatternUrl, setPendingTestPatternUrl] = useState<string | null>(null);
-  const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "LRB" | "RLB" | "TB" | "BT" | "LOOP_TOGETHER" | "LETTERS">("LR");
+  const [snakeDirection, setSnakeDirection] = useState<"LR" | "RL" | "TB" | "LOOP_TOGETHER" | "LETTERS">("LR");
   const [snakeAlternates, setSnakeAlternates] = useState(true);
+  // Which end the walk starts from, separately from which way it runs. Set
+  // for you by the deployment type (see applyDeploymentType) because that is
+  // what decides it on site: a ground-supported wall is built and cabled from
+  // the floor up, a flown one from the top bar down.
+  const [snakeStartFromBottom, setSnakeStartFromBottom] = useState(false);
   // Walk each sub-screen as its own wall rather than letting a row band run
   // from one screen into the next (see snakeOrderSegments).
   const [snakePerSubScreen, setSnakePerSubScreen] = useState(true);
-  const [snakePreview, setSnakePreview] = useState(true);
+  // Off until it is asked for, or until an auto-patching option changes - at
+  // which point it turns itself on to show what that change did, and turns
+  // itself off again once the patch is applied (see snakePatch). Leaving a
+  // path drawn over a finished patch just hides the patch.
+  const [snakePreview, setSnakePreview] = useState(false);
   const [isFlippedView, setIsFlippedView] = useState(false);
   const [backupSignalLoop, setBackupSignalLoop] = useState(true);
   const [includeReinforcementPlate, setIncludeReinforcementPlate] = useState(false);
@@ -2678,6 +2717,13 @@ export default function App() {
   // never overwrite weights the user had chosen to switch off.
   const applyDeploymentType = (next: DeploymentType | "") => {
     setDeploymentType(next);
+    // Patch from the end the wall is actually built from: ground-supported
+    // stacks up from the floor, flown hangs down from the bar. Like the
+    // weights above, this is set from the dropdown rather than an effect, so
+    // opening a saved project cannot overwrite a choice already made, and it
+    // stays freely changeable afterwards.
+    if (next === DEPLOYMENT_TYPES.GROUND || next === DEPLOYMENT_TYPES.FLOOR) setSnakeStartFromBottom(true);
+    else if (next === DEPLOYMENT_TYPES.FLOWN) setSnakeStartFromBottom(false);
     if (next !== DEPLOYMENT_TYPES.FLOWN) return;
     setIncludeFlyBar(true);
     setIncludeSling(true);
@@ -2727,6 +2773,11 @@ export default function App() {
   const [pdfSectionPicker, setPdfSectionPicker] = useState<ExportSection[] | null>(null);
   const [testPatternPicker, setTestPatternPicker] = useState<ExportSection[] | null>(null);
   const [showBasicLedMap, setShowBasicLedMap] = useState(false);
+  // Two buttons that used to be four. "Static Download" asks PNG test pattern
+  // or Basic LED Map; "Moving Test Pattern" asks view or download. Each answer
+  // goes on to that output's own existing options dialog.
+  const [showStaticChoice, setShowStaticChoice] = useState(false);
+  const [showMovingChoice, setShowMovingChoice] = useState(false);
   // Surface picker for the Moving Test Pattern. Single-choice, because both
   // destinations can only carry one surface: the live view fills one display,
   // and the video is one file. `next` is what to do once a surface is picked -
@@ -3163,6 +3214,8 @@ export default function App() {
   }, [grid, subScreens.length, resolvedActiveSubScreenId]);
 
   const activeCells = useMemo(() => scopedGrid.filter((cell) => !cell.isRemoved), [scopedGrid]);
+  /** Is there anything to export at all? Drives the export chooser's disabled reasons. */
+  const hasActivePanels = grid.some((cell) => isActiveCell(cell));
   const activePanels = activeCells;
   const totalPanels = activePanels.length;
   // Per-sub-screen bounding boxes (workspace mm), for the boundary/label
@@ -4617,6 +4670,41 @@ export default function App() {
       ctx.restore();
     });
 
+    // Obstructions, in the same place and the same semi-transparent style as
+    // the workspace and the test patterns - the PDF is what goes to site, so
+    // leaving them off it is where a surprise comes from. Offsets are read
+    // against the WHOLE wall even on a single-sub-screen page, because that
+    // is where the thing physically stands.
+    if (showObstructions && obstructions.length) {
+      ctx.save();
+      obstructions.forEach((obstruction) => {
+        const box = dispBoxPx(obstructionRect(obstruction, wallBBox));
+        if (box.w <= 0 || box.h <= 0) return;
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(box.x, box.y, box.w, box.h);
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "#e11d48";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(box.x + 1, box.y + 1, Math.max(0, box.w - 2), Math.max(0, box.h - 2));
+        const lines = [obstruction.name, obstructionMetresLabel(obstruction)];
+        ctx.font = "bold 12px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.lineJoin = "round";
+        const startY = box.y + box.h / 2 - ((lines.length - 1) * 15) / 2;
+        lines.forEach((line, index) => {
+          const ly = startY + index * 15;
+          ctx.lineWidth = 3;
+          ctx.strokeStyle = "#ffffff";
+          ctx.strokeText(line, box.x + box.w / 2, ly);
+          ctx.fillStyle = "#0f172a";
+          ctx.fillText(line, box.x + box.w / 2, ly);
+        });
+      });
+      ctx.restore();
+    }
+
     if (showCentreLine) drawCentreLine(screens ? trueOuterBBoxOf(layoutPanels) : trueOuterBBox, "#eab308", "Centre");
     if (showSubScreenCentreLines) {
       subScreenCentreLines
@@ -4713,6 +4801,10 @@ export default function App() {
 // Everything a saved project file holds - also what the Test Pattern
 // Generator is handed when it is opened from here.
 const projectFilePayload = () => {
+  // formatVersion 8: obstruction x/y are OFFSETS from the layout's bottom
+  // centre, where they used to be absolute workspace mm. openJson converts a
+  // v7 file's absolute coordinates on the way in (migrateAbsoluteObstructions).
+  //
   // formatVersion 7: adds manual stock-list edits (v1-v6 files still open,
   // see openJson - the number bump itself is purely documentation, there's
   // no branching logic tied to it anywhere).
@@ -4727,7 +4819,7 @@ const projectFilePayload = () => {
   // reopened) - the equipment mapping that drives live data is account-
   // wide and lives in localStorage instead, not in this per-project file.
   return {
-    formatVersion: 7,
+    formatVersion: 8,
     appVersion: APP_VERSION,
     projectName: safeProjectName,
     surfaceName,
@@ -4879,8 +4971,11 @@ const exportJson = () => {
       panels: surface.panels,
       subScreens: isFullCanvas ? testPatternSubScreens : testPatternSubScreens.filter((s) => s.id === surface.key),
       // The same obstruction list goes to every surface; each one converts it
-      // into its own pixel space and skips any that miss it entirely.
-      obstructions,
+      // into its own pixel space and skips any that miss it entirely. The
+      // offsets are measured against the WHOLE wall, so a single sub-screen's
+      // pattern still puts the obstruction where it physically stands.
+      obstructions: visibleObstructions,
+      obstructionLayoutBBoxMm: wallBBox,
     };
   };
 
@@ -5014,7 +5109,13 @@ const exportJson = () => {
       }
 
       // Opaque, so last - after every panel, label and border.
-      drawObstructions(ctx, obstructions, { wallBBoxMm: layout.wallBBox, W, H, mirror: true });
+      drawObstructions(ctx, visibleObstructions, {
+        wallBBoxMm: layout.wallBBox,
+        W,
+        H,
+        mirror: true,
+        layoutBBoxMm: wallBBox,
+      });
 
       return canvas;
   };
@@ -5035,9 +5136,11 @@ const exportJson = () => {
     const panels = grid.filter((cell) => isActiveCell(cell));
     const layout = computeTestPatternLayout({ projectName: safeProjectName, surfaceName, panelType, panels });
     const pieces = new Set(connectedGroups(panels, cellRect).values()).size;
-    const obstructionPart = obstructions.length
-      ? `${obstructions.length} obstruction${obstructions.length === 1 ? "" : "s"} drawn over it`
-      : "no obstructions added yet";
+    const obstructionPart = !showObstructions && obstructions.length
+      ? `${obstructions.length} obstruction${obstructions.length === 1 ? "" : "s"} hidden by the Show Obstructions overlay switch`
+      : visibleObstructions.length
+        ? `${visibleObstructions.length} obstruction${visibleObstructions.length === 1 ? "" : "s"} drawn over it`
+        : "no obstructions added yet";
     return `${layout.contentPixelW} × ${layout.contentPixelH} px · ${panels.length} panels in ${pieces} separate piece${pieces === 1 ? "" : "s"} · ${obstructionPart}.`;
   };
 
@@ -5050,7 +5153,8 @@ const exportJson = () => {
         surfaceName,
         panels,
         panelType,
-        obstructions,
+        obstructions: visibleObstructions,
+        obstructionLayoutBBoxMm: wallBBox,
         backgroundColor: settings.backgroundColor,
         backgroundImage: settings.backgroundImage,
         showPieceOutlines: settings.showPieceOutlines,
@@ -5397,7 +5501,17 @@ const exportJson = () => {
         setProjectDateFrom(typeof data.rentmanDateFrom === "string" ? data.rentmanDateFrom : "");
         setProjectDateTo(typeof data.rentmanDateTo === "string" ? data.rentmanDateTo : "");
         // formatVersion 7: older projects have no obstructions at all.
-        setObstructions(normalizeObstructions(data.obstructions));
+        // formatVersion 8 moved obstruction x/y from absolute workspace mm to
+        // an offset from the layout's bottom centre - a v7 file's numbers mean
+        // something else now, so they are converted against the layout that
+        // same file just restored rather than being read as offsets.
+        const loadedObstructions = normalizeObstructions(data.obstructions);
+        const savedVersion = Number(data.formatVersion);
+        setObstructions(
+          Number.isFinite(savedVersion) && savedVersion >= 8
+            ? loadedObstructions
+            : migrateAbsoluteObstructions(loadedObstructions, activeBBox(nextPanels.filter(isActiveCell).map(cellRect))),
+        );
         // formatVersion 7: older projects have no manual stock edits, which
         // is the same as having none - the list opens as the tool calculates it.
         setStockEdits(normalizeStockEdits(data.stockEdits));
@@ -6753,8 +6867,24 @@ const exportJson = () => {
   const pastePadX = clipboard ? clipboard.w + MODULE_MM : 0;
   const pastePadY = clipboard ? clipboard.h + MODULE_MM : 0;
   const workspacePad = { x: WORKSPACE_PAD_MM + pastePadX, y: WORKSPACE_PAD_MM + pastePadY };
-  const workspaceOrigin = { x: wallBBox.x - workspacePad.x, y: wallBBox.y - workspacePad.y };
-  const workspaceSizeMm = { w: wallBBox.w + workspacePad.x * 2, h: wallBBox.h + workspacePad.y * 2 };
+  // The workspace is sized from everything actually DRAWN on it, not from
+  // wallBBox alone:
+  //   - wallBBox is the axis-aligned box of each panel's own footprint, so a
+  //     panel rotated off a right angle sticks out past it (that is exactly
+  //     what trueOuterBBox exists to measure), and
+  //   - an obstruction can stand clear of the wall entirely.
+  // Sizing from wallBBox left those outside the scrollable area: unreachable,
+  // and missed by Fit to View, which is the "some panels are not included"
+  // report. For a plain unrotated wall with no obstructions this is wallBBox
+  // exactly, so nothing changes.
+  const contentBBox = useMemo(() => {
+    const boxes: RectMm[] = [wallBBox];
+    if (trueOuterBBox.w > 0) boxes.push(trueOuterBBox);
+    obstructions.forEach((obstruction) => boxes.push(obstructionRect(obstruction, wallBBox)));
+    return activeBBox(boxes);
+  }, [wallBBox, trueOuterBBox, obstructions]);
+  const workspaceOrigin = { x: contentBBox.x - workspacePad.x, y: contentBBox.y - workspacePad.y };
+  const workspaceSizeMm = { w: contentBBox.w + workspacePad.x * 2, h: contentBBox.h + workspacePad.y * 2 };
   const mmToPx = (mm: number) => mm * pxPerMm;
   // Sets zoom so the FULL workspace (every active panel, including any
   // imported far outside the default view) fits inside the scrollable
@@ -6974,11 +7104,15 @@ const exportJson = () => {
 
   /** Workspace-mm rect of an obstruction, including any in-progress drag, in DISPLAY space. */
   const obstructionDisplayRect = (obstruction: Obstruction): RectMm => {
-    const base: RectMm = { x: obstruction.xMm, y: obstruction.yMm, w: obstruction.wMm, h: obstruction.hMm };
+    // The stored x/y are offsets from the layout's bottom centre, so the
+    // absolute position has to be resolved before anything is mirrored or
+    // converted to pixels.
+    const base = obstructionRect(obstruction, wallBBox);
     const display = isFlippedView ? mirrorRectX(base, wallBBox) : base;
     if (obstructionDrag?.id !== obstruction.id) return display;
     return { ...display, x: display.x + obstructionDrag.dx, y: display.y + obstructionDrag.dy };
   };
+
 
   // --- Copy / paste ---------------------------------------------------------
   const copySelectedPanels = () => {
@@ -7272,11 +7406,31 @@ const exportJson = () => {
     () => ({
       direction: snakeDirection,
       alternates: snakeAlternates,
+      startFromBottom: snakeStartFromBottom,
       perSubScreen: snakePerSubScreen,
       subScreenIds: subScreens.map((screen) => screen.id),
     }),
-    [snakeDirection, snakeAlternates, snakePerSubScreen, subScreens],
+    [snakeDirection, snakeAlternates, snakeStartFromBottom, snakePerSubScreen, subScreens],
   );
+
+  // Changing an auto-patching option shows the preview, so the effect of the
+  // change is visible without having to go and tick a box to see it.
+  // Deliberately keyed on the options only - a layout edit must not keep
+  // re-opening a preview the user closed.
+  //
+  // The guard compares the VALUES rather than counting runs: a "skip the
+  // first run" flag is defeated by StrictMode's mount -> cleanup -> mount in
+  // development, which fires the effect a second time with nothing changed
+  // and left the preview on at startup, which is exactly what this was
+  // supposed to stop.
+  const lastSnakeOptions = useRef<string | null>(null);
+  useEffect(() => {
+    const signature = JSON.stringify([snakeDirection, snakeAlternates, snakeStartFromBottom, snakePerSubScreen]);
+    const previous = lastSnakeOptions.current;
+    lastSnakeOptions.current = signature;
+    if (previous === null || previous === signature) return;
+    setSnakePreview(true);
+  }, [snakeDirection, snakeAlternates, snakeStartFromBottom, snakePerSubScreen]);
 
   /**
    * The path Auto Snake would patch right now: the panels, in order, grouped
@@ -7326,6 +7480,22 @@ const exportJson = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [snakePreviewRuns, isFlippedView, moveDrag, wallBBox],
   );
+
+  /**
+   * The capacity the previewed walk has to fit into: the per-port ceiling for
+   * whichever mode is being patched, and how many ports that many panels will
+   * take. Shown alongside the preview because the drawn path does not say
+   * where a run is forced to break.
+   */
+  const snakePreviewCapacity = useMemo(() => {
+    const panels = snakePreviewRuns.reduce((sum, run) => sum + run.cells.length, 0);
+    const maxPerPort = patchMode === "signal" ? safePanelsPerSignalPort : safePanelsPerPowerOutlet;
+    return {
+      maxPerPort,
+      unit: patchMode === "signal" ? "port" : "outlet",
+      portsNeeded: maxPerPort > 0 ? Math.ceil(panels / maxPerPort) : 0,
+    };
+  }, [snakePreviewRuns, patchMode, safePanelsPerSignalPort, safePanelsPerPowerOutlet]);
 
   const snakePatch = () => {
     commitGridUpdate((prev) => {
@@ -7443,6 +7613,10 @@ const exportJson = () => {
       return next;
     });
 
+    // The preview answers "what will this do"; once it has been done, the
+    // path is just a line drawn over the patch it produced, hiding the port
+    // colours and numbering somebody now wants to read.
+    setSnakePreview(false);
     setSelectedId(null);
     setSelectedCells(new Set());
     setDragVisited(new Set());
@@ -7597,14 +7771,11 @@ const exportJson = () => {
     pushUndoSnapshot(snapshot);
   };
   const addObstruction = (name: string) => {
-    // Drop it in the middle of the wall, where it is immediately visible and
-    // can be dragged from - off in a corner it reads as a rendering glitch.
+    // 0, 0 - centred on the wall and standing on its bottom edge, which is
+    // where a stack or a leg actually is. See Obstruction.xMm.
     const wMm = Math.max(500, Math.min(2000, wallBBox.w / 4 || 1000));
     const hMm = Math.max(500, Math.min(2000, wallBBox.h / 4 || 1000));
-    commitObstructionsUpdate((prev) => [
-      ...prev,
-      makeObstruction(name, wallBBox.x + wallBBox.w / 2 - wMm / 2, wallBBox.y + wallBBox.h / 2 - hMm / 2, wMm, hMm),
-    ]);
+    commitObstructionsUpdate((prev) => [...prev, makeObstruction(name, 0, 0, wMm, hMm)]);
   };
   const updateObstruction = (id: string, patch: Partial<Obstruction>) => {
     commitObstructionsUpdate((prev) => prev.map((o) => (o.id === id ? { ...o, ...patch } : o)));
@@ -7922,7 +8093,7 @@ const exportJson = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0f172a] p-6 text-white print-container">
+    <div className="min-h-screen bg-[#0f172a] p-3 text-white print-container">
       {showHelp ? <HelpModal onClose={() => setShowHelp(false)} /> : null}
       {showDeleteConfirm ? (
         <DeleteConfirmModal
@@ -8007,7 +8178,10 @@ const exportJson = () => {
         }
       `}</style>
 
-      <div className="mx-auto max-w-[1900px] space-y-6">
+      {/* Full width, no centred column: the layout canvas is the thing that
+          needs the room, and a fixed 1900px cap left a wide screen with a
+          margin either side of it while the wall itself was still scrolling. */}
+      <div className="w-full space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 no-print">
           <div>
             <div className="text-sm uppercase tracking-[0.2em] text-sky-300">LED cabling planner</div>
@@ -8028,26 +8202,21 @@ const exportJson = () => {
               <Button intent="primary" onClick={() => setPdfSectionPicker(pdfSectionOptions())}>
                 <FileText className="h-4 w-4" />Generate PDF
               </Button>
-              <Button intent="primary" onClick={() => setTestPatternPicker(testPatternSectionOptions())}>
-                <ImageDown className="h-4 w-4" />Test Pattern
-              </Button>
-              <Button intent="primary" onClick={openBasicLedMap}>
-                <ImageDown className="h-4 w-4" />Basic LED Map
-              </Button>
-              <Button intent="primary" onClick={() => startMovingPattern("open")}>
-                <Video className="h-4 w-4" />Moving Test Pattern
+              <Button intent="primary" onClick={() => setShowStaticChoice(true)} title="A still PNG: the test pattern, or the Basic LED Map">
+                <ImageDown className="h-4 w-4" />Static Download
               </Button>
               <Button
                 intent="primary"
-                onClick={() => startMovingPattern("download")}
+                onClick={() => setShowMovingChoice(true)}
                 disabled={isRecordingVideo || isEncodingMp4}
+                title="The animated pattern: watch it in the browser, or record it to a file"
               >
-                <Download className="h-4 w-4" />
+                <Video className="h-4 w-4" />
                 {isEncodingMp4
                   ? `Encoding MP4… ${Math.round(mp4EncodeProgress * 100)}%`
                   : isRecordingVideo
                     ? `Recording… ${videoRecordSeconds.toFixed(0)}/${Math.round(videoRecordTotal)}s`
-                    : "Download Moving Test Pattern"}
+                    : "Moving Test Pattern"}
               </Button>
             </div>
             <div className="flex items-center gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-1.5">
@@ -8216,73 +8385,6 @@ const exportJson = () => {
                 </div>
               </div>
 
-              <ControlGroup label="Patch mode" className="no-print">
-                <Button active={patchMode === "signal"} activeAccent="sky" intent="secondary" onClick={() => setPatchMode("signal")}>
-                  <Zap className="h-4 w-4" />Signal Patch Mode
-                </Button>
-                <Button active={patchMode === "power"} activeAccent="amber" intent="secondary" onClick={() => setPatchMode("power")}>
-                  <Zap className="h-4 w-4" />Power Patch Mode
-                </Button>
-                <Button
-                  intent="secondary"
-                  onClick={matchPowerToSignal}
-                  title="Patch power plugs to follow the signal patch order, aligned to the signal ports"
-                >
-                  <Wand2 className="h-4 w-4" />Match Power To Signal Pattern
-                </Button>
-                <StatusChip tone={patchMode === "signal" ? "sky" : "amber"}>
-                  {patchMode === "signal"
-                    ? activePort > 0 ? `Signal patching · port ${activePort}` : "Signal patching · no port selected"
-                    : activePowerPort > 0 ? `Power patching · plug ${activePowerPort}` : "Power patching · no plug selected"}
-                </StatusChip>
-              </ControlGroup>
-
-              <ControlGroup label="Auto patching" className="no-print">
-                <select className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black" value={snakeDirection} onChange={(e) => setSnakeDirection(e.target.value as typeof snakeDirection)}>
-                  <option value="LR">Left to Right</option>
-                  <option value="RL">Right to Left</option>
-                  <option value="LRB">Left to Right from the Bottom</option>
-                  <option value="RLB">Right to Left from the Bottom</option>
-                  <option value="TB">Top to Bottom</option>
-                  <option value="BT">Bottom to Top</option>
-                  <option value="LOOP_TOGETHER">Loop together</option>
-                  <option value="LETTERS">Letter patching (bottom-up)</option>
-                </select>
-                <label className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white">
-                  <input type="checkbox" checked={snakeAlternates} onChange={() => setSnakeAlternates((prev) => !prev)} />
-                  <span>Snake / alternate</span>
-                </label>
-                {/* Only worth offering once there is more than one screen to
-                    keep apart. */}
-                {subScreens.length > 1 ? (
-                  <label
-                    className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
-                    title="Walk each sub-screen as its own wall. Without this a row of panels running across two screens is patched as one row, straight from one screen into the next."
-                  >
-                    <input type="checkbox" checked={snakePerSubScreen} onChange={() => setSnakePerSubScreen((prev) => !prev)} />
-                    <span>Each sub-screen separately</span>
-                  </label>
-                ) : null}
-                <label
-                  className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
-                  title="Draw the path Auto Snake would patch over the layout, with its start, direction and panel order"
-                >
-                  <input type="checkbox" checked={snakePreview} onChange={() => setSnakePreview((prev) => !prev)} />
-                  <span>Preview path</span>
-                </label>
-                <Button intent="primary" onClick={snakePatch}><Wand2 className="h-4 w-4" />Auto Snake</Button>
-                {snakePreview && snakePreviewSegments.length ? (
-                  <StatusChip tone="violet">
-                    {`Preview: ${snakePreviewSegments.reduce((sum, seg) => sum + seg.points.length, 0)} panels`}
-                    {snakePreviewSegments.length > 1 ? ` · ${snakePreviewSegments.length} runs` : ""}
-                  </StatusChip>
-                ) : null}
-                <Button intent="secondary" onClick={clearSelectedPortPatching}>
-                  Clear Selected {patchMode === "signal" ? (activePort > 0 ? `Port ${activePort}` : "Port") : (activePowerPort > 0 ? `Plug ${activePowerPort}` : "Plug")}
-                </Button>
-                <Button intent="danger" onClick={clearSignalCabling}>Clear Signal</Button>
-                <Button intent="danger" onClick={clearPowerAssignments}>Clear Power</Button>
-              </ControlGroup>
             </CardContent>
           </Card>
 
@@ -8292,10 +8394,13 @@ const exportJson = () => {
             <CardHeader>
               <CardTitle className="text-white [text-shadow:0_0_2px_black]">Wall Summary</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4 text-sm text-white [text-shadow:0_0_2px_black]">
-              <div className="grid gap-4 md:grid-cols-3">
-                <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                  <div className="mb-2 font-bold">Wall Details</div>
+            {/* Deliberately tight: this is a reference panel that is read at a
+                glance, and every row of height it takes is a row the layout
+                canvas below does not get. */}
+            <CardContent className="space-y-2 text-xs leading-snug text-white [text-shadow:0_0_2px_black]">
+              <div className="grid gap-2 md:grid-cols-3">
+                <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                  <div className="mb-1 font-bold">Wall Details</div>
                   <div>Panels: {totalPanels} active across {gridRefs.rows} row{gridRefs.rows === 1 ? "" : "s"} × {gridRefs.cols} column{gridRefs.cols === 1 ? "" : "s"}</div>
                   <div>{wallSizeLabel}: {formatMeters(wallWidthM)}m × {formatMeters(wallHeightM)}m</div>
                   {/* The lit pixels, not the rectangle they stand in. On
@@ -8323,16 +8428,16 @@ const exportJson = () => {
                   )}
                   <div>Area: {formatNumber(wallWidthM * wallHeightM, 1)} m²</div>
                 </div>
-                <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                  <div className="mb-2 font-bold">{panel.name} Guts</div>
+                <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                  <div className="mb-1 font-bold">{panel.name} Guts</div>
                   <div>Panel size: {panel.w}m × {panel.h}m</div>
                   <div>Pixels per panel: {formatNumber(panelPixels)}</div>
                   <div>Weight per panel: {panel.weight} kg</div>
                   <div>Max power: {powerSpec.maxW} W / {powerSpec.maxA} A</div>
                   <div>Avg power: {powerSpec.avgW} W / {powerSpec.avgA} A</div>
                 </div>
-                <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                  <div className="mb-2 font-bold">Signal + Output</div>
+                <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                  <div className="mb-1 font-bold">Signal + Output</div>
                   <div>Ports used: {effectiveSignalPortsUsed}{backupSignalLoop ? ` (${signalPortsUsed} main + ${signalPortsUsed} backup)` : ""}</div>
                   <div>Pixels per port: {formatNumber(panelPixels)}</div>
                   <div>Port capacity use: {formatNumber(activePixelCount / Math.max(signalPortsUsed, 1), 0)} px avg</div>
@@ -8341,7 +8446,7 @@ const exportJson = () => {
                 </div>
               </div>
 
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="grid gap-2 md:grid-cols-3">
                 {/* Slide size for content authored in PowerPoint. Derived
                     entirely from the wall resolution, so it re-reads itself
                     whenever the layout, panel type or orientation changes -
@@ -8349,8 +8454,8 @@ const exportJson = () => {
                     The wall's aspect ratio and native content resolution are
                     already in Wall Details, so they are not repeated here. */}
                 {powerPointSetup ? (
-                  <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                    <div className="mb-2 font-bold">PowerPoint Content Setup</div>
+                  <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                    <div className="mb-1 font-bold">PowerPoint Content Setup</div>
                     <div>
                       PowerPoint slide size: {powerPointSetup.widthCm.toFixed(3)} × {powerPointSetup.heightCm.toFixed(3)} cm
                     </div>
@@ -8361,14 +8466,14 @@ const exportJson = () => {
                     ) : null}
                   </div>
                 ) : null}
-                <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                  <div className="mb-2 font-bold">Weight</div>
+                <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                  <div className="mb-1 font-bold">Weight</div>
                   <div>Panel weight: {panelOnlyWeight.toFixed(1)} kg</div>
                   <div>Additional subtotal: {additionalWeight.toFixed(1)} kg</div>
                   <div className="font-semibold">Total weight: {totalWeight.toFixed(1)} kg</div>
                 </div>
-                <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                  <div className="mb-2 font-bold">Power</div>
+                <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                  <div className="mb-1 font-bold">Power</div>
                   <div>Max: {formatNumber(totalPowerMaxW, 0)} W / {formatNumber(totalPowerMaxA, 2)} A</div>
                   <div>Avg: {formatNumber(totalPowerAvgW, 0)} W / {formatNumber(totalPowerAvgA, 2)} A</div>
                   <div title="Power outlets the patch actually uses - one 15m PowerCON each. The figure in brackets is the fewest it could run on with every outlet filled to the panels-per-outlet limit.">
@@ -8379,15 +8484,15 @@ const exportJson = () => {
                   <div>Per outlet: {formatNumber(powerPerCircuitMaxW, 0)} W / {formatNumber(powerPerCircuitMaxA, 2)} A</div>
                   <div>Active support span: {activeColsCount} cols × {activeRowsCount} rows</div>
                 </div>
-                <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                  <div className="mb-2 font-bold">Panel Count</div>
+                <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                  <div className="mb-1 font-bold">Panel Count</div>
                   <div>{PANEL_COUNT_LABELS.required}: {formatNumber(panelCounts.required)}</div>
                   <div>{PANEL_COUNT_LABELS.spare}: {formatNumber(panelCounts.spare)}</div>
                   <div>{PANEL_COUNT_LABELS.spareRounded}: {formatNumber(panelCounts.spareRounded)}</div>
                   <div className="font-semibold">{PANEL_COUNT_LABELS.total}: {formatNumber(panelCounts.total)}</div>
                 </div>
-                <div className="rounded border border-slate-700 bg-slate-900 p-3">
-                  <div className="mb-2 font-bold">Best Standard Output</div>
+                <div className="rounded border border-slate-700 bg-slate-900 p-2">
+                  <div className="mb-1 font-bold">Best Standard Output</div>
                   {bestResolution ? (
                     <>
                       <div>{bestResolution[0]} × {bestResolution[1]}</div>
@@ -8432,7 +8537,7 @@ const exportJson = () => {
                   </div>
                 </div>
 
-                <div className="space-y-3 rounded border border-slate-700 bg-slate-900 p-3">
+                <div className="space-y-3 rounded border border-slate-700 bg-slate-900 p-2">
                   <div className="font-bold">LED Wall Deployment Settings</div>
                   <label className="flex items-center gap-2">
                     <input type="checkbox" checked={backupSignalLoop} onChange={() => setBackupSignalLoop((prev) => !prev)} />
@@ -8519,257 +8624,6 @@ const exportJson = () => {
             ) : null}
           </CardHeader>
           <CardContent>
-            <div className="mb-3 flex flex-wrap items-start gap-2 text-xs text-white [text-shadow:0_0_2px_black] no-print">
-              <ControlGroup label="Panel tools">
-                <Button
-                  intent="secondary"
-                  size="sm"
-                  active={editMode === "patch"}
-                  activeAccent="sky"
-                  onClick={() => setEditMode("patch")}
-                  title="Click or drag panels to patch the active signal port / power plug"
-                >
-                  Patch
-                </Button>
-                <Button
-                  intent="secondary"
-                  size="sm"
-                  active={editMode === "select"}
-                  activeAccent="emerald"
-                  onClick={() => {
-                    setEditMode((prev) => {
-                      if (prev === "select") {
-                        setSelectedId(null);
-                        setSelectedCells(new Set());
-                        return "patch";
-                      }
-                      return "select";
-                    });
-                  }}
-                  title="Click panels or drag a box to select (Shift adds)"
-                >
-                  Select
-                </Button>
-                <Button
-                  intent="secondary"
-                  size="sm"
-                  active={editMode === "move"}
-                  activeAccent="amber"
-                  onClick={() => setEditMode((prev) => (prev === "move" ? "patch" : "move"))}
-                  title="Drag panels to reposition them freely; edges snap together"
-                >
-                  Move
-                </Button>
-                <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
-                <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
-                {/* What those panels ARE, one chip per physical part, in the
-                    same terms Stock Calculations orders them - a selection of
-                    24 that is 20 standard panels and 4 corners is two
-                    different pulls, and the count alone never said so. */}
-                {selectedMix.map((entry) => (
-                  <StatusChip key={entry.key} tone="sky">
-                    <span title={entry.detail}>
-                      {entry.count} x {entry.label}
-                      {entry.removed ? ` (${entry.removed} inactive)` : ""}
-                    </span>
-                  </StatusChip>
-                ))}
-                {editMode === "move" ? (
-                  <>
-                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
-                      <input type="checkbox" checked={snapEnabled} onChange={() => setSnapEnabled((prev) => !prev)} />
-                      <span>Snap</span>
-                    </label>
-                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
-                      <input type="checkbox" checked={moveJoinedGroup} onChange={() => setMoveJoinedGroup((prev) => !prev)} />
-                      <span>Move joined group</span>
-                    </label>
-                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1" title="Permit intentional panel overlaps">
-                      <input type="checkbox" checked={allowOverlaps} onChange={() => setAllowOverlaps((prev) => !prev)} />
-                      <span>Allow overlaps</span>
-                    </label>
-                  </>
-                ) : null}
-              </ControlGroup>
-
-              <ControlGroup label="Selection & editing">
-                <Button
-                  intent="secondary"
-                  size="sm"
-                  onClick={() => {
-                    const x = wallBBox.x;
-                    const y = wallBBox.y + wallBBox.h + MODULE_MM;
-                    if (isPosterType) {
-                      // A poster is a whole fixture, not one section, and it
-                      // arrives in its own sub-screen rather than joining the
-                      // active one.
-                      const { cells, subScreens: created } = makePosterUnits(1, subScreens, x, y);
-                      commitCanvasUpdate(() => {
-                        setGrid((prev) => [...prev, ...cells]);
-                        setSubScreens((prev) => [...prev, ...created]);
-                      });
-                    } else {
-                      commitGridUpdate((prev) => [...prev, makePanelAt(x, y, panelType, resolvedActiveSubScreenId)]);
-                    }
-                    setEditMode("move");
-                  }}
-                  title={
-                    isPosterType
-                      ? "Add a complete LED poster below the wall, in its own sub-screen, ready to move into place"
-                      : "Add a new panel below the wall, ready to move into place"
-                  }
-                >
-                  {isPosterType ? "+ Add Poster" : "+ Add Panel"}
-                </Button>
-                <select
-                  className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                  disabled={selectedCount === 0}
-                  title="Set the panel type for the selected panels (MT spans two 0.5m modules)"
-                  value={selectedPanel ? cellPanelType(selectedPanel) : "MG9"}
-                  onChange={(e) => applySelectedPanelType(e.target.value as PanelTypeKey)}
-                >
-                  {(Object.keys(PANEL_TYPES) as PanelTypeKey[]).map((key) => (
-                    <option key={key} value={key}>{PANEL_TYPES[key].name} panel</option>
-                  ))}
-                </select>
-                {/* Only the variants the selected panel's own type has: every
-                    shape for MG9, standard or corner for MT. An MT corner is
-                    the same MT panel, so it changes no panel count - it only
-                    adds its corner hardware to the stock list. */}
-                <select
-                  className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                  disabled={selectedCount === 0 || selectedVariantChoices.length < 2}
-                  value={selectedPanel?.panelVariant ?? "STANDARD"}
-                  onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
-                >
-                  {selectedVariantChoices.map((key) => (
-                    <option key={key} value={key}>
-                      {variantLabelFor(selectedPanel ? cellPanelType(selectedPanel) : "MG9", key)}
-                    </option>
-                  ))}
-                </select>
-                <Button intent="secondary" size="sm" onClick={copySelectedPanels} disabled={selectedCount === 0} title="Copy selected panels (Ctrl/Cmd+C)">Copy</Button>
-                <Button
-                  intent={isPasting ? "primary" : "secondary"}
-                  size="sm"
-                  onClick={() => (isPasting ? cancelPaste() : startPaste())}
-                  disabled={!clipboard}
-                  title={isPasting ? "Click on the layout to place, Esc/right-click to cancel" : "Paste copied panels (Ctrl/Cmd+V)"}
-                >
-                  {isPasting ? "Click to Place…" : "Paste"}
-                </Button>
-                <Button intent="danger" size="sm" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete</Button>
-                <Button intent="success" size="sm" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore</Button>
-                <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
-                <Button intent="ghost" size="sm" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="h-4 w-4" />Redo</Button>
-                {subScreens.length > 0 ? (
-                  <>
-                    <select
-                      className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
-                      value={assignTargetSubScreenId}
-                      onChange={(e) => setAssignTargetSubScreenId(e.target.value)}
-                      disabled={selectedCount === 0}
-                      title="Choose which sub-screen to assign the selected panels to"
-                    >
-                      <option value="">Choose a sub-screen...</option>
-                      {subScreens.map((screen) => (
-                        <option key={screen.id} value={screen.id}>
-                          {screen.name}
-                        </option>
-                      ))}
-                    </select>
-                    <Button
-                      intent="secondary"
-                      size="sm"
-                      onClick={() => {
-                        if (assignTargetSubScreenId) assignSelectedToSubScreen(assignTargetSubScreenId);
-                      }}
-                      disabled={selectedCount === 0 || !assignTargetSubScreenId}
-                    >
-                      Assign Selected ({selectedCount})
-                    </Button>
-                    <Button intent="ghost" size="sm" onClick={removeSelectedFromSubScreen} disabled={selectedCount === 0}>
-                      Remove from Sub-Screen
-                    </Button>
-                  </>
-                ) : null}
-              </ControlGroup>
-
-              <ControlGroup label="Rotation & transforms">
-                <Button intent="secondary" size="sm" onClick={() => rotateSelectedPanels(45)} disabled={selectedCount === 0} title="Rotate selected panels 45° clockwise">Rotate 45° 🔄</Button>
-                <Button intent="secondary" size="sm" onClick={() => rotateSelectedPanels(90)} disabled={selectedCount === 0} title="Rotate selected panels 90° clockwise">Rotate 90° 🔄</Button>
-                <div className="flex items-center gap-1 rounded-lg border border-slate-500 bg-white p-1">
-                  <input
-                    type="number"
-                    className="w-16 rounded border border-slate-300 p-1 text-sm text-black"
-                    value={customRotationDeg}
-                    onChange={(e) => setCustomRotationDeg(e.target.value)}
-                    title="Custom rotation angle in degrees"
-                    disabled={selectedCount === 0}
-                  />
-                  <Button
-                    intent="secondary"
-                    size="sm"
-                    onClick={() => {
-                      const deg = Number.parseFloat(customRotationDeg);
-                      if (Number.isFinite(deg)) rotateSelectedPanels(deg);
-                    }}
-                    disabled={selectedCount === 0 || !Number.isFinite(Number.parseFloat(customRotationDeg))}
-                    title="Rotate selected panels by the entered angle"
-                  >
-                    Rotate °
-                  </Button>
-                </div>
-              </ControlGroup>
-
-              <ControlGroup label="View, zoom & navigation">
-                <StatusChip tone={isFlippedView ? "amber" : "sky"}>{isFlippedView ? "Front View" : "Back View"}</StatusChip>
-                <Button intent="secondary" size="sm" onClick={() => setIsFlippedView((prev) => !prev)}>
-                  {isFlippedView ? "Show Back View" : "Show Front View"}
-                </Button>
-                <select
-                  className="rounded-lg border border-slate-500 bg-white p-1.5 text-xs text-black"
-                  value={String(zoom)}
-                  onChange={(e) => setZoom(Number(e.target.value))}
-                  title="Workspace zoom"
-                >
-                  <option value="0.5">50%</option>
-                  <option value="0.75">75%</option>
-                  <option value="1">100%</option>
-                  <option value="1.5">150%</option>
-                </select>
-                <Button
-                  intent="secondary"
-                  size="sm"
-                  onClick={fitToView}
-                  title="Zoom so the entire layout - including any wide/tall imported project - fits in the visible workspace"
-                >
-                  Fit to View
-                </Button>
-              </ControlGroup>
-
-              <ControlGroup label="Overlays & displays">
-                <Button
-                  intent={showCentreLine ? "primary" : "secondary"}
-                  size="sm"
-                  onClick={() => setShowCentreLine((prev) => !prev)}
-                  title="Show or hide the vertical centre indicator - applies to this Panel Layout and to the PDF's Panel Layout pages"
-                >
-                  {showCentreLine ? "Hide Centre Line" : "Show Centre Line"}
-                </Button>
-                {subScreens.length > 0 ? (
-                  <Button
-                    intent={showSubScreenCentreLines ? "primary" : "secondary"}
-                    size="sm"
-                    onClick={() => setShowSubScreenCentreLines((prev) => !prev)}
-                    title="A separate centre line for each sub-screen, measured from that sub-screen's own centre rather than the whole wall's"
-                  >
-                    {showSubScreenCentreLines ? "Hide Sub-Screen Centre Lines" : "Show Sub-Screen Centre Lines"}
-                  </Button>
-                ) : null}
-                <span className="text-xs text-slate-400">Applies to the layout here and in the PDF</span>
-              </ControlGroup>
-            </div>
             {overlapNotice ? (
               <div className="mb-3 rounded-lg border border-amber-400 bg-amber-500/15 px-3 py-2 text-sm text-amber-200 no-print">
                 ⚠ {overlapNotice}
@@ -9044,7 +8898,7 @@ const exportJson = () => {
                     that is exactly what they are: something physically in front of the
                     LED. Dragged freely - no panel-grid or edge snapping (see
                     commitObstructionDrag) - since a real object stands where it stands. */}
-                {obstructions.map((obstruction) => {
+                {visibleObstructions.map((obstruction) => {
                   const r = rectToPx(obstructionDisplayRect(obstruction));
                   const isDragging = obstructionDrag?.id === obstruction.id;
                   return (
@@ -9059,7 +8913,11 @@ const exportJson = () => {
                         width: Math.max(2, r.w),
                         height: Math.max(2, r.h),
                         zIndex: 40,
-                        background: "repeating-linear-gradient(135deg, #0f172a 0 10px, #1e293b 10px 20px)",
+                        // Semi-transparent: the panels, their numbering and
+                        // any cable run underneath have to stay readable, or
+                        // there is no way to tell what the obstruction is
+                        // actually covering.
+                        background: "repeating-linear-gradient(135deg, rgba(15,23,42,0.55) 0 10px, rgba(244,63,94,0.3) 10px 20px)",
                         border: `2px solid ${isDragging ? "#fbbf24" : "#f43f5e"}`,
                         boxShadow: isDragging ? "0 0 0 2px rgba(251,191,36,0.4)" : undefined,
                       }}
@@ -9458,6 +9316,359 @@ const exportJson = () => {
                 ) : null}
               </div>
             </div>
+            {/* Everything that acts on the layout sits UNDER it: the
+                buttons are read after looking at the wall, not before, and
+                keeping them here means the tools and the thing they act on
+                are on screen together instead of a scroll apart. Patch mode
+                and Auto patching moved down from LED Wall Setup for the same
+                reason - the path preview is drawn on this canvas. */}
+            <div className="mt-3 flex flex-wrap items-start gap-2 text-xs text-white [text-shadow:0_0_2px_black] no-print">
+              <ControlGroup label="Panel tools">
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  active={editMode === "patch"}
+                  activeAccent="sky"
+                  onClick={() => setEditMode("patch")}
+                  title="Click or drag panels to patch the active signal port / power plug"
+                >
+                  Patch
+                </Button>
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  active={editMode === "select"}
+                  activeAccent="emerald"
+                  onClick={() => {
+                    setEditMode((prev) => {
+                      if (prev === "select") {
+                        setSelectedId(null);
+                        setSelectedCells(new Set());
+                        return "patch";
+                      }
+                      return "select";
+                    });
+                  }}
+                  title="Click panels or drag a box to select (Shift adds)"
+                >
+                  Select
+                </Button>
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  active={editMode === "move"}
+                  activeAccent="amber"
+                  onClick={() => setEditMode((prev) => (prev === "move" ? "patch" : "move"))}
+                  title="Drag panels to reposition them freely; edges snap together"
+                >
+                  Move
+                </Button>
+                <Button intent="secondary" size="sm" onClick={clearSelectedPanelPatching} disabled={selectedCount === 0}>Clear Patching</Button>
+                <StatusChip tone="emerald">{selectedCount ? `${selectedCount} selected` : "None selected"}</StatusChip>
+                {/* What those panels ARE, one chip per physical part, in the
+                    same terms Stock Calculations orders them - a selection of
+                    24 that is 20 standard panels and 4 corners is two
+                    different pulls, and the count alone never said so. */}
+                {selectedMix.map((entry) => (
+                  <StatusChip key={entry.key} tone="sky">
+                    <span title={entry.detail}>
+                      {entry.count} x {entry.label}
+                      {entry.removed ? ` (${entry.removed} inactive)` : ""}
+                    </span>
+                  </StatusChip>
+                ))}
+                {editMode === "move" ? (
+                  <>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                      <input type="checkbox" checked={snapEnabled} onChange={() => setSnapEnabled((prev) => !prev)} />
+                      <span>Snap</span>
+                    </label>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1">
+                      <input type="checkbox" checked={moveJoinedGroup} onChange={() => setMoveJoinedGroup((prev) => !prev)} />
+                      <span>Move joined group</span>
+                    </label>
+                    <label className="flex items-center gap-1 rounded border border-slate-600 bg-slate-800 px-2 py-1" title="Permit intentional panel overlaps">
+                      <input type="checkbox" checked={allowOverlaps} onChange={() => setAllowOverlaps((prev) => !prev)} />
+                      <span>Allow overlaps</span>
+                    </label>
+                  </>
+                ) : null}
+              </ControlGroup>
+
+              <ControlGroup label="Selection & editing">
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  onClick={() => {
+                    const x = wallBBox.x;
+                    const y = wallBBox.y + wallBBox.h + MODULE_MM;
+                    if (isPosterType) {
+                      // A poster is a whole fixture, not one section, and it
+                      // arrives in its own sub-screen rather than joining the
+                      // active one.
+                      const { cells, subScreens: created } = makePosterUnits(1, subScreens, x, y);
+                      commitCanvasUpdate(() => {
+                        setGrid((prev) => [...prev, ...cells]);
+                        setSubScreens((prev) => [...prev, ...created]);
+                      });
+                    } else {
+                      commitGridUpdate((prev) => [...prev, makePanelAt(x, y, panelType, resolvedActiveSubScreenId)]);
+                    }
+                    setEditMode("move");
+                  }}
+                  title={
+                    isPosterType
+                      ? "Add a complete LED poster below the wall, in its own sub-screen, ready to move into place"
+                      : "Add a new panel below the wall, ready to move into place"
+                  }
+                >
+                  {isPosterType ? "+ Add Poster" : "+ Add Panel"}
+                </Button>
+                <select
+                  className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
+                  disabled={selectedCount === 0}
+                  title="Set the panel type for the selected panels (MT spans two 0.5m modules)"
+                  value={selectedPanel ? cellPanelType(selectedPanel) : "MG9"}
+                  onChange={(e) => applySelectedPanelType(e.target.value as PanelTypeKey)}
+                >
+                  {(Object.keys(PANEL_TYPES) as PanelTypeKey[]).map((key) => (
+                    <option key={key} value={key}>{PANEL_TYPES[key].name} panel</option>
+                  ))}
+                </select>
+                {/* Only the variants the selected panel's own type has: every
+                    shape for MG9, standard or corner for MT. An MT corner is
+                    the same MT panel, so it changes no panel count - it only
+                    adds its corner hardware to the stock list. */}
+                <select
+                  className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
+                  disabled={selectedCount === 0 || selectedVariantChoices.length < 2}
+                  value={selectedPanel?.panelVariant ?? "STANDARD"}
+                  onChange={(e) => applySelectedPanelVariant(e.target.value as PanelVariantKey)}
+                >
+                  {selectedVariantChoices.map((key) => (
+                    <option key={key} value={key}>
+                      {variantLabelFor(selectedPanel ? cellPanelType(selectedPanel) : "MG9", key)}
+                    </option>
+                  ))}
+                </select>
+                <Button intent="secondary" size="sm" onClick={copySelectedPanels} disabled={selectedCount === 0} title="Copy selected panels (Ctrl/Cmd+C)">Copy</Button>
+                <Button
+                  intent={isPasting ? "primary" : "secondary"}
+                  size="sm"
+                  onClick={() => (isPasting ? cancelPaste() : startPaste())}
+                  disabled={!clipboard}
+                  title={isPasting ? "Click on the layout to place, Esc/right-click to cancel" : "Paste copied panels (Ctrl/Cmd+V)"}
+                >
+                  {isPasting ? "Click to Place…" : "Paste"}
+                </Button>
+                <Button intent="danger" size="sm" onClick={deleteSelectedPanel} disabled={selectedCount === 0}>Delete</Button>
+                <Button intent="success" size="sm" onClick={restoreSelectedPanel} disabled={selectedCount === 0}>Restore</Button>
+                <Button intent="ghost" size="sm" onClick={undoLayout} disabled={!undoStack.length}><Undo2 className="h-4 w-4" />Undo</Button>
+                <Button intent="ghost" size="sm" onClick={redoLayout} disabled={!redoStack.length}><Redo2 className="h-4 w-4" />Redo</Button>
+                {subScreens.length > 0 ? (
+                  <>
+                    <select
+                      className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black disabled:opacity-60"
+                      value={assignTargetSubScreenId}
+                      onChange={(e) => setAssignTargetSubScreenId(e.target.value)}
+                      disabled={selectedCount === 0}
+                      title="Choose which sub-screen to assign the selected panels to"
+                    >
+                      <option value="">Choose a sub-screen...</option>
+                      {subScreens.map((screen) => (
+                        <option key={screen.id} value={screen.id}>
+                          {screen.name}
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      intent="secondary"
+                      size="sm"
+                      onClick={() => {
+                        if (assignTargetSubScreenId) assignSelectedToSubScreen(assignTargetSubScreenId);
+                      }}
+                      disabled={selectedCount === 0 || !assignTargetSubScreenId}
+                    >
+                      Assign Selected ({selectedCount})
+                    </Button>
+                    <Button intent="ghost" size="sm" onClick={removeSelectedFromSubScreen} disabled={selectedCount === 0}>
+                      Remove from Sub-Screen
+                    </Button>
+                  </>
+                ) : null}
+              </ControlGroup>
+
+              <ControlGroup label="Rotation & transforms">
+                <Button intent="secondary" size="sm" onClick={() => rotateSelectedPanels(45)} disabled={selectedCount === 0} title="Rotate selected panels 45° clockwise">Rotate 45° 🔄</Button>
+                <Button intent="secondary" size="sm" onClick={() => rotateSelectedPanels(90)} disabled={selectedCount === 0} title="Rotate selected panels 90° clockwise">Rotate 90° 🔄</Button>
+                <div className="flex items-center gap-1 rounded-lg border border-slate-500 bg-white p-1">
+                  <input
+                    type="number"
+                    className="w-16 rounded border border-slate-300 p-1 text-sm text-black"
+                    value={customRotationDeg}
+                    onChange={(e) => setCustomRotationDeg(e.target.value)}
+                    title="Custom rotation angle in degrees"
+                    disabled={selectedCount === 0}
+                  />
+                  <Button
+                    intent="secondary"
+                    size="sm"
+                    onClick={() => {
+                      const deg = Number.parseFloat(customRotationDeg);
+                      if (Number.isFinite(deg)) rotateSelectedPanels(deg);
+                    }}
+                    disabled={selectedCount === 0 || !Number.isFinite(Number.parseFloat(customRotationDeg))}
+                    title="Rotate selected panels by the entered angle"
+                  >
+                    Rotate °
+                  </Button>
+                </div>
+              </ControlGroup>
+
+              <ControlGroup label="View, zoom & navigation">
+                <StatusChip tone={isFlippedView ? "amber" : "sky"}>{isFlippedView ? "Front View" : "Back View"}</StatusChip>
+                <Button intent="secondary" size="sm" onClick={() => setIsFlippedView((prev) => !prev)}>
+                  {isFlippedView ? "Show Back View" : "Show Front View"}
+                </Button>
+                <select
+                  className="rounded-lg border border-slate-500 bg-white p-1.5 text-xs text-black"
+                  value={String(zoom)}
+                  onChange={(e) => setZoom(Number(e.target.value))}
+                  title="Workspace zoom"
+                >
+                  <option value="0.5">50%</option>
+                  <option value="0.75">75%</option>
+                  <option value="1">100%</option>
+                  <option value="1.5">150%</option>
+                </select>
+                <Button
+                  intent="secondary"
+                  size="sm"
+                  onClick={fitToView}
+                  title="Zoom so the entire layout - including any wide/tall imported project - fits in the visible workspace"
+                >
+                  Fit to View
+                </Button>
+              </ControlGroup>
+
+              <ControlGroup label="Overlays & displays">
+                <Button
+                  intent={showCentreLine ? "primary" : "secondary"}
+                  size="sm"
+                  onClick={() => setShowCentreLine((prev) => !prev)}
+                  title="Show or hide the vertical centre indicator - applies to this Panel Layout and to the PDF's Panel Layout pages"
+                >
+                  {showCentreLine ? "Hide Centre Line" : "Show Centre Line"}
+                </Button>
+                {subScreens.length > 0 ? (
+                  <Button
+                    intent={showSubScreenCentreLines ? "primary" : "secondary"}
+                    size="sm"
+                    onClick={() => setShowSubScreenCentreLines((prev) => !prev)}
+                    title="A separate centre line for each sub-screen, measured from that sub-screen's own centre rather than the whole wall's"
+                  >
+                    {showSubScreenCentreLines ? "Hide Sub-Screen Centre Lines" : "Show Sub-Screen Centre Lines"}
+                  </Button>
+                ) : null}
+                <label
+                  className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                  title="Draw obstructions over the layout here, in the PDF, on the test patterns and on the Basic LED Map. Unticking only hides them - nothing is deleted."
+                >
+                  <input type="checkbox" checked={showObstructions} onChange={() => setShowObstructions((prev) => !prev)} />
+                  <span>Show obstructions{obstructions.length ? ` (${obstructions.length})` : ""}</span>
+                </label>
+                <span className="text-xs text-slate-400">Applies to the layout here and in the PDF</span>
+              </ControlGroup>
+              <ControlGroup label="Patch mode" className="no-print">
+                <Button active={patchMode === "signal"} activeAccent="sky" intent="secondary" onClick={() => setPatchMode("signal")}>
+                  <Zap className="h-4 w-4" />Signal Patch Mode
+                </Button>
+                <Button active={patchMode === "power"} activeAccent="amber" intent="secondary" onClick={() => setPatchMode("power")}>
+                  <Zap className="h-4 w-4" />Power Patch Mode
+                </Button>
+                <Button
+                  intent="secondary"
+                  onClick={matchPowerToSignal}
+                  title="Patch power plugs to follow the signal patch order, aligned to the signal ports"
+                >
+                  <Wand2 className="h-4 w-4" />Match Power To Signal Pattern
+                </Button>
+                <StatusChip tone={patchMode === "signal" ? "sky" : "amber"}>
+                  {patchMode === "signal"
+                    ? activePort > 0 ? `Signal patching · port ${activePort}` : "Signal patching · no port selected"
+                    : activePowerPort > 0 ? `Power patching · plug ${activePowerPort}` : "Power patching · no plug selected"}
+                </StatusChip>
+              </ControlGroup>
+
+              <ControlGroup label="Auto patching" className="no-print">
+                <select className="rounded-lg border border-slate-500 bg-white p-2 text-sm text-black" value={snakeDirection} onChange={(e) => setSnakeDirection(e.target.value as typeof snakeDirection)}>
+                  <option value="LR">Left to Right</option>
+                  <option value="RL">Right to Left</option>
+                  <option value="TB">Columns</option>
+                  <option value="LOOP_TOGETHER">Loop together</option>
+                  <option value="LETTERS">Letter patching (bottom-up)</option>
+                </select>
+                <label className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white">
+                  <input type="checkbox" checked={snakeAlternates} onChange={() => setSnakeAlternates((prev) => !prev)} />
+                  <span>Snake / alternate</span>
+                </label>
+                {/* Which END the walk starts from, separate from which way it
+                    runs - the four "...from the Bottom" entries this replaces
+                    were the same walks listed twice. Set for you by the
+                    deployment type, and freely changeable after. */}
+                <label
+                  className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                  title="Start the walk at the bottom of the wall instead of the top. Set automatically from the deployment type: ground-supported starts at the bottom, flown at the top."
+                >
+                  <input
+                    type="checkbox"
+                    checked={snakeStartFromBottom}
+                    onChange={() => setSnakeStartFromBottom((prev) => !prev)}
+                    disabled={snakeDirection === "LETTERS" || snakeDirection === "LOOP_TOGETHER"}
+                  />
+                  <span>Start from bottom</span>
+                </label>
+                {/* Only worth offering once there is more than one screen to
+                    keep apart. */}
+                {subScreens.length > 1 ? (
+                  <label
+                    className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                    title="Walk each sub-screen as its own wall. Without this a row of panels running across two screens is patched as one row, straight from one screen into the next."
+                  >
+                    <input type="checkbox" checked={snakePerSubScreen} onChange={() => setSnakePerSubScreen((prev) => !prev)} />
+                    <span>Each sub-screen separately</span>
+                  </label>
+                ) : null}
+                <label
+                  className="flex items-center gap-2 rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm text-white"
+                  title="Draw the path Auto Snake would patch over the layout, with its start, direction and panel order"
+                >
+                  <input type="checkbox" checked={snakePreview} onChange={() => setSnakePreview((prev) => !prev)} />
+                  <span>Preview path</span>
+                </label>
+                <Button intent="primary" onClick={snakePatch}><Wand2 className="h-4 w-4" />Auto Snake</Button>
+                {snakePreview && snakePreviewSegments.length ? (
+                  <>
+                    <StatusChip tone="violet">
+                      {`Preview: ${snakePreviewSegments.reduce((sum, seg) => sum + seg.points.length, 0)} panels`}
+                      {snakePreviewSegments.length > 1 ? ` · ${snakePreviewSegments.length} runs` : ""}
+                    </StatusChip>
+                    {/* What the walk will actually be cut into: the per-port
+                        ceiling it has to obey, and how many ports that many
+                        panels needs. The path alone never said where a run
+                        would be forced to break. */}
+                    <StatusChip tone="amber">
+                      {`Max ${formatNumber(snakePreviewCapacity.maxPerPort)} panels per ${snakePreviewCapacity.unit} · needs ${formatNumber(snakePreviewCapacity.portsNeeded)}`}
+                    </StatusChip>
+                  </>
+                ) : null}
+                <Button intent="secondary" onClick={clearSelectedPortPatching}>
+                  Clear Selected {patchMode === "signal" ? (activePort > 0 ? `Port ${activePort}` : "Port") : (activePowerPort > 0 ? `Plug ${activePowerPort}` : "Plug")}
+                </Button>
+                <Button intent="danger" onClick={clearSignalCabling}>Clear Signal</Button>
+                <Button intent="danger" onClick={clearPowerAssignments}>Clear Power</Button>
+              </ControlGroup>
+            </div>
 
           </CardContent>
         </Card>
@@ -9641,6 +9852,57 @@ const exportJson = () => {
               }
               setMovingPatternSurfaceKey(key);
               setShowDownloadFormatModal(true);
+            }}
+          />
+        ) : null}
+        {showStaticChoice ? (
+          <ExportChoiceModal
+            title="Static Download"
+            intro="A still PNG of the wall. Each option asks for its own settings next."
+            choices={[
+              {
+                key: "testPattern",
+                label: "Test Pattern",
+                hint: "Alignment pattern per surface, at each one's true output resolution - panel grid, numbering and port colours.",
+                disabledReason: hasActivePanels ? undefined : "No active panels to render a test pattern from.",
+              },
+              {
+                key: "ledMap",
+                label: "Basic LED Map",
+                hint: "A plain picture of the finished surface: every separate piece, a solid colour or your own image, obstructions drawn over it.",
+                disabledReason: hasActivePanels ? undefined : "No active panels to map.",
+              },
+            ]}
+            onClose={() => setShowStaticChoice(false)}
+            onChoose={(key) => {
+              setShowStaticChoice(false);
+              if (key === "testPattern") setTestPatternPicker(testPatternSectionOptions());
+              else openBasicLedMap();
+            }}
+          />
+        ) : null}
+        {showMovingChoice ? (
+          <ExportChoiceModal
+            title="Moving Test Pattern"
+            intro="The animated pattern. Both ask which surface next."
+            choices={[
+              {
+                key: "view",
+                label: "View in Browser",
+                hint: "Opens full screen in a new tab, rendered pixel-for-pixel at the surface's true resolution.",
+                disabledReason: hasActivePanels ? undefined : "No active panels to render a test pattern from.",
+              },
+              {
+                key: "download",
+                label: "Download",
+                hint: "Records one seamless loop to a WebM or MP4 file you can put on a media server.",
+                disabledReason: hasActivePanels ? undefined : "No active panels to render a test pattern from.",
+              },
+            ]}
+            onClose={() => setShowMovingChoice(false)}
+            onChoose={(key) => {
+              setShowMovingChoice(false);
+              startMovingPattern(key === "view" ? "open" : "download");
             }}
           />
         ) : null}

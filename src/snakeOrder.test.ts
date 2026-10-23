@@ -104,3 +104,47 @@ describe("snakeOrderSegments per sub-screen", () => {
     );
   });
 });
+
+// "Start from bottom" used to be baked into the direction code (LRB / RLB /
+// BT), which listed the same walks twice. It is a separate flag now; the old
+// codes still resolve, so stale state keeps working.
+describe("start from bottom is a flag, not a direction", () => {
+  const wall = makeGridPanels(3, 3);
+  const rowOf = (cell: Cell) => Math.round(cell.y);
+  const firstRow = (direction: string, startFromBottom: boolean) =>
+    rowOf(snakeOrderSegments(wall, opts({ direction, startFromBottom }))[0][0]);
+
+  it("unticked starts at the top, ticked starts at the bottom", () => {
+    const top = Math.min(...wall.map(rowOf));
+    const bottom = Math.max(...wall.map(rowOf));
+    expect(firstRow("LR", false)).toBe(top);
+    expect(firstRow("LR", true)).toBe(bottom);
+    expect(firstRow("RL", false)).toBe(top);
+    expect(firstRow("RL", true)).toBe(bottom);
+  });
+
+  it("LR + start from bottom is exactly the old LRB", () => {
+    const viaFlag = snakeOrderSegments(wall, opts({ direction: "LR", startFromBottom: true }));
+    const viaOldCode = snakeOrderSegments(wall, opts({ direction: "LRB" }));
+    expect(viaFlag.map((s) => s.map((c) => c.id))).toEqual(viaOldCode.map((s) => s.map((c) => c.id)));
+  });
+
+  it("RL + start from bottom is exactly the old RLB", () => {
+    const viaFlag = snakeOrderSegments(wall, opts({ direction: "RL", startFromBottom: true }));
+    const viaOldCode = snakeOrderSegments(wall, opts({ direction: "RLB" }));
+    expect(viaFlag.map((s) => s.map((c) => c.id))).toEqual(viaOldCode.map((s) => s.map((c) => c.id)));
+  });
+
+  it("columns + start from bottom is exactly the old BT", () => {
+    const viaFlag = snakeOrderSegments(wall, opts({ direction: "TB", startFromBottom: true }));
+    const viaOldCode = snakeOrderSegments(wall, opts({ direction: "BT" }));
+    expect(viaFlag.map((s) => s.map((c) => c.id))).toEqual(viaOldCode.map((s) => s.map((c) => c.id)));
+  });
+
+  it("every panel is still walked exactly once either way", () => {
+    for (const startFromBottom of [false, true]) {
+      const ids = snakeOrderSegments(wall, opts({ direction: "LR", startFromBottom })).flat().map((c) => c.id);
+      expect(new Set(ids).size).toBe(wall.length);
+    }
+  });
+});

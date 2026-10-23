@@ -28,11 +28,21 @@ export type ObstructionSurface = {
    * wrong side of it.
    */
   mirror: boolean;
+  /**
+   * The WHOLE layout's bbox, which obstruction offsets are measured against.
+   * Omit when the surface being drawn is itself the whole layout.
+   */
+  layoutBBoxMm?: { x: number; y: number; w: number; h: number };
 };
 
-// Fully opaque: an obstruction hides the LED behind it, so showing the
-// pattern through it would misrepresent what the audience actually sees.
+// Semi-transparent, not solid: an obstruction does hide the LED behind it,
+// but the person reading this needs to see WHAT it is hiding - which panels,
+// which part of the content, which numbering - to decide whether to move it
+// or re-cut the content. A solid block answers "something is covered" and
+// nothing else. The border and the label stay fully opaque so the obstruction
+// is never mistaken for a tint on the picture.
 const FILL = "#0f172a";
+const FILL_ALPHA = 0.55;
 const BORDER = "#f43f5e";
 const TEXT = "#ffffff";
 
@@ -60,7 +70,7 @@ export const drawObstructions = (
   const borderPx = Math.max(2, Math.round(W * 0.0012));
 
   obstructions.forEach((obstruction) => {
-    const raw = obstructionPixelRect(obstruction, wallBBoxMm, W, H);
+    const raw = obstructionPixelRect(obstruction, wallBBoxMm, W, H, surface.layoutBBoxMm ?? wallBBoxMm);
     // Off-surface obstructions are skipped rather than clamped: clamping
     // would park a block against the edge of a sub-screen it does not
     // actually cover, which reads as a real obstruction that isn't there.
@@ -69,8 +79,10 @@ export const drawObstructions = (
     const rect = { x, y: raw.y, w: raw.w, h: raw.h };
 
     ctx.save();
+    ctx.globalAlpha = FILL_ALPHA;
     ctx.fillStyle = FILL;
     ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.globalAlpha = 1;
     ctx.lineWidth = borderPx;
     ctx.strokeStyle = BORDER;
     ctx.strokeRect(rect.x + borderPx / 2, rect.y + borderPx / 2, Math.max(0, rect.w - borderPx), Math.max(0, rect.h - borderPx));
@@ -80,7 +92,7 @@ export const drawObstructions = (
     ctx.beginPath();
     ctx.rect(rect.x, rect.y, rect.w, rect.h);
     ctx.clip();
-    ctx.globalAlpha = 0.25;
+    ctx.globalAlpha = 0.35;
     ctx.strokeStyle = BORDER;
     ctx.lineWidth = Math.max(1, Math.round(borderPx / 2));
     const step = Math.max(12, Math.round(fontPx * 1.2));

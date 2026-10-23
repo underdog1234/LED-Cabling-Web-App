@@ -64,10 +64,17 @@ export default function ObstructionsPanel({ obstructions, onAdd, onChange, onDel
         <CardTitle className="text-white [text-shadow:0_0_2px_black]">Obstructions</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm text-white [text-shadow:0_0_2px_black]">
-        <div className="text-xs text-slate-400">
-          Anything standing in front of the LED. Drag one around the Panel Layout to position it. Obstructions appear on every test
-          pattern and on the Basic LED Map as opaque blocks, labelled in pixels and metres - they never affect panel counts, power,
-          weight or patching.
+        <div className="space-y-1 text-xs text-slate-400">
+          <div>
+            Anything standing in front of the LED. Drag one around the Panel Layout to position it. Obstructions appear on the
+            layout, in the PDF, on every test pattern and on the Basic LED Map, labelled in pixels and metres - they never affect
+            panel counts, power, weight or patching.
+          </div>
+          <div>
+            <span className="text-slate-300">X 0, Y 0</span> is centred on the wall with the bottom edge level with the bottom of
+            the layout. X positive moves right, Y positive moves down. Measured from the wall, so adding panels does not leave an
+            obstruction behind.
+          </div>
         </div>
 
         <div className="flex gap-2">
@@ -118,8 +125,8 @@ export default function ObstructionsPanel({ obstructions, onAdd, onChange, onDel
                 <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                   {metreField(obstruction, "wMm", "Width (m)")}
                   {metreField(obstruction, "hMm", "Height (m)")}
-                  {metreField(obstruction, "xMm", "X (m)")}
-                  {metreField(obstruction, "yMm", "Y (m)")}
+                  {metreField(obstruction, "xMm", "X offset (m)")}
+                  {metreField(obstruction, "yMm", "Y offset (m)")}
                 </div>
               </div>
             ))}
