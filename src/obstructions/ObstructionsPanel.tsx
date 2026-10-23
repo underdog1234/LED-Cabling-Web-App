@@ -59,7 +59,9 @@ export default function ObstructionsPanel({ obstructions, onAdd, onChange, onDel
   };
 
   return (
-    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible>
+    // Folded away by default, like Sub-Screens - most projects have no
+    // obstructions at all, and the layout canvas wants the height.
+    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible defaultOpen={false}>
       <CardHeader>
         <CardTitle className="text-white [text-shadow:0_0_2px_black]">Obstructions</CardTitle>
       </CardHeader>

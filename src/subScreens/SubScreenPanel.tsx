@@ -43,7 +43,9 @@ export default function SubScreenPanel({
   };
 
   return (
-    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible>
+    // Folded away by default: a reference panel most projects never open,
+    // and every row it takes is a row the layout canvas does not get.
+    <Card className="border-slate-700 bg-slate-800 print-card no-print" collapsible defaultOpen={false}>
       <CardHeader>
         <CardTitle className="text-white [text-shadow:0_0_2px_black]">Sub-Screens</CardTitle>
       </CardHeader>

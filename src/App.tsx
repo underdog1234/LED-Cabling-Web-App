@@ -100,7 +100,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.73.0";
+const APP_VERSION = "0.74.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1177,6 +1177,27 @@ const getPowerPortLoadWatts = (
 const getPortPanelCount = (panels: Cell[], portField: "assignedPort" | "assignedPowerPort", portId: number) =>
   panels.filter((cell) => isActiveCell(cell) && cell[portField] === portId).length;
 
+/**
+ * How many panels sit on each port, 1..maxPorts - the starting occupancy a
+ * walk has to work around, in the shape planSnakePorts wants it.
+ */
+export const portPanelCounts = (
+  panels: Cell[],
+  portField: "assignedPort" | "assignedPowerPort",
+  maxPorts: number,
+): Map<number, number> => {
+  const counts = new Map<number, number>();
+  for (let port = 1; port <= maxPorts; port += 1) counts.set(port, getPortPanelCount(panels, portField, port));
+  return counts;
+};
+
+/** The same, in watts, for the plugs. */
+export const portLoadWatts = (panels: Cell[], maxPorts: number): Map<number, number> => {
+  const watts = new Map<number, number>();
+  for (let port = 1; port <= maxPorts; port += 1) watts.set(port, getPowerPortLoadWatts(panels, port, 0));
+  return watts;
+};
+
 // Reading order for auto-snake over a free layout: row bands (or column bands
 // for TB/BT) with optional alternation - the non-uniform generalisation of the
 // old rows x cols walk. LOOP_TOGETHER pairs row bands into left/right loops.
@@ -1210,10 +1231,16 @@ const orderPanelsForSnake = (
   if (snakeDirection === "LOOP_TOGETHER") {
     // Pair adjacent row bands; each pair splits into a left loop and a right
     // loop that both start at the middle, mirroring the old grid behaviour.
+    //
+    // Start from bottom reverses which end the pairs are taken from, so a
+    // ground-supported wall loops up from the floor rather than down from the
+    // top - the pairs themselves still read top-then-bottom inside each loop,
+    // which is what keeps a loop a loop.
+    const loopRows = fromBottom ? [...rows].reverse() : rows;
     const segments: Cell[][] = [];
-    for (let pairStart = 0; pairStart < rows.length; pairStart += 2) {
-      const top = rows[pairStart];
-      const bottom = pairStart + 1 < rows.length ? rows[pairStart + 1] : null;
+    for (let pairStart = 0; pairStart < loopRows.length; pairStart += 2) {
+      const top = loopRows[pairStart];
+      const bottom = pairStart + 1 < loopRows.length ? loopRows[pairStart + 1] : null;
       const splitAt = (row: Cell[]) => Math.floor(row.length / 2);
       const topSplit = splitAt(top);
       const leftSegment = [...top.slice(0, topSplit)].reverse();
@@ -1268,6 +1295,93 @@ export type SnakeOrderOptions = {
   perSubScreen: boolean;
   /** Sub-screen ids, in the order their paths should run. */
   subScreenIds: string[];
+};
+
+/**
+ * Which port each panel of a walk lands on.
+ *
+ * Extracted so the preview and the Auto Snake button share ONE implementation
+ * of the port split, for exactly the reason snakeOrderSegments is shared: the
+ * preview used to draw a single unbroken line through every panel in reading
+ * order, while the button cut that line into one run per port. On a 72-panel
+ * wall at 23 per port the drawing said "one run" and the button made four.
+ *
+ * Pure: it is handed the starting occupancy rather than reading the grid, so
+ * it can be run against a hypothetical layout (the preview) or the real one
+ * (the patch) with identical results.
+ *
+ * `weightOf` / `maxWeightPerPort` carry the power rule - a plug fills on amps
+ * as well as on panel count. Leave them out for signal, which only counts.
+ */
+export type SnakePortPlanOptions = {
+  /** Keep each letter on one port where it fits (LETTERS mode). */
+  letterMode: boolean;
+  /** Highest port number available (primary signal ports, or the distro's plugs). */
+  maxPorts: number;
+  maxPerPort: number;
+  /** Panels already on each port from OUTSIDE this walk - other sub-screens share the hardware. */
+  startingCounts?: Map<number, number>;
+  startingWeights?: Map<number, number>;
+  weightOf?: (cell: Cell) => number;
+  maxWeightPerPort?: number;
+  /** Start every run on a fresh port (loop-together, and per-sub-screen walks). */
+  freshPortPerSegment: boolean;
+};
+
+/** cellId -> port. A cell is absent when the ports ran out before it. */
+export const planSnakePorts = (segments: Cell[][], options: SnakePortPlanOptions): Map<string, number> => {
+  const { letterMode, maxPorts, maxPerPort, weightOf, maxWeightPerPort, freshPortPerSegment } = options;
+  const counts = new Map(options.startingCounts ?? []);
+  const weights = new Map(options.startingWeights ?? []);
+  const countOf = (port: number) => counts.get(port) ?? 0;
+  const weightOn = (port: number) => weights.get(port) ?? 0;
+  const plan = new Map<string, number>();
+  let portIndex = 0;
+
+  const skipFullPorts = () => {
+    while (portIndex < maxPorts && countOf(portIndex + 1) >= maxPerPort) portIndex += 1;
+  };
+
+  segments.forEach((segment) => {
+    if (letterMode && portIndex < maxPorts) {
+      skipFullPorts();
+      if (portIndex < maxPorts) {
+        const port = portIndex + 1;
+        const current = countOf(port);
+        const segmentWeight = weightOf ? segment.reduce((sum, cell) => sum + weightOf(cell), 0) : 0;
+        const withinWeight = (total: number) => maxWeightPerPort === undefined || total <= maxWeightPerPort;
+        const fitsFullPort = segment.length <= maxPerPort && withinWeight(segmentWeight);
+        const fitsRemaining = current + segment.length <= maxPerPort && withinWeight(weightOn(port) + segmentWeight);
+        if (current > 0 && fitsFullPort && !fitsRemaining) portIndex += 1;
+      }
+    }
+
+    segment.forEach((cell) => {
+      const cellWeight = weightOf ? weightOf(cell) : 0;
+      while (portIndex < maxPorts) {
+        const port = portIndex + 1;
+        if (countOf(port) >= maxPerPort) {
+          portIndex += 1;
+          continue;
+        }
+        if (maxWeightPerPort !== undefined && weightOn(port) + cellWeight > maxWeightPerPort) {
+          portIndex += 1;
+          continue;
+        }
+        plan.set(cell.id, port);
+        counts.set(port, countOf(port) + 1);
+        weights.set(port, weightOn(port) + cellWeight);
+        return;
+      }
+    });
+
+    if (!letterMode && freshPortPerSegment) {
+      skipFullPorts();
+      if (portIndex < maxPorts && countOf(portIndex + 1) > 0) portIndex += 1;
+    }
+  });
+
+  return plan;
 };
 
 export const snakeOrderSegments = (panels: Cell[], options: SnakeOrderOptions): Cell[][] => {
@@ -6892,18 +7006,35 @@ const exportJson = () => {
   // outside the accessible layout area" after importing a wide/tall project.
   const fitToView = () => {
     const viewport = workspaceViewportRef.current;
-    if (!viewport || workspaceSizeMm.w <= 0 || workspaceSizeMm.h <= 0) return;
+    if (!viewport) return;
+    // Fit the CONTENT plus a small margin, not the whole workspace.
+    //
+    // The workspace is deliberately larger than the content while something
+    // is on the clipboard (see workspacePad) so a copy can be dropped clear
+    // of the wall. Fitting that padded box meant that after a copy/paste the
+    // wall was zoomed out to leave room for an empty area the size of the
+    // thing pasted - the "extra space around the panels" report.
+    const marginMm = MODULE_MM;
+    const fitW = contentBBox.w + marginMm * 2;
+    const fitH = contentBBox.h + marginMm * 2;
+    if (fitW <= 0 || fitH <= 0) return;
     // Viewport padding (p-4 = 16px each side) eats into the usable area.
     const availW = Math.max(1, viewport.clientWidth - 32);
     const availH = Math.max(1, viewport.clientHeight - 32);
     const pxPerMmAtZoom1 = CELL_SIZE / MODULE_MM;
-    const fitZoom = Math.min(availW / (workspaceSizeMm.w * pxPerMmAtZoom1), availH / (workspaceSizeMm.h * pxPerMmAtZoom1));
-    setZoom(Math.min(2, Math.max(0.02, fitZoom)));
-    // Reset scroll to the origin so the whole (now-resized) workspace is
-    // actually in view, rather than leaving a stale scroll position that
-    // could still clip part of it after the content shrinks/grows.
-    viewport.scrollLeft = 0;
-    viewport.scrollTop = 0;
+    const fitZoom = Math.min(availW / (fitW * pxPerMmAtZoom1), availH / (fitH * pxPerMmAtZoom1));
+    const nextZoom = Math.min(2, Math.max(0.02, fitZoom));
+    setZoom(nextZoom);
+    // Scroll to the content rather than to the workspace origin: with paste
+    // padding in play the origin is off in the empty margin, so resetting to
+    // 0,0 would park the view beside the wall instead of on it.
+    const nextPxPerMm = pxPerMmAtZoom1 * nextZoom;
+    const left = (contentBBox.x - marginMm - workspaceOrigin.x) * nextPxPerMm;
+    const top = (contentBBox.y - marginMm - workspaceOrigin.y) * nextPxPerMm;
+    requestAnimationFrame(() => {
+      viewport.scrollLeft = Math.max(0, left);
+      viewport.scrollTop = Math.max(0, top);
+    });
   };
   const displayRectOf = (cell: Cell): RectMm => {
     const rect = isFlippedView ? mirrorRectX(cellRect(cell), wallBBox) : cellRect(cell);
@@ -7211,6 +7342,11 @@ const exportJson = () => {
     setPasteAnchor(null);
   };
 
+  // Manual patching rolls on to the next port when the current one fills,
+  // instead of silently refusing the panel. Dragging across a wall is one
+  // continuous gesture; stopping dead at panel 23 with no indication looked
+  // like the click had missed. The port actually used is written back to
+  // activePort, so the chip and the port list follow the patch along.
   const assignSignalPanel = (target: Cell) => {
     if (activePort < 1) return;
     if (dragVisited.has(target.id)) return;
@@ -7219,15 +7355,23 @@ const exportJson = () => {
       const current = findCellById(prev, target.id);
       if (!current || !isActiveCell(current)) return prev;
 
-      const currentCount = getPortPanelCount(prev, "assignedPort", activePort);
-      const isAlreadySamePort = current.assignedPort === activePort;
-      if (!isAlreadySamePort && currentCount >= safePanelsPerSignalPort) return prev;
+      // Capacity is read from `prev`, not from the render's grid: a drag
+      // assigns several panels before React re-renders, and a stale count
+      // would let the port overfill.
+      let port = activePort;
+      if (current.assignedPort !== port) {
+        while (port <= primarySignalPortCount && getPortPanelCount(prev, "assignedPort", port) >= safePanelsPerSignalPort) {
+          port += 1;
+        }
+        if (port > primarySignalPortCount) return prev;
+      }
 
       const next = cloneGrid(prev);
       const cell = findCellById(next, target.id)!;
-      cell.assignedPort = activePort;
+      const isAlreadySamePort = cell.assignedPort === port;
+      cell.assignedPort = port;
       if (!isAlreadySamePort) {
-        cell.sequence = getNextSequence(next, "assignedPort", "sequence", activePort);
+        cell.sequence = getNextSequence(next, "assignedPort", "sequence", port);
       }
       return next;
     });
@@ -7235,6 +7379,8 @@ const exportJson = () => {
     setDragVisited((prev) => new Set(prev).add(target.id));
   };
 
+  // Same roll-on as signal. A plug fills on amps as well as on panel count,
+  // so both ceilings move it along.
   const assignPowerPanel = (target: Cell) => {
     if (activePowerPort < 1) return;
     if (dragVisited.has(target.id)) return;
@@ -7243,26 +7389,81 @@ const exportJson = () => {
       const current = findCellById(prev, target.id);
       if (!current || !isActiveCell(current)) return prev;
 
-      const currentPanels = getPortPanelCount(prev, "assignedPowerPort", activePowerPort);
-      const isAlreadySamePort = current.assignedPowerPort === activePowerPort;
-      if (!isAlreadySamePort && currentPanels >= safePanelsPerPowerOutlet) return prev;
-
       const cellWatts = PANEL_TYPES[cellPanelType(current)].power.maxW;
-      const currentPortLoad = getPowerPortLoadWatts(prev, activePowerPort, 0, current.id);
-      if (!isAlreadySamePort && currentPortLoad + cellWatts > MAX_OUTLET_AMPS * VOLTAGE) return prev;
+      let port = activePowerPort;
+      if (current.assignedPowerPort !== port) {
+        const maxPlug = powerPorts.length;
+        while (port <= maxPlug) {
+          const full = getPortPanelCount(prev, "assignedPowerPort", port) >= safePanelsPerPowerOutlet;
+          const overAmps = getPowerPortLoadWatts(prev, port, 0, current.id) + cellWatts > MAX_OUTLET_AMPS * VOLTAGE;
+          if (!full && !overAmps) break;
+          port += 1;
+        }
+        if (port > maxPlug) return prev;
+      }
 
       const next = cloneGrid(prev);
       const cell = findCellById(next, target.id)!;
-      cell.assignedPowerPort = activePowerPort;
+      const isAlreadySamePort = cell.assignedPowerPort === port;
+      cell.assignedPowerPort = port;
       cell.powerManual = true;
       if (!isAlreadySamePort) {
-        cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", activePowerPort);
+        cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", port);
       }
       return next;
     });
 
     setDragVisited((prev) => new Set(prev).add(target.id));
   };
+
+  /**
+   * Move the ACTIVE port on once it is full.
+   *
+   * The assign helpers above already roll a panel onto the next port with
+   * room, so nothing is ever silently refused. This is the other half: the
+   * port chip, and the port the next click starts from, follow the patch
+   * along instead of still naming a port that cannot take anything.
+   *
+   * Done as an effect on the grid rather than inside the assign helpers
+   * because those decide the port inside a state updater, which React runs
+   * after the call returns - reading the result straight afterwards gives
+   * nothing, which is exactly the bug this replaces. Both use the same
+   * "first port with room" rule, so they always agree.
+   */
+  useEffect(() => {
+    if (editMode !== "patch") return;
+    if (patchMode === "signal") {
+      if (activePort < 1) return;
+      if (getPortPanelCount(grid, "assignedPort", activePort) < safePanelsPerSignalPort) return;
+      let port = activePort;
+      while (port <= primarySignalPortCount && getPortPanelCount(grid, "assignedPort", port) >= safePanelsPerSignalPort) {
+        port += 1;
+      }
+      // Every port full: leave the chip where it is rather than pointing at
+      // hardware that does not exist.
+      if (port <= primarySignalPortCount) setActivePort(port);
+      return;
+    }
+    if (activePowerPort < 1) return;
+    // Panel count only here: whether a plug has amps left depends on which
+    // panel is being added, so that check stays per-panel in assignPowerPanel.
+    if (getPortPanelCount(grid, "assignedPowerPort", activePowerPort) < safePanelsPerPowerOutlet) return;
+    let plug = activePowerPort;
+    while (plug <= powerPorts.length && getPortPanelCount(grid, "assignedPowerPort", plug) >= safePanelsPerPowerOutlet) {
+      plug += 1;
+    }
+    if (plug <= powerPorts.length) setActivePowerPort(plug);
+  }, [
+    grid,
+    editMode,
+    patchMode,
+    activePort,
+    activePowerPort,
+    safePanelsPerSignalPort,
+    safePanelsPerPowerOutlet,
+    primarySignalPortCount,
+    powerPorts.length,
+  ]);
 
   // --- Workspace pointer interactions -------------------------------------
   // Patch mode: press/drag over panels assigns the active port.
@@ -7458,13 +7659,57 @@ const exportJson = () => {
     const scopeIds = currentScopeIds();
     const scoped = (scopeIds ? grid.filter((c) => scopeIds.has(c.id)) : grid).filter((c) => isActiveCell(c));
     if (!scoped.length) return [];
-    let order = 0;
-    return snakeOrderSegments(scoped, snakeOrderOptions).map((segment, segmentIndex) => ({
-      segmentIndex,
-      screenName: segment.length ? subScreens.find((sc) => sc.id === segment[0].subScreenId)?.name ?? null : null,
-      cells: segment.map((cell) => ({ cell, order: (order += 1) })),
-    }));
-  }, [snakePreview, snakeOrderOptions, grid, subScreens, resolvedActiveSubScreenId]);
+    const segments = snakeOrderSegments(scoped, snakeOrderOptions);
+
+    // The SAME port split the button will apply (planSnakePorts), against the
+    // same starting occupancy: the walk clears its own scope first, so the
+    // ports it has to work around are the ones held by panels OUTSIDE it.
+    const outside = scopeIds ? grid.filter((c) => !scopeIds.has(c.id)) : [];
+    const isSignal = patchMode === "signal";
+    const maxPorts = isSignal ? primarySignalPortCount : powerPorts.length;
+    const plan = planSnakePorts(segments, {
+      letterMode: snakeDirection === "LETTERS",
+      maxPorts,
+      maxPerPort: isSignal ? safePanelsPerSignalPort : safePanelsPerPowerOutlet,
+      startingCounts: portPanelCounts(outside, isSignal ? "assignedPort" : "assignedPowerPort", maxPorts),
+      startingWeights: isSignal ? undefined : portLoadWatts(outside, maxPorts),
+      weightOf: isSignal ? undefined : (cell) => PANEL_TYPES[cellPanelType(cell)].power.maxW,
+      maxWeightPerPort: isSignal ? undefined : MAX_OUTLET_AMPS * VOLTAGE,
+      freshPortPerSegment: isSignal && segments.length > 1,
+    });
+
+    // One preview run PER PORT, not one per walk segment: a 72-panel wall at
+    // 23 panels a port is four runs, and drawing it as one unbroken line was
+    // the preview showing something the button never does. Sequence numbers
+    // restart at 1 on each port, exactly as the patched panels are numbered.
+    const runs: Array<{ port: number | null; screenName: string | null; cells: Array<{ cell: Cell; order: number }> }> = [];
+    let current: (typeof runs)[number] | null = null;
+    segments.flat().forEach((cell) => {
+      const port = plan.get(cell.id) ?? null;
+      if (!current || current.port !== port) {
+        current = {
+          port,
+          screenName: subScreens.find((sc) => sc.id === cell.subScreenId)?.name ?? null,
+          cells: [],
+        };
+        runs.push(current);
+      }
+      current.cells.push({ cell, order: current.cells.length + 1 });
+    });
+    return runs.map((run, segmentIndex) => ({ ...run, segmentIndex }));
+  }, [
+    snakePreview,
+    snakeOrderOptions,
+    snakeDirection,
+    grid,
+    subScreens,
+    resolvedActiveSubScreenId,
+    patchMode,
+    primarySignalPortCount,
+    powerPorts.length,
+    safePanelsPerSignalPort,
+    safePanelsPerPowerOutlet,
+  ]);
 
   /** The same runs with each panel's CURRENT screen position - cheap, so it can follow a drag. */
   const snakePreviewSegments = useMemo(
@@ -7522,46 +7767,24 @@ const exportJson = () => {
           cell.sequence = null;
         }
 
-        // Live capacity-aware walk (mirrors the power loop below): unlike the
-        // old blind port/seq counters, this queries actual port occupancy so
-        // it correctly skips ports another sub-screen has already filled,
-        // instead of assuming every port starts empty. Bounded by
-        // primarySignalPortCount (not the full port list) so auto-patching
-        // never assigns into the range reserved for the backup signal loop.
-        let portIndex = 0;
-        const advanceToPortWithCapacity = () => {
-          while (portIndex < primarySignalPortCount && getPortPanelCount(next, "assignedPort", portIndex + 1) >= safePanelsPerSignalPort) {
-            portIndex += 1;
-          }
-        };
-        const assignToSignalPort = (cell: Cell) => {
-          advanceToPortWithCapacity();
-          if (portIndex >= primarySignalPortCount) return;
-          const port = portIndex + 1;
+        // The port split comes from planSnakePorts - the same call the preview
+        // makes - so the runs drawn before the button is pressed are the runs
+        // it produces. Starting counts are read AFTER the clear above, so the
+        // walk still respects ports another sub-screen has already filled
+        // (ports are physically shared hardware) and is bounded by
+        // primarySignalPortCount, never reaching into the backup-loop range.
+        const plan = planSnakePorts(segments, {
+          letterMode,
+          maxPorts: primarySignalPortCount,
+          maxPerPort: safePanelsPerSignalPort,
+          startingCounts: portPanelCounts(next, "assignedPort", primarySignalPortCount),
+          freshPortPerSegment: segments.length > 1,
+        });
+        segments.flat().forEach((cell) => {
+          const port = plan.get(cell.id);
+          if (!port) return;
           cell.assignedPort = port;
           cell.sequence = getNextSequence(next, "assignedPort", "sequence", port);
-        };
-
-        segments.forEach((segment) => {
-          // Letter mode: don't split a letter across ports - advance to a fresh
-          // port first if the whole letter won't fit in the current port's
-          // remaining capacity (unless the letter is larger than a full port,
-          // in which case it must split).
-          if (letterMode) {
-            advanceToPortWithCapacity();
-            if (portIndex < primarySignalPortCount) {
-              const currentCount = getPortPanelCount(next, "assignedPort", portIndex + 1);
-              const fitsFullPort = segment.length <= safePanelsPerSignalPort;
-              const fitsRemaining = currentCount + segment.length <= safePanelsPerSignalPort;
-              if (currentCount > 0 && fitsFullPort && !fitsRemaining) portIndex += 1;
-            }
-          }
-          segment.forEach(assignToSignalPort);
-          // Each loop-together segment starts on a fresh port.
-          if (!letterMode && segments.length > 1) {
-            advanceToPortWithCapacity();
-            if (portIndex < primarySignalPortCount && getPortPanelCount(next, "assignedPort", portIndex + 1) > 0) portIndex += 1;
-          }
         });
       }
 
@@ -7573,40 +7796,24 @@ const exportJson = () => {
           cell.powerManual = false;
         }
 
-        let portIndex = 0;
-        const assignToPlug = (cell: Cell) => {
-          const cellWatts = PANEL_TYPES[cellPanelType(cell)].power.maxW;
-          while (portIndex < powerPorts.length) {
-            const port = powerPorts[portIndex];
-            const currentLoad = getPowerPortLoadWatts(next, port.id, 0);
-            const currentPanels = getPortPanelCount(next, "assignedPowerPort", port.id);
-            if (currentPanels >= safePanelsPerPowerOutlet) {
-              portIndex += 1;
-              continue;
-            }
-            if (currentLoad + cellWatts <= MAX_OUTLET_AMPS * VOLTAGE) {
-              cell.assignedPowerPort = port.id;
-              cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", port.id);
-              cell.powerManual = false;
-              return;
-            }
-            portIndex += 1;
-          }
-        };
-
-        segments.forEach((segment) => {
-          // Letter mode: keep a letter on one plug where it fits (advance first
-          // if the whole letter won't fit the current plug's count/amp headroom).
-          if (letterMode && portIndex < powerPorts.length) {
-            const plug = powerPorts[portIndex];
-            const load = getPowerPortLoadWatts(next, plug.id, 0);
-            const count = getPortPanelCount(next, "assignedPowerPort", plug.id);
-            const letterWatts = segment.reduce((s, c) => s + PANEL_TYPES[cellPanelType(c)].power.maxW, 0);
-            const fitsFullPlug = segment.length <= safePanelsPerPowerOutlet && letterWatts <= MAX_OUTLET_AMPS * VOLTAGE;
-            const fitsRemaining = count + segment.length <= safePanelsPerPowerOutlet && load + letterWatts <= MAX_OUTLET_AMPS * VOLTAGE;
-            if (count > 0 && fitsFullPlug && !fitsRemaining) portIndex += 1;
-          }
-          segment.forEach(assignToPlug);
+        // Same planner as signal, plus the rule that makes a plug different:
+        // it fills on amps as well as on panel count.
+        const plan = planSnakePorts(segments, {
+          letterMode,
+          maxPorts: powerPorts.length,
+          maxPerPort: safePanelsPerPowerOutlet,
+          startingCounts: portPanelCounts(next, "assignedPowerPort", powerPorts.length),
+          startingWeights: portLoadWatts(next, powerPorts.length),
+          weightOf: (cell) => PANEL_TYPES[cellPanelType(cell)].power.maxW,
+          maxWeightPerPort: MAX_OUTLET_AMPS * VOLTAGE,
+          freshPortPerSegment: false,
+        });
+        segments.flat().forEach((cell) => {
+          const port = plan.get(cell.id);
+          if (!port) return;
+          cell.assignedPowerPort = port;
+          cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", port);
+          cell.powerManual = false;
         });
       }
 
@@ -8955,9 +9162,13 @@ const exportJson = () => {
                 {snakePreviewSegments.length ? (
                   <svg className="pointer-events-none absolute inset-0 z-[38]" width={svgW} height={svgH}>
                     {snakePreviewSegments.map((segment) => {
-                      const screenIndex = subScreens.findIndex((sc) => sc.name === segment.screenName);
-                      const color = segment.screenName
-                        ? normalizeSubScreenColor(subScreens[screenIndex]?.color, Math.max(screenIndex, 0))
+                      // Coloured by the PORT this run lands on, using the same
+                      // palette the patched panels use, so the preview and the
+                      // result are the same picture. A run with no port left
+                      // (the walk ran out of hardware) falls back to the plain
+                      // preview colour and is called out on its label.
+                      const color = segment.port
+                        ? PORT_COLORS[(segment.port - 1) % PORT_COLORS.length]
                         : SNAKE_PREVIEW_COLOR;
                       const pts = segment.points.map((p) => ({ ...p, px: mmToPx(p.x - workspaceOrigin.x), py: mmToPx(p.y - workspaceOrigin.y) }));
                       const first = pts[0];
@@ -9029,9 +9240,9 @@ const exportJson = () => {
                             strokeWidth={3}
                             paintOrder="stroke"
                           >
-                            {snakePreviewSegments.length > 1
-                              ? `START ${segment.segmentIndex + 1}${segment.screenName ? ` · ${segment.screenName}` : ""}`
-                              : "START"}
+                            {segment.port
+                              ? `${patchMode === "signal" ? "PORT" : "PLUG"} ${segment.port} · ${segment.points.length}${segment.screenName ? ` · ${segment.screenName}` : ""}`
+                              : "NO PORT LEFT"}
                           </text>
                         </g>
                       );
@@ -9624,7 +9835,11 @@ const exportJson = () => {
                     type="checkbox"
                     checked={snakeStartFromBottom}
                     onChange={() => setSnakeStartFromBottom((prev) => !prev)}
-                    disabled={snakeDirection === "LETTERS" || snakeDirection === "LOOP_TOGETHER"}
+                    // Letter patching walks its letters bottom-up by
+                    // definition, so the choice would mean nothing there.
+                    // Every other direction, loop together included, can start
+                    // from either end.
+                    disabled={snakeDirection === "LETTERS"}
                   />
                   <span>Start from bottom</span>
                 </label>
@@ -9651,7 +9866,8 @@ const exportJson = () => {
                   <>
                     <StatusChip tone="violet">
                       {`Preview: ${snakePreviewSegments.reduce((sum, seg) => sum + seg.points.length, 0)} panels`}
-                      {snakePreviewSegments.length > 1 ? ` · ${snakePreviewSegments.length} runs` : ""}
+                      {` · ${snakePreviewSegments.filter((seg) => seg.port).length} ${patchMode === "signal" ? "port" : "plug"}${snakePreviewSegments.filter((seg) => seg.port).length === 1 ? "" : "s"}`}
+                      {snakePreviewSegments.some((seg) => !seg.port) ? " · some panels have no port left" : ""}
                     </StatusChip>
                     {/* What the walk will actually be cut into: the per-port
                         ceiling it has to obey, and how many ports that many

@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.73.0`
+Version `0.74.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -33,6 +33,31 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.74.0
+
+**The preview now shows exactly what Auto Snake will apply**
+
+- The preview drew **one unbroken line** through every panel in reading order, while the button **cut that line into one run per port**. On a 72-panel wall at 23 panels a port the drawing said one run and the button made four - which is why the two never looked alike
+- The port split now comes from **one shared function** used by both the preview and the button, the same way the reading order already was. The preview draws **one run per port**, **coloured with the port's own colour**, each labelled `PORT 3 · 23`, and the sequence numbers **restart at 1 on each port** exactly as the patched panels are numbered
+- Verified panel-for-panel on a 72-panel wall: all 72 preview numbers match the patched sequence numbers, and the preview's `23 / 23 / 23 / 3` split is what the button produces
+- The same function drives power, where a plug fills on **amps as well as panel count**
+
+**Manual patching rolls on to the next port**
+
+- Patching past a full port used to do nothing at all - a click that just didn't take. It now **moves to the next port with room** and carries on, and the **port chip follows**, so the next click starts where the last one left off. Plugs roll on when they run out of either panels or amps
+
+**Loop together can start from the bottom**
+
+- The **Start from bottom** box is no longer greyed out for Loop together. Only Letter patching keeps it disabled, since that walk is bottom-up by definition
+
+**Fit to View after copy and paste**
+
+- While something is on the clipboard the workspace deliberately opens out, so a copy can be dropped clear of the wall. Fit to View was fitting **that padded box**, so after a paste the wall was zoomed out to leave room for an empty area the size of the thing pasted. It now fits the **panels themselves** and scrolls to them
+
+**Sub-Screens and Obstructions start minimised**
+
+- Both panels are folded away by default. Most projects never open either, and every row they took was a row the layout canvas did not get
 
 ## Recent Changes In v0.73.0
 
