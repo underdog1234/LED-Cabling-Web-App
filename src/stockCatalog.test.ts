@@ -86,3 +86,50 @@ describe("STOCK_CATALOG", () => {
     expect(stockCatalogLookup("00000")).toBeNull();
   });
 });
+
+// "Add an item" offers STOCK_CATALOG and nothing else, so a line that the
+// layout calculates but the catalogue does not hold can never be added by
+// hand. That is how 12257 (MG9 Floor / Hanging Bar) went missing: it was
+// written inline in the row builder and existed nowhere else, so a job
+// needing a couple of spare bars had no way to put them on the list - and
+// neither did a job wanting a panel type other than the one the wall is
+// built in.
+describe("every calculated stock line is in the catalogue", () => {
+  // The codes stockRows can emit that are not driven by a catalogue entry
+  // already - panels, cables, bars, distros, reinforcement.
+  const CALCULATED_CODES = [
+    "12224", // MG9 LED Panel
+    "12223", // MT Mesh Panel
+    "12257", // MG9 Floor / Hanging Bar
+    "12262", // MT Floor / Hanging Bar
+    "12245", // 32A 3-phase Power Distro
+    "12246", // 63A 3-phase Power Distro
+    "12254", // 15m PowerCON Cable
+    "12263", // 15m Signal Cable
+    "12264", // MG9 Reinforcement Plate
+    "12265", // MG9 Reinforcement Screw
+  ];
+
+  it.each(CALCULATED_CODES)("%s can be added by hand", (code) => {
+    expect(stockCatalogLookup(code)).toBeTruthy();
+  });
+
+  it("carries the stock figure the calculated row uses", () => {
+    expect(stockCatalogLookup("12224")?.stock).toBe(PANEL_TYPES.MG9.stock.panels);
+    expect(stockCatalogLookup("12223")?.stock).toBe(PANEL_TYPES.MT.stock.panels);
+    expect(stockCatalogLookup("12257")?.stock).toBe(PANEL_TYPES.MG9.stock.hangingBar);
+    expect(stockCatalogLookup("12262")?.stock).toBe(PANEL_TYPES.MT.stock.hangingBar);
+    expect(stockCatalogLookup("12254")?.stock).toBe(PANEL_TYPES.MG9.stock.powerCable15m);
+    expect(stockCatalogLookup("12263")?.stock).toBe(PANEL_TYPES.MG9.stock.signalCable15m);
+  });
+
+  it("offers every panel type, so a wall can be topped up with another kind", () => {
+    const names = Object.values(STOCK_CATALOG).map((item) => item.name);
+    expect(names).toContain("MG9 LED Panel");
+    expect(names).toContain("MT Mesh Panel");
+    expect(names).toContain("Tentec P1.86 LED Poster");
+    // ...and the shaped parts, which were already there.
+    expect(names).toContain("Triangle Panel");
+    expect(names).toContain("1/4 Curved Panel");
+  });
+});

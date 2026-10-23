@@ -100,7 +100,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.74.0";
+const APP_VERSION = "0.74.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -343,6 +343,29 @@ export const STOCK_CATALOG = {
   // Stocked and ordered as COMPLETE posters, never as the eight sections the
   // grid holds - so this row's quantity is poster count, not section count.
   ledPoster: { code: "12199", name: "Tentec P1.86 LED Poster", stock: 10 },
+
+  // --- Lines the layout calculates for itself -------------------------------
+  //
+  // These are the rows stockRows builds from the wall (panels, cables, bars,
+  // distros, reinforcement). They were written inline there and existed
+  // nowhere else, so "Add an item" - which offers STOCK_CATALOG - could not
+  // offer them: a job needing a couple of spare hanging bars (12257), or a
+  // different panel type from the one the wall is built in, had no way to put
+  // that on the list by hand.
+  //
+  // Naming and stock figures match the calculated rows exactly, so a hand-
+  // added line and a calculated one are the same item. The builders still
+  // compute their own quantities; this is the catalogue entry behind them.
+  mg9Panel: { code: "12224", name: "MG9 LED Panel", stock: PANEL_TYPES.MG9.stock.panels },
+  mtPanel: { code: "12223", name: "MT Mesh Panel", stock: PANEL_TYPES.MT.stock.panels },
+  mg9HangingBar: { code: "12257", name: "MG9 Floor / Hanging Bar", stock: PANEL_TYPES.MG9.stock.hangingBar },
+  mtHangingBar: { code: "12262", name: "MT Floor / Hanging Bar", stock: PANEL_TYPES.MT.stock.hangingBar },
+  distro32: { code: "12245", name: "32A 3-phase Power Distro", stock: PANEL_TYPES.MG9.stock.distro32 },
+  distro63: { code: "12246", name: "63A 3-phase Power Distro", stock: PANEL_TYPES.MG9.stock.distro63 },
+  powerCable15m: { code: "12254", name: "15m PowerCON Cable", stock: PANEL_TYPES.MG9.stock.powerCable15m },
+  signalCable15m: { code: "12263", name: "15m Signal Cable", stock: PANEL_TYPES.MG9.stock.signalCable15m },
+  mg9ReinforcementPlate: { code: "12264", name: "MG9 Reinforcement Plate", stock: PANEL_TYPES.MG9.stock.reinforcementPlate },
+  mg9ReinforcementScrew: { code: "12265", name: "MG9 Reinforcement Screw", stock: PANEL_TYPES.MG9.stock.reinforcementScrew },
 } as const;
 
 // Ballast per metre of wall width for a ground-supported wall's fencing.
@@ -3947,8 +3970,8 @@ export default function App() {
       const standardCount = panelVariantCounts.STANDARD;
       const standard = spareForBucket(standardCount, "MG9_STANDARD");
       pushBaseRow(
-        "12224",
-        "MG9 LED Panel",
+        STOCK_CATALOG.mg9Panel.code,
+        STOCK_CATALOG.mg9Panel.name,
         standardCount,
         mg9StockCat.panels ?? 0,
         `${standardCount} + ${standard.spare} spare, rounded up to full boxes of ${mg9Defaults.panelsPerBox} = ${standard.total} (${standard.spareRounded} spare)`,
@@ -4023,8 +4046,8 @@ export default function App() {
     if (mtCount > 0) {
       const mt = spareForBucket(mtCount, "MT");
       pushBaseRow(
-        "12223",
-        "MT Mesh Panel",
+        STOCK_CATALOG.mtPanel.code,
+        STOCK_CATALOG.mtPanel.name,
         mtCount,
         mtStockCat.panels ?? 0,
         `${mtCount} + ${mt.spare} spare, rounded up to full boxes of ${mtDefaults.panelsPerBox} = ${mt.total} (${mt.spareRounded} spare)`,
@@ -4082,8 +4105,8 @@ export default function App() {
     if (deploymentType === DEPLOYMENT_TYPES.FLOWN) {
       if (topRowBars.mg9 > 0) {
         rowsOut.push({
-          code: "12257",
-          name: "MG9 Floor / Hanging Bar",
+          code: STOCK_CATALOG.mg9HangingBar.code,
+          name: STOCK_CATALOG.mg9HangingBar.name,
           required: topRowBars.mg9,
           stock: mg9StockCat.hangingBar ?? 0,
           net: (mg9StockCat.hangingBar ?? 0) - topRowBars.mg9,
@@ -4092,8 +4115,8 @@ export default function App() {
       }
       if (topRowBars.mt > 0) {
         rowsOut.push({
-          code: "12262",
-          name: "MT Floor / Hanging Bar",
+          code: STOCK_CATALOG.mtHangingBar.code,
+          name: STOCK_CATALOG.mtHangingBar.name,
           required: topRowBars.mt,
           stock: mtStockCat.hangingBar ?? 0,
           net: (mtStockCat.hangingBar ?? 0) - topRowBars.mt,
@@ -4103,8 +4126,8 @@ export default function App() {
     }
 
     rowsOut.push({
-      code: powerDistro === "32A" ? "12245" : "12246",
-      name: powerDistro === "32A" ? "32A 3-phase Power Distro" : "63A 3-phase Power Distro",
+      code: powerDistro === "32A" ? STOCK_CATALOG.distro32.code : STOCK_CATALOG.distro63.code,
+      name: powerDistro === "32A" ? STOCK_CATALOG.distro32.name : STOCK_CATALOG.distro63.name,
       required: distroRequired,
       stock: powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0,
       net: (powerDistro === "32A" ? stock.distro32 ?? 0 : stock.distro63 ?? 0) - distroRequired,
@@ -4112,16 +4135,16 @@ export default function App() {
     });
 
     pushBaseRow(
-      "12254",
-      "15m PowerCON Cable",
+      STOCK_CATALOG.powerCable15m.code,
+      STOCK_CATALOG.powerCable15m.name,
       powerCableRequired,
       stock.powerCable15m ?? 0,
       `1 per outlet in use (${powerPortsUsed > 0 ? `${powerPortsUsed} patched` : `${circuitsUsedMax} estimated, nothing patched yet`}) + ${powerCableSpare} spare`,
       powerCableSpare,
     );
     pushBaseRow(
-      "12263",
-      "15m Signal Cable",
+      STOCK_CATALOG.signalCable15m.code,
+      STOCK_CATALOG.signalCable15m.name,
       signalCableWithBackupRequired,
       stock.signalCable15m ?? 0,
       `${signalCableWithBackupRequired}${backupSignalLoop ? ` (${signalCableBaseRequired} x 2 backup loop)` : ""} + ${signalCableSpare} spare`,
@@ -4177,8 +4200,8 @@ export default function App() {
     });
 
     if (mg9Count > 0 && includeReinforcementPlate) {
-      pushBaseRow("12264", "MG9 Reinforcement Plate", Math.ceil(mg9Count * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor (MG9 panels)");
-      pushBaseRow("12265", "MG9 Reinforcement Screw", Math.ceil(mg9Count * 3.42), stock.reinforcementScrew ?? 0, "sheet-style factor (MG9 panels)");
+      pushBaseRow(STOCK_CATALOG.mg9ReinforcementPlate.code, STOCK_CATALOG.mg9ReinforcementPlate.name, Math.ceil(mg9Count * 0.86), stock.reinforcementPlate ?? 0, "sheet-style factor (MG9 panels)");
+      pushBaseRow(STOCK_CATALOG.mg9ReinforcementScrew.code, STOCK_CATALOG.mg9ReinforcementScrew.name, Math.ceil(mg9Count * 3.42), stock.reinforcementScrew ?? 0, "sheet-style factor (MG9 panels)");
     }
 
     // Ballast for the temporary fencing that rings a ground-supported wall.
@@ -10332,6 +10355,65 @@ const exportJson = () => {
             </div>
             )}
 
+            {/* Put an item on the list by hand: something the tool works out no
+                requirement for (deployment parts for a wall it does not model,
+                a connector somebody knows the job needs), a different panel
+                type from the one the wall is built in, or simply more of
+                something than the layout calls for.
+
+                Sits ABOVE the table, not below it: adding a row is part of
+                building the list, and having to scroll past the whole list to
+                reach the control was backwards.
+
+                Everything the catalogue holds a code for is offered - which
+                now includes the lines the layout calculates for itself (see
+                STOCK_CATALOG's own note); what is already on the list is not,
+                because that row is already there to edit. */}
+            {addableStockItems.length ? (
+              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 no-print">
+                <label className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Add an item</div>
+                  <select
+                    className="w-[28rem] max-w-full rounded-lg border border-slate-500 bg-white p-2 text-sm text-black"
+                    value={stockAddCode}
+                    onChange={(e) => setStockAddCode(e.target.value)}
+                  >
+                    <option value="">Choose an item from the catalogue...</option>
+                    {addableStockItems.map((item) => (
+                      <option key={item.code} value={item.code}>{item.code} - {item.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Qty</div>
+                  <Input
+                    type="number"
+                    min={0}
+                    className="w-24 text-right"
+                    value={stockAddQty}
+                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setStockAddQty(e.target.value)}
+                  />
+                </label>
+                <Button
+                  intent="primary"
+                  size="sm"
+                  disabled={!stockAddCode}
+                  onClick={() => {
+                    if (!stockAddCode) return;
+                    addStockRow(stockAddCode, Number(stockAddQty) || 0);
+                    setStockAddCode("");
+                    setStockAddQty("1");
+                  }}
+                >
+                  Add to list
+                </Button>
+                <div className="w-full text-xs text-slate-400">
+                  {addableStockItems.length} item{addableStockItems.length === 1 ? "" : "s"} available. An added row is yours, not
+                  calculated from the layout, and says so on the list.
+                </div>
+              </div>
+            ) : null}
+
             <div className="overflow-x-auto rounded border border-slate-700">
               <table className="min-w-full text-left text-sm">
                 <thead className="bg-slate-900">
@@ -10563,53 +10645,6 @@ const exportJson = () => {
                 </tbody>
               </table>
             </div>
-            {/* Items the tool works out no requirement for - deployment parts
-                for a wall it does not model, a connector somebody knows the job
-                needs - put on the list by hand. Everything the catalogue holds
-                a code for is offered; what is already on the list is not. */}
-            {addableStockItems.length ? (
-              <div className="flex flex-wrap items-end gap-2 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3 no-print">
-                <label className="space-y-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Add an item</div>
-                  <select
-                    className="w-[28rem] max-w-full rounded-lg border border-slate-500 bg-white p-2 text-sm text-black"
-                    value={stockAddCode}
-                    onChange={(e) => setStockAddCode(e.target.value)}
-                  >
-                    <option value="">Choose an item from the catalogue...</option>
-                    {addableStockItems.map((item) => (
-                      <option key={item.code} value={item.code}>{item.code} - {item.name}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="space-y-1">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Qty</div>
-                  <Input
-                    type="number"
-                    min={0}
-                    className="w-24 text-right"
-                    value={stockAddQty}
-                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => setStockAddQty(e.target.value)}
-                  />
-                </label>
-                <Button
-                  intent="primary"
-                  size="sm"
-                  disabled={!stockAddCode}
-                  onClick={() => {
-                    if (!stockAddCode) return;
-                    addStockRow(stockAddCode, Number(stockAddQty) || 0);
-                    setStockAddCode("");
-                    setStockAddQty("1");
-                  }}
-                >
-                  Add to list
-                </Button>
-                <div className="text-xs text-slate-400">
-                  Nothing here is calculated from the layout - an added row is yours, and says so on the list.
-                </div>
-              </div>
-            ) : null}
 
             {/* Rows taken off the list. They are gone from the table and from
                 every export, but not hidden from the person who took them off:

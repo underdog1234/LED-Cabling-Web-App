@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.74.0`
+Version `0.74.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -33,6 +33,19 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.74.1
+
+**Everything on the stock list can now be added by hand**
+
+- **Add an item** offers the catalogue, and ten lines the tool calculates for itself were never in it - they were written into the row builder and existed nowhere else. **12257 MG9 Floor / Hanging Bar** was one of them, so a job needing a couple of spare bars had no way to put them on the list. The others: MG9 and MT panels, both hanging bars, the 32A and 63A distros, the 15m PowerCON and signal cables, and the MG9 reinforcement plate and screw
+- That also fixes **not being able to add a different panel type**: MG9, MT, LED Poster, Triangle, 1/4 Curved and Corner panels are all offered now, so a wall built in one type can be topped up with another
+- The calculated rows read their code and name **from the catalogue** instead of repeating them, so the two cannot drift apart, and a test now checks every calculated code has an entry
+- An item already on the list still isn't offered - that row is already there to edit
+
+**Add an item moved above the table**
+
+- Adding a row is part of building the list, so the control sits **above** it rather than below. You no longer scroll past the whole list to reach it. It also says how many items are available
 
 ## Recent Changes In v0.74.0
 
