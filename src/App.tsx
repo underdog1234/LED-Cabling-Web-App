@@ -47,6 +47,13 @@ import {
   obstructionRect,
 } from "./obstructions/obstructionModel";
 import { renderBasicLedMap } from "./exports/basicLedMap";
+import {
+  BARCO_TYPICAL_BRIGHTNESS_PERCENT,
+  BARCO_TYPICAL_CONTENT_PERCENT,
+  defaultBlackLevelW,
+  ruleOfThumbWatts,
+  scalePanelPower,
+} from "./power/brightnessModel";
 import { drawObstructions } from "./obstructions/drawObstructions";
 import { makeSubScreen, subScreenBBoxOf } from "./subScreens/subScreenModel";
 import OutputCanvasPanel from "./canvasView/OutputCanvasPanel";
@@ -100,7 +107,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.75.1";
+const APP_VERSION = "0.76.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -743,6 +750,13 @@ type OpenJsonPayload = {
   subScreens?: SubScreen[];
   /** v7: physical things in front of the LED - see obstructionModel.ts. */
   obstructions?: unknown;
+  /** v9: proposed brightness and the power model built on it - see power/brightnessModel.ts. */
+  brightness?: {
+    enabled?: unknown;
+    brightnessPercent?: unknown;
+    contentPercent?: unknown;
+    blackLevelW?: unknown;
+  };
   /** v3: output-canvas resolution. */
   outputCanvas?: { w?: number; h?: number };
   /** v3: whole-layout canvas position, used only when subScreens is empty. */
@@ -1181,6 +1195,21 @@ const getNextSequence = (
   return max + 1;
 };
 
+/**
+ * Watts for one panel, as the rest of the app should see it.
+ *
+ * Set by App to the brightness-scaled figure when that model is switched on
+ * (see src/power/brightnessModel.ts), and left as the catalogue maximum
+ * otherwise. It is a module-level hook rather than an argument threaded
+ * through a dozen call sites because the alternative was a dozen chances for
+ * one of them to keep reading the unscaled figure - which is precisely the
+ * bug that would quietly under- or over-size a distro.
+ */
+let panelDesignWatts: (cell: Cell) => number = (cell) => PANEL_TYPES[cellPanelType(cell)].power.maxW;
+export const setPanelDesignWatts = (fn: (cell: Cell) => number) => {
+  panelDesignWatts = fn;
+};
+
 const getPowerPortLoadWatts = (
   panels: Cell[],
   portId: number,
@@ -1192,7 +1221,7 @@ const getPowerPortLoadWatts = (
   for (const cell of panels) {
     if (!isActiveCell(cell)) continue;
     if (excludeId && cell.id === excludeId) continue;
-    if (cell.assignedPowerPort === portId) watts += PANEL_TYPES[cellPanelType(cell)].power.maxW;
+    if (cell.assignedPowerPort === portId) watts += panelDesignWatts(cell);
   }
   return watts;
 };
@@ -2815,6 +2844,24 @@ export default function App() {
   // pages, the test patterns and the Basic LED Map. Obstructions themselves
   // are kept either way - this only decides whether they are drawn.
   const [showObstructions, setShowObstructions] = useState(true);
+
+  // --- Proposed brightness (see src/power/brightnessModel.ts) --------------
+  // Off by default so no existing project's electrical figures move on their
+  // own. The black level is per panel type because it is a property of that
+  // panel's electronics, and is the figure to replace first with a real
+  // measurement - the default is Barco's illustrative 30% of maximum, not a
+  // measurement of any of these panels.
+  const [brightnessModelOn, setBrightnessModelOn] = useState(false);
+  const [brightnessPercent, setBrightnessPercent] = useState(BARCO_TYPICAL_BRIGHTNESS_PERCENT);
+  const [contentPercent, setContentPercent] = useState(BARCO_TYPICAL_CONTENT_PERCENT);
+  const [blackLevelW, setBlackLevelW] = useState<Partial<Record<PanelTypeKey, number>>>({});
+  const blackLevelFor = (type: PanelTypeKey) => blackLevelW[type] ?? defaultBlackLevelW(PANEL_TYPES[type].power.maxW);
+  /** Panel types to ask a black level for: the ones on the wall, plus the selected type for an empty one. */
+  const brightnessPanelTypes = useMemo(() => {
+    const used = new Set<PanelTypeKey>(grid.filter(isActiveCell).map(cellPanelType));
+    used.add(panelType);
+    return (Object.keys(PANEL_TYPES) as PanelTypeKey[]).filter((type) => used.has(type));
+  }, [grid, panelType]);
   // Physical things in front of the LED. Kept entirely separate from `grid`:
   // they are not panels and must never reach a panel count, a power or weight
   // total, patching or a resolution - only the pictures of the wall.
@@ -2989,7 +3036,20 @@ export default function App() {
   // Workspace scale: CELL_SIZE px per 0.5m module at zoom 1.
   const pxPerMm = (CELL_SIZE / MODULE_MM) * zoom;
   const panelSelectMode = editMode === "select";
-  const powerSpec = panel.power;
+  // --- Brightness-scaled power --------------------------------------------
+  // Off by default: an existing project's electrical figures must not change
+  // underneath it just because the tool learned a new model. Switching it on
+  // replaces the catalogue max/avg with the Barco calculation everywhere
+  // power is counted - totals, outlets, phases, patching and the PDF.
+  const panelPower = useMemo(() => {
+    if (!brightnessModelOn) return (type: PanelTypeKey) => PANEL_TYPES[type].power;
+    return (type: PanelTypeKey) =>
+      scalePanelPower(PANEL_TYPES[type].power, blackLevelFor(type), brightnessPercent, contentPercent);
+  }, [brightnessModelOn, blackLevelW, brightnessPercent, contentPercent]);
+  const powerSpec = panelPower(panelType);
+  // Keep the module-level hook pointing at the current model, so the pure
+  // helpers above (port loads, patching) count the same watts as the UI.
+  setPanelDesignWatts((cell) => panelPower(cellPanelType(cell)).maxW);
   const distro = POWER_DISTROS[powerDistro];
   const powerPorts = useMemo(() => makePowerPorts(distro.portCount), [distro.portCount]);
   // Total selectable signal ports matches the selected NovaStar processor's
@@ -3610,15 +3670,17 @@ export default function App() {
   const panelTotals = useMemo(() => {
     const totals = { weight: 0, maxW: 0, maxA: 0, avgW: 0, avgA: 0 };
     activePanels.forEach((cell) => {
-      const p = PANEL_TYPES[cellPanelType(cell)];
-      totals.weight += p.weight;
-      totals.maxW += p.power.maxW;
-      totals.maxA += p.power.maxA;
-      totals.avgW += p.power.avgW;
-      totals.avgA += p.power.avgA;
+      const type = cellPanelType(cell);
+      totals.weight += PANEL_TYPES[type].weight;
+      // Brightness-scaled when that model is on, catalogue figures otherwise.
+      const power = panelPower(type);
+      totals.maxW += power.maxW;
+      totals.maxA += power.maxA;
+      totals.avgW += power.avgW;
+      totals.avgA += power.avgA;
     });
     return totals;
-  }, [activePanels]);
+  }, [activePanels, panelPower]);
   const panelOnlyWeight = panelTotals.weight;
   const decimalRatio = wallPixelH === 0 ? 0 : wallPixelW / wallPixelH;
   const aspectRatio = wallPixelH === 0 ? "0.00" : `${decimalRatio.toFixed(3)}:1`;
@@ -4993,6 +5055,10 @@ export default function App() {
 // Everything a saved project file holds - also what the Test Pattern
 // Generator is handed when it is opened from here.
 const projectFilePayload = () => {
+  // formatVersion 9: adds the proposed-brightness power model. Absent on
+  // every older file, which loads as "off" - their power figures are the
+  // catalogue ones and must not move just because the file was reopened.
+  //
   // formatVersion 8: obstruction x/y are OFFSETS from the layout's bottom
   // centre, where they used to be absolute workspace mm. openJson converts a
   // v7 file's absolute coordinates on the way in (migrateAbsoluteObstructions).
@@ -5011,7 +5077,7 @@ const projectFilePayload = () => {
   // reopened) - the equipment mapping that drives live data is account-
   // wide and lives in localStorage instead, not in this per-project file.
   return {
-    formatVersion: 8,
+    formatVersion: 9,
     appVersion: APP_VERSION,
     projectName: safeProjectName,
     surfaceName,
@@ -5028,6 +5094,7 @@ const projectFilePayload = () => {
     // formatVersion 7: things standing in front of the LED. Purely pictorial
     // (see obstructionModel.ts) - nothing here reaches a count or a total.
     obstructions,
+    brightness: { enabled: brightnessModelOn, brightnessPercent, contentPercent, blackLevelW },
     outputCanvas: { w: outputCanvasW, h: outputCanvasH },
     wholeLayoutCanvasPos: { x: wholeLayoutCanvasX, y: wholeLayoutCanvasY },
     processorModel,
@@ -5707,6 +5774,25 @@ const exportJson = () => {
         // formatVersion 7: older projects have no manual stock edits, which
         // is the same as having none - the list opens as the tool calculates it.
         setStockEdits(normalizeStockEdits(data.stockEdits));
+        // formatVersion 9: older projects have no brightness model, which
+        // loads as off so their power figures stay exactly as they were.
+        const brightness = (data.brightness ?? {}) as Record<string, unknown>;
+        const pct = (raw: unknown, fallback: number) => {
+          const n = Number(raw);
+          return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : fallback;
+        };
+        setBrightnessModelOn(brightness.enabled === true);
+        setBrightnessPercent(pct(brightness.brightnessPercent, BARCO_TYPICAL_BRIGHTNESS_PERCENT));
+        setContentPercent(pct(brightness.contentPercent, BARCO_TYPICAL_CONTENT_PERCENT));
+        setBlackLevelW(
+          brightness.blackLevelW && typeof brightness.blackLevelW === "object"
+            ? Object.fromEntries(
+                Object.entries(brightness.blackLevelW as Record<string, unknown>)
+                  .filter(([key]) => key in PANEL_TYPES)
+                  .map(([key, value]) => [key, Math.max(0, Number(value) || 0)]),
+              )
+            : {},
+        );
         setSelectedId(null);
         setSelectedCells(new Set());
         setUndoStack([]);
@@ -7752,7 +7838,7 @@ const exportJson = () => {
       maxPerPort: isSignal ? safePanelsPerSignalPort : safePanelsPerPowerOutlet,
       startingCounts: portPanelCounts(outside, isSignal ? "assignedPort" : "assignedPowerPort", maxPorts),
       startingWeights: isSignal ? undefined : portLoadWatts(outside, maxPorts),
-      weightOf: isSignal ? undefined : (cell) => PANEL_TYPES[cellPanelType(cell)].power.maxW,
+      weightOf: isSignal ? undefined : (cell) => panelPower(cellPanelType(cell)).maxW,
       maxWeightPerPort: isSignal ? undefined : MAX_OUTLET_AMPS * VOLTAGE,
       freshPortPerSegment: isSignal && segments.length > 1,
     });
@@ -8719,6 +8805,147 @@ const exportJson = () => {
                   </div>
                 </details>
 
+                {/* Proposed brightness. Folded away like Port limits, and OFF
+                    until switched on, so no existing project's electrical
+                    figures move on their own. */}
+                <details className="rounded border border-slate-700 bg-slate-900/60 no-print">
+                  <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
+                    Brightness &amp; power
+                    <span className="ml-2 font-normal text-slate-400">
+                      {brightnessModelOn
+                        ? `${brightnessPercent}% brightness - ${contentPercent}% content`
+                        : "catalogue figures"}
+                    </span>
+                  </summary>
+                  <div className="space-y-3 p-3 pt-0 text-xs">
+                    <label className="flex items-center gap-2 rounded border border-slate-600 bg-slate-900 px-3 py-2 text-sm">
+                      <input
+                        type="checkbox"
+                        checked={brightnessModelOn}
+                        onChange={() => setBrightnessModelOn((prev) => !prev)}
+                      />
+                      <span>Scale power by proposed brightness</span>
+                    </label>
+
+                    <div className="text-slate-400">
+                      Method from Barco,{" "}
+                      <a
+                        className="underline"
+                        href="https://www.barco.com/it/news/news-insights/2020-04-15-ledtalks-truth-about-power-consumption"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        The truth about the power consumption of LED walls
+                      </a>
+                      . Only the part above the black level scales with brightness - the drivers and receiver cards draw their
+                      share whatever is on screen, which is why halving the brightness does not halve the power.
+                    </div>
+
+                    {brightnessModelOn ? (
+                      <>
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <label className="space-y-1">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                              Proposed brightness (% of max)
+                            </div>
+                            <Input
+                              className="bg-white text-black"
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={brightnessPercent}
+                              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                                setBrightnessPercent(Math.min(100, Math.max(0, Number(e.target.value) || 0)))
+                              }
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                              Typical content (% of that)
+                            </div>
+                            <Input
+                              className="bg-white text-black"
+                              type="number"
+                              min={0}
+                              max={100}
+                              value={contentPercent}
+                              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                                setContentPercent(Math.min(100, Math.max(0, Number(e.target.value) || 0)))
+                              }
+                            />
+                            <div className="text-slate-400">
+                              100 = full white. Barco use 33 for mixed content; a white-background slide is higher, a mostly-black
+                              screen lower.
+                            </div>
+                          </label>
+                        </div>
+
+                        {/* Black level for each panel type actually on the wall. */}
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                            Black level per panel (W)
+                          </div>
+                          <div className="grid gap-2 md:grid-cols-3">
+                            {brightnessPanelTypes.map((type) => (
+                              <label key={type} className="space-y-1">
+                                <div className="text-slate-300">{PANEL_TYPES[type].name}</div>
+                                <Input
+                                  className="bg-white text-black"
+                                  type="number"
+                                  min={0}
+                                  max={PANEL_TYPES[type].power.maxW}
+                                  step="0.1"
+                                  value={blackLevelFor(type)}
+                                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                                    setBlackLevelW((prev) => ({ ...prev, [type]: Math.max(0, Number(e.target.value) || 0) }))
+                                  }
+                                />
+                              </label>
+                            ))}
+                          </div>
+                          <div className="rounded border border-amber-500/50 bg-amber-500/10 p-2 text-amber-200">
+                            These default to 30% of maximum - the figure in Barco&apos;s worked example, NOT a measurement of
+                            these panels. Measure one showing full black and put the real figure in: every number below hangs
+                            on it.
+                          </div>
+                        </div>
+
+                        {/* What it works out at, against the catalogue and the
+                            old rule of thumb the article argues against. */}
+                        <div className="space-y-1 rounded border border-slate-700 bg-slate-900 p-2">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
+                            {panel.name}, per panel
+                          </div>
+                          <div>
+                            Full white at {brightnessPercent}%:{" "}
+                            <span className="font-semibold">{formatNumber(powerSpec.maxW, 1)} W</span> /{" "}
+                            {formatNumber(powerSpec.maxA, 2)} A - what the supply has to carry
+                          </div>
+                          <div>
+                            Typical content: {formatNumber(powerSpec.avgW, 1)} W / {formatNumber(powerSpec.avgA, 2)} A - running
+                            cost
+                          </div>
+                          <div className="text-slate-400">
+                            Catalogue maximum {PANEL_TYPES[panelType].power.maxW} W - old divide-by-three rule{" "}
+                            {formatNumber(ruleOfThumbWatts(PANEL_TYPES[panelType].power.maxW), 1)} W
+                          </div>
+                        </div>
+
+                        {brightnessPercent < 100 ? (
+                          <div className="rounded border border-amber-500/50 bg-amber-500/10 p-2 text-amber-200">
+                            Outlets, phases and the distro count are being sized at {brightnessPercent}% brightness. Run the wall
+                            brighter on the day and the supply is under-sized - size at 100% if the brightness is not fixed.
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <div className="text-slate-400">
+                        Off: every power figure is the catalogue maximum and average for the panel type, exactly as before.
+                      </div>
+                    )}
+                  </div>
+                </details>
+
               </CardContent>
             </Card>
 
@@ -8784,8 +9011,11 @@ const exportJson = () => {
                   <div>Panel size: {panel.w}m × {panel.h}m</div>
                   <div>Pixels per panel: {formatNumber(panelPixels)}</div>
                   <div>Weight per panel: {panel.weight} kg</div>
-                  <div>Max power: {powerSpec.maxW} W / {powerSpec.maxA} A</div>
-                  <div>Avg power: {powerSpec.avgW} W / {powerSpec.avgA} A</div>
+                  {/* Rounded: these are catalogue literals with the
+                      brightness model off, but computed once it is on, and a
+                      raw 0.6083000000000001 helps nobody. */}
+                  <div>Max power: {formatNumber(powerSpec.maxW, 1)} W / {formatNumber(powerSpec.maxA, 2)} A</div>
+                  <div>Avg power: {formatNumber(powerSpec.avgW, 1)} W / {formatNumber(powerSpec.avgA, 2)} A</div>
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-2">
                   <div className="mb-1 font-bold">Signal + Output</div>

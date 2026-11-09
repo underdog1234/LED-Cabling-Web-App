@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.75.1`
+Version `0.76.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -33,6 +33,23 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.76.0
+
+**Proposed brightness now drives the power figures**
+
+- New **Brightness & power** section at the bottom of LED Wall Setup. Set a proposed brightness and every power figure in the tool follows it: the per-panel guts, the wall totals, per-outlet and per-phase loads, the distro count, patching and the PDF
+- Built on Barco's method ([The truth about the power consumption of LED walls](https://www.barco.com/it/news/news-insights/2020-04-15-ledtalks-truth-about-power-consumption)). The key point is that **brightness does not scale all of the power**: the drivers and receiver cards draw their share whatever is on screen, so only the part above that black level scales. Halving the brightness does not halve the power
+- Two figures come out, and they are kept apart on purpose:
+  - **Full white at the set brightness** - what cable, outlets and breakers have to carry, because a white frame is always one cue away. This is what everything is sized from
+  - **Typical content** - what it costs to run. Never used for sizing
+- Barco's worked example is reproduced exactly in the tests: 100W max, 30W black level, 70% brightness gives **79W** full white and **46.17W** on typical content, against the old divide-by-three rule's 33W. The section shows that rule alongside, so the difference is visible
+
+**Switched off by default, and two warnings worth reading**
+
+- It is **off until you turn it on**, and an older project opens with it off - no existing job's electrical figures move on their own
+- The **black levels default to 30% of maximum, which is the figure from Barco's example, not a measurement of these panels.** Measure one panel showing full black and replace it: every number in the section hangs on it. Each panel type has its own field
+- Below 100% brightness the tool warns that outlets, phases and the distro count are being sized at that brightness - **run the wall brighter on the day and the supply is under-sized**
 
 ## Recent Changes In v0.75.1
 
