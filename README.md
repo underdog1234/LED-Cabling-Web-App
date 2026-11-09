@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.74.1`
+Version `0.75.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -33,6 +33,21 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.75.0
+
+**You can exceed the power-per-outlet limit now**
+
+- **Panels per Power Outlet is no longer capped.** It used to clamp silently down to the figure the panel type works out for a 16A outlet, so a deliberately higher number was ignored with no reason given and a venue genuinely running more panels off an outlet could not be planned at all
+- Above the recommendation the tool **says so rather than refusing**: a warning on the outlet box giving the amps and the percentage, a flag on the collapsed Port limits header, and a named list of every over-16A outlet under Power Outputs
+- **Patching follows the same rule.** The amp ceiling used to make a panel skip to the next plug, or be refused outright when none had headroom. Only the panel count moves the walk on now, in both manual patching and Auto Snake, so the two always agree
+- Checked end to end: 30 panels per outlet on a 32-panel MG9 wall patches 30 on Plug 1 and 2 on Plug 2, and reports `Plug 1: 23.10A (144%)` against the 3,680W a 16A outlet carries
+
+**Layout**
+
+- **Phase 1-3 removed from the Wall Summary** - the same figures are in the Power section further down, with the utilisation bars
+- **Panels per Signal Port and Panels per Power Outlet** moved to the bottom of LED Wall Setup, in their own collapsible **Port limits** section, folded away by default. The header shows both figures so they can be read without opening it
+- **Sub-Screens moved to the left column**, under LED Wall Setup and Apply Grid Size - grouping panels is part of setting the layout up, not part of reading the summary of it. Wall Summary and Obstructions keep the right column
 
 ## Recent Changes In v0.74.1
 

@@ -100,7 +100,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.74.1";
+const APP_VERSION = "0.75.0";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -3329,8 +3329,16 @@ export default function App() {
   // Per panel TYPE, not one hard-coded number. This was a flat 21, which is
   // MG9's figure: it silently clamped every other type's derived default down
   // to MG9's, and let MT be pushed to 21 panels - 22.9A on a 16A outlet.
-  const maxAllowedPowerPanels = panel.defaults.powerPanelsPerOutlet;
-  const safePanelsPerPowerOutlet = Math.min(Math.max(panelsPerPowerOutlet, 1), maxAllowedPowerPanels);
+  // The figure this panel type's own electrics work out as safe: 16A x 230V
+  // divided by one panel's draw. It is a recommendation now, not a cap.
+  const recommendedPowerPanelsPerOutlet = panel.defaults.powerPanelsPerOutlet;
+  // What the user actually asked for. It used to be clamped down to the
+  // recommendation, which silently ignored a deliberately higher number and
+  // gave no reason - a venue that is genuinely running more panels off an
+  // outlet could not be planned at all. Above the recommendation the tool
+  // says so, loudly, wherever the figure is used; it no longer refuses.
+  const safePanelsPerPowerOutlet = Math.max(1, panelsPerPowerOutlet);
+  const powerOutletOverloaded = safePanelsPerPowerOutlet > recommendedPowerPanelsPerOutlet;
   const safePanelsPerSignalPort = Math.min(Math.max(panelsPerSignalPort, 1), panel.defaults.signalPanelsPerPort);
 
   const powerOutletWatts = safePanelsPerPowerOutlet * powerSpec.maxW;
@@ -3712,6 +3720,25 @@ export default function App() {
 
     return stats;
   }, [scopedGrid, powerPorts, powerSpec.maxW, powerSpec.maxA, powerSpec.avgW, powerSpec.avgA]);
+
+  /**
+   * Outlets drawing more than a 16A socket carries.
+   *
+   * Nothing refuses to patch them any more (see assignPowerPanel), so this is
+   * what makes sure an overload is never missed: it drives the named warning
+   * under Power Outputs.
+   */
+  const overloadedPowerPorts = useMemo(
+    () =>
+      powerPorts
+        .map((port) => {
+          const stat = powerPortStats[port.id];
+          return { name: port.name, amps: stat?.maxAmps ?? 0, percent: stat?.utilisation ?? 0 };
+        })
+        .filter((entry) => entry.amps > MAX_OUTLET_AMPS),
+    [powerPorts, powerPortStats],
+  );
+
 
   // Chain-start port-number badges for a panel, shared by the live layout and
   // every export. Signal: the chain's first panel gets its primary port
@@ -7412,14 +7439,15 @@ const exportJson = () => {
       const current = findCellById(prev, target.id);
       if (!current || !isActiveCell(current)) return prev;
 
-      const cellWatts = PANEL_TYPES[cellPanelType(current)].power.maxW;
+      // Only the PANEL COUNT moves the walk on. The amp ceiling used to
+      // refuse the panel outright, which blocked planning a wall somebody is
+      // genuinely running over 16A - it is reported instead now, on the
+      // outlet box, on this plug's bar and in the overload warning under
+      // Power Outputs, and the patch goes ahead.
       let port = activePowerPort;
       if (current.assignedPowerPort !== port) {
         const maxPlug = powerPorts.length;
-        while (port <= maxPlug) {
-          const full = getPortPanelCount(prev, "assignedPowerPort", port) >= safePanelsPerPowerOutlet;
-          const overAmps = getPowerPortLoadWatts(prev, port, 0, current.id) + cellWatts > MAX_OUTLET_AMPS * VOLTAGE;
-          if (!full && !overAmps) break;
+        while (port <= maxPlug && getPortPanelCount(prev, "assignedPowerPort", port) >= safePanelsPerPowerOutlet) {
           port += 1;
         }
         if (port > maxPlug) return prev;
@@ -7819,16 +7847,17 @@ const exportJson = () => {
           cell.powerManual = false;
         }
 
-        // Same planner as signal, plus the rule that makes a plug different:
-        // it fills on amps as well as on panel count.
+        // Same planner as signal: a plug fills on the panel count the user
+        // set. See the note below on why amps do not cut the walk short.
         const plan = planSnakePorts(segments, {
           letterMode,
           maxPorts: powerPorts.length,
           maxPerPort: safePanelsPerPowerOutlet,
           startingCounts: portPanelCounts(next, "assignedPowerPort", powerPorts.length),
-          startingWeights: portLoadWatts(next, powerPorts.length),
-          weightOf: (cell) => PANEL_TYPES[cellPanelType(cell)].power.maxW,
-          maxWeightPerPort: MAX_OUTLET_AMPS * VOLTAGE,
+          // No amp ceiling: Panels per Power Outlet is the user's own figure
+          // and is what splits the walk. An outlet over 16A is reported, not
+          // avoided - the same rule manual patching follows, so the two
+          // cannot give different answers.
           freshPortPerSegment: false,
         });
         segments.flat().forEach((cell) => {
@@ -8476,147 +8505,188 @@ const exportJson = () => {
 
         <div className="grid gap-4 xl:grid-cols-[1.1fr_1.2fr]">
           {/* Deliberately not collapsible - this is the panel you work from. */}
-          <Card className="border-slate-700 bg-slate-800 print-card">
-            <CardHeader>
-            <CardTitle className="text-white [text-shadow:0_0_2px_black]">LED Wall Setup</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-1 md:col-span-2">
-                  <label className="text-xs text-slate-300">Project Name</label>
-                  <Input className="bg-white text-black" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Enter project name" />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Start Date</label>
-                  <Input className="bg-white text-black" type="date" value={projectDateFrom} onChange={(e) => setProjectDateFrom(e.target.value)} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">End Date</label>
-                  <Input className="bg-white text-black" type="date" value={projectDateTo} onChange={(e) => setProjectDateTo(e.target.value)} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Columns →</label>
-                  <Input className="bg-white text-black" type="number" min="1" step="1" value={draftCols} onChange={(e) => setDraftCols(e.target.value)} />
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Rows ↓</label>
-                  <Input
-                    className="bg-white text-black disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
-                    type="number"
-                    min="1"
-                    max={isPosterType ? 1 : undefined}
-                    step="1"
-                    disabled={isPosterType}
-                    value={isPosterType ? "1" : draftRows}
-                    onChange={(e) => setDraftRows(e.target.value)}
-                  />
-                  {isPosterType ? <div className="text-xs text-slate-400">Locked to 1 for LED Posters</div> : null}
-                </div>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Panel Type</label>
-                  <select className="w-full rounded bg-white p-2 text-black" value={panelType} onChange={(e) => changePanelType(e.target.value as PanelTypeKey)}>
-                    {Object.entries(PANEL_TYPES).map(([key, value]) => (
-                      <option key={key} value={key}>{value.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Power Distro</label>
-                  <select className="w-full rounded bg-white p-2 text-black" value={powerDistro} onChange={(e) => setPowerDistro(e.target.value as PowerDistroKey)}>
-                    {Object.values(POWER_DISTROS).map((option) => (
-                      <option key={option.id} value={option.id}>{option.label}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Processor Model</label>
-                  <select
-                    className="w-full rounded bg-white p-2 text-black"
-                    value={processorModel}
-                    onChange={(e) => setProcessorModel(e.target.value as ProcessorModelId | "")}
-                  >
-                    <option value="">None selected</option>
-                    {PROCESSOR_MODEL_IDS.map((id) => (
-                      <option key={id} value={id}>{PROCESSOR_SPECS[id].label}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="space-y-1">
-                  <label className="text-xs text-slate-300">Processor Capacity</label>
-                  <div className="rounded border border-slate-700 bg-slate-900 p-2 text-xs">
-                    {processorModel && novaStarValidation ? (
-                      <>
-                        <div>
-                          {novaStarValidation.summary.outputPixelLoads.reduce((sum, o) => sum + o.pixels, 0).toLocaleString()} /{" "}
-                          {PROCESSOR_SPECS[processorModel].maxTotalPixels.toLocaleString()} px total
-                        </div>
-                        <div>
-                          {novaStarValidation.summary.ethernetOutputsUsed} / {PROCESSOR_SPECS[processorModel].ethernetOutputCount} outputs used
-                        </div>
-                      </>
-                    ) : (
-                      <span className="text-slate-400">Select a processor to see capacity usage.</span>
-                    )}
+          {/* LEFT column: the wall, and the sub-screens cut out of it -
+              both are setting the layout up. */}
+          <div className="space-y-4">
+            <Card className="border-slate-700 bg-slate-800 print-card">
+              <CardHeader>
+              <CardTitle className="text-white [text-shadow:0_0_2px_black]">LED Wall Setup</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-1 md:col-span-2">
+                    <label className="text-xs text-slate-300">Project Name</label>
+                    <Input className="bg-white text-black" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value)} placeholder="Enter project name" />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">Start Date</label>
+                    <Input className="bg-white text-black" type="date" value={projectDateFrom} onChange={(e) => setProjectDateFrom(e.target.value)} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">End Date</label>
+                    <Input className="bg-white text-black" type="date" value={projectDateTo} onChange={(e) => setProjectDateTo(e.target.value)} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">Columns →</label>
+                    <Input className="bg-white text-black" type="number" min="1" step="1" value={draftCols} onChange={(e) => setDraftCols(e.target.value)} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">Rows ↓</label>
+                    <Input
+                      className="bg-white text-black disabled:cursor-not-allowed disabled:bg-slate-300 disabled:text-slate-500"
+                      type="number"
+                      min="1"
+                      max={isPosterType ? 1 : undefined}
+                      step="1"
+                      disabled={isPosterType}
+                      value={isPosterType ? "1" : draftRows}
+                      onChange={(e) => setDraftRows(e.target.value)}
+                    />
+                    {isPosterType ? <div className="text-xs text-slate-400">Locked to 1 for LED Posters</div> : null}
                   </div>
                 </div>
-              </div>
 
-              <div className="flex flex-wrap gap-2 no-print">
-                <Button onClick={applyGridSize}>Apply Grid Size</Button>
-                <Button intent="danger" onClick={clearAllPanels}>Clear All Panels</Button>
-              </div>
-
-              {/* Signal first, then power - the order these are actually
-                  planned and patched in. */}
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="space-y-2 rounded border border-slate-700 bg-slate-900 p-3">
-                  <label className="text-sm font-semibold">Panels per Signal Port</label>
-                  <Input
-                    className="bg-white text-black"
-                    type="number"
-                    min="1"
-                    max={panel.defaults.signalPanelsPerPort}
-                    value={safePanelsPerSignalPort}
-                    onChange={(e) => {
-                      const raw = Number.parseInt(e.target.value || "0", 10);
-                      const next = Math.min(Math.max(raw || 1, 1), panel.defaults.signalPanelsPerPort);
-                      setPanelsPerSignalPort(next);
-                    }}
-                  />
-                  <div className="text-xs">{formatNumber(signalPortPixels)} pixels</div>
-                  <UtilBar percent={signalPortPercent} />
-                  <div className="text-xs">{formatNumber(signalPortPercent, 1)}% of 650,000</div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">Panel Type</label>
+                    <select className="w-full rounded bg-white p-2 text-black" value={panelType} onChange={(e) => changePanelType(e.target.value as PanelTypeKey)}>
+                      {Object.entries(PANEL_TYPES).map(([key, value]) => (
+                        <option key={key} value={key}>{value.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">Power Distro</label>
+                    <select className="w-full rounded bg-white p-2 text-black" value={powerDistro} onChange={(e) => setPowerDistro(e.target.value as PowerDistroKey)}>
+                      {Object.values(POWER_DISTROS).map((option) => (
+                        <option key={option.id} value={option.id}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
-                <div className="space-y-2 rounded border border-slate-700 bg-slate-900 p-3">
-                  <label className="text-sm font-semibold">Panels per Power Outlet</label>
-                  <Input
-                    className="bg-white text-black"
-                    type="number"
-                    min="1"
-                    max={maxAllowedPowerPanels}
-                    value={safePanelsPerPowerOutlet}
-                    onChange={(e) => {
-                      const raw = Number.parseInt(e.target.value || "0", 10);
-                      const next = Math.min(Math.max(raw || 1, 1), 21);
-                      setPanelsPerPowerOutlet(next);
-                    }}
-                  />
-                  <div className="text-xs">{formatNumber(powerOutletWatts)} W</div>
-                  <div className="text-xs">{formatNumber(powerOutletAmps, 2)} A</div>
-                  <UtilBar percent={powerOutletPercent} />
-                  <div className="text-xs">{formatNumber(powerOutletPercent, 1)}% of 16A</div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">Processor Model</label>
+                    <select
+                      className="w-full rounded bg-white p-2 text-black"
+                      value={processorModel}
+                      onChange={(e) => setProcessorModel(e.target.value as ProcessorModelId | "")}
+                    >
+                      <option value="">None selected</option>
+                      {PROCESSOR_MODEL_IDS.map((id) => (
+                        <option key={id} value={id}>{PROCESSOR_SPECS[id].label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300">Processor Capacity</label>
+                    <div className="rounded border border-slate-700 bg-slate-900 p-2 text-xs">
+                      {processorModel && novaStarValidation ? (
+                        <>
+                          <div>
+                            {novaStarValidation.summary.outputPixelLoads.reduce((sum, o) => sum + o.pixels, 0).toLocaleString()} /{" "}
+                            {PROCESSOR_SPECS[processorModel].maxTotalPixels.toLocaleString()} px total
+                          </div>
+                          <div>
+                            {novaStarValidation.summary.ethernetOutputsUsed} / {PROCESSOR_SPECS[processorModel].ethernetOutputCount} outputs used
+                          </div>
+                        </>
+                      ) : (
+                        <span className="text-slate-400">Select a processor to see capacity usage.</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
-              </div>
 
-            </CardContent>
-          </Card>
+                <div className="flex flex-wrap gap-2 no-print">
+                  <Button onClick={applyGridSize}>Apply Grid Size</Button>
+                  <Button intent="danger" onClick={clearAllPanels}>Clear All Panels</Button>
+                </div>
+
+                {/* Port limits, folded away at the bottom: they are derived from
+                    the panel type and most projects never touch them, so they
+                    are set once rather than read on every pass over this panel.
+                    Signal first, then power - the order these are actually
+                    planned and patched in. */}
+                <details className="rounded border border-slate-700 bg-slate-900/60 no-print">
+                  <summary className="cursor-pointer select-none px-3 py-2 text-sm font-semibold">
+                    Port limits
+                    <span className="ml-2 font-normal text-slate-400">
+                      {safePanelsPerSignalPort} per signal port · {safePanelsPerPowerOutlet} per power outlet
+                    </span>
+                    {powerOutletOverloaded ? <span className="ml-2 font-normal text-amber-300">⚠ over the recommendation</span> : null}
+                  </summary>
+                  <div className="grid gap-4 p-3 pt-0 md:grid-cols-2">
+                    <div className="space-y-2 rounded border border-slate-700 bg-slate-900 p-3">
+                      <label className="text-sm font-semibold">Panels per Signal Port</label>
+                      <Input
+                        className="bg-white text-black"
+                        type="number"
+                        min="1"
+                        max={panel.defaults.signalPanelsPerPort}
+                        value={safePanelsPerSignalPort}
+                        onChange={(e) => {
+                          const raw = Number.parseInt(e.target.value || "0", 10);
+                          const next = Math.min(Math.max(raw || 1, 1), panel.defaults.signalPanelsPerPort);
+                          setPanelsPerSignalPort(next);
+                        }}
+                      />
+                      <div className="text-xs">{formatNumber(signalPortPixels)} pixels</div>
+                      <UtilBar percent={signalPortPercent} />
+                      <div className="text-xs">{formatNumber(signalPortPercent, 1)}% of 650,000</div>
+                    </div>
+
+                    <div className="space-y-2 rounded border border-slate-700 bg-slate-900 p-3">
+                      <label className="text-sm font-semibold">Panels per Power Outlet</label>
+                      {/* No cap: a higher figure is accepted and reported, not
+                          quietly reduced to the recommendation. */}
+                      <Input
+                        className="bg-white text-black"
+                        type="number"
+                        min="1"
+                        value={safePanelsPerPowerOutlet}
+                        onChange={(e) => {
+                          const raw = Number.parseInt(e.target.value || "0", 10);
+                          setPanelsPerPowerOutlet(Math.max(1, raw || 1));
+                        }}
+                      />
+                      <div className="text-xs">{formatNumber(powerOutletWatts)} W</div>
+                      <div className="text-xs">{formatNumber(powerOutletAmps, 2)} A</div>
+                      <UtilBar percent={powerOutletPercent} />
+                      <div className="text-xs">{formatNumber(powerOutletPercent, 1)}% of 16A</div>
+                      {powerOutletOverloaded ? (
+                        <div className="rounded border border-amber-500/60 bg-amber-500/15 p-2 text-xs text-amber-200">
+                          ⚠ {safePanelsPerPowerOutlet} panels is over the {recommendedPowerPanelsPerOutlet} this panel type works out
+                          at for a 16A outlet - {formatNumber(powerOutletAmps, 2)}A against a 16A ceiling
+                          ({formatNumber(powerOutletPercent, 0)}%). Allowed, and used everywhere, but check the supply.
+                        </div>
+                      ) : (
+                        <div className="text-xs text-slate-400">Recommended maximum {recommendedPowerPanelsPerOutlet} for this panel type. A higher figure is allowed, with a warning.</div>
+                      )}
+                    </div>
+                  </div>
+                </details>
+
+              </CardContent>
+            </Card>
+
+            {/* Sub-screens sit in the LEFT column with the wall they are built
+                from, under Apply Grid Size - grouping panels is part of setting
+                the layout up, not part of reading the summary of it. */}
+            <SubScreenPanel
+              subScreens={subScreens}
+              activeSubScreenId={resolvedActiveSubScreenId}
+              grid={grid}
+              onSelectScreen={selectSubScreen}
+              onCreate={createSubScreen}
+              onRename={renameSubScreen}
+              onRecolor={recolorSubScreen}
+              onDelete={deleteSubScreen}
+              onSelectAllInSubScreen={selectAllInSubScreen}
+            />
+
+          </div>
 
           <div className="space-y-4">
           {/* Deliberately not collapsible - always-on reference while building. */}
@@ -8794,32 +8864,8 @@ const exportJson = () => {
                   ) : null}
                 </div>
               </div>
-
-              <div className="grid gap-2 pt-2 md:grid-cols-3">
-                {Object.entries(phaseStats).map(([phase, stat]) => (
-                  <div key={phase} className="rounded border border-slate-700 bg-slate-900 p-2 text-xs text-white [text-shadow:0_0_2px_black]">
-                    <div className="font-medium">{`Phase ${phase.replace("P", "")}`}</div>
-                    <div>{formatNumber(stat.maxWatts, 0)} W / {formatNumber(stat.maxAmps, 2)} A</div>
-                    <div>Avg {formatNumber(stat.avgWatts, 0)} W / {formatNumber(stat.avgAmps, 2)} A</div>
-                    <UtilBar percent={stat.utilisation} />
-                    <div>Safe phase limit: {formatNumber(distro.safePhaseWatts, 0)} W</div>
-                  </div>
-                ))}
-              </div>
             </CardContent>
           </Card>
-
-          <SubScreenPanel
-            subScreens={subScreens}
-            activeSubScreenId={resolvedActiveSubScreenId}
-            grid={grid}
-            onSelectScreen={selectSubScreen}
-            onCreate={createSubScreen}
-            onRename={renameSubScreen}
-            onRecolor={recolorSubScreen}
-            onDelete={deleteSubScreen}
-            onSelectAllInSubScreen={selectAllInSubScreen}
-          />
 
           <ObstructionsPanel
             obstructions={obstructions}
@@ -9971,9 +10017,29 @@ const exportJson = () => {
         <Card className="border-slate-700 bg-slate-800 print-card no-print" data-patch-picker collapsible>
           <CardHeader>
             <CardTitle className="text-white [text-shadow:0_0_2px_black]">Power Outputs</CardTitle>
-            <div className="mt-1 text-xs text-slate-300">Manual assignment follows the current Panels per Power Outlet maximum.</div>
+            <div className="mt-1 text-xs text-slate-300">
+              Patching follows the current Panels per Power Outlet figure. An outlet over 16A is allowed and flagged, not blocked.
+            </div>
           </CardHeader>
           <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
+            {/* Nothing stops an outlet going over 16A any more, so this is
+                what makes sure it is never missed: every overloaded plug,
+                named, with what it is actually drawing. */}
+            {overloadedPowerPorts.length ? (
+              <div className="rounded border border-amber-500/60 bg-amber-500/15 p-3 text-sm text-amber-200">
+                <div className="font-semibold">
+                  ⚠ {overloadedPowerPorts.length} outlet{overloadedPowerPorts.length === 1 ? "" : "s"} over the 16A limit
+                </div>
+                <div className="mt-1 text-xs">
+                  {overloadedPowerPorts
+                    .map((entry) => `${entry.name}: ${formatNumber(entry.amps, 2)}A (${formatNumber(entry.percent, 0)}%)`)
+                    .join(" · ")}
+                </div>
+                <div className="mt-1 text-xs">
+                  A 16A outlet carries {formatNumber(MAX_OUTLET_AMPS * VOLTAGE, 0)}W. Check the supply before rigging this.
+                </div>
+              </div>
+            ) : null}
             <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-9">
               {powerPorts.map((port) => {
                 const stat = powerPortStats[port.id];
