@@ -100,7 +100,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.75.0";
+const APP_VERSION = "0.75.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -1405,6 +1405,34 @@ export const planSnakePorts = (segments: Cell[][], options: SnakePortPlanOptions
   });
 
   return plan;
+};
+
+/**
+ * How Match Power To Signal walks the signal ports.
+ *
+ * `freshPlug` are the PRIMARY ports, in order - each starts a new power plug,
+ * which is the whole point of the feature: plugs line up with signal ports.
+ *
+ * `followOn` are ports in the backup half of the range. With the backup loop
+ * on, those are the same run looped back rather than another signal line, so
+ * giving each one a plug of its own burned a plug per backup port and ran the
+ * distro out partway down the wall - leaving real panels with no power. Their
+ * panels still get fed; they just continue on the plug already in hand.
+ *
+ * (Reachable by patching with the loop off and turning it on afterwards:
+ * those ports keep their panels but become backups.)
+ */
+export const powerFollowOrder = (
+  signalPorts: number[],
+  backupSignalLoop: boolean,
+  primarySignalPortCount: number,
+): { freshPlug: number[]; followOn: number[] } => {
+  const ordered = [...signalPorts].sort((a, b) => a - b);
+  const isBackup = (port: number) => backupSignalLoop && port > primarySignalPortCount;
+  return {
+    freshPlug: ordered.filter((port) => !isBackup(port)),
+    followOn: ordered.filter(isBackup),
+  };
 };
 
 export const snakeOrderSegments = (panels: Cell[], options: SnakeOrderOptions): Cell[][] => {
@@ -7934,41 +7962,64 @@ const exportJson = () => {
       });
       const orderedSignalPorts = [...byPort.keys()].sort((a, b) => a - b);
 
+      // Only a PRIMARY port is a signal line to align a plug to.
+      //
+      // With the backup loop on, the second half of the port range is the
+      // same run looped back - a backup, not another line. Starting a fresh
+      // plug for each of those burned one plug per backup port and ran a
+      // 9-plug distro out partway down the wall, leaving real panels with no
+      // power at all. (Reachable by patching with the loop off and turning it
+      // on afterwards: those ports keep their panels but become backups.)
+      //
+      // Their panels are still real panels that need feeding, so they are
+      // powered - they just continue on the plug already in hand instead of
+      // claiming a new one.
+      const { freshPlug: primaryPorts, followOn: backupPorts } = powerFollowOrder(
+        orderedSignalPorts,
+        backupSignalLoop,
+        primarySignalPortCount,
+      );
+
       let plugIndex = 0;
       const plugLeft = () => plugIndex < powerPorts.length;
 
-      for (const sigPort of orderedSignalPorts) {
+      const cellsOf = (sigPort: number) =>
+        byPort.get(sigPort)!.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
+
+      /** Fill from the plug in hand onwards. Returns false once the distro is full. */
+      const placeCells = (cells: Cell[]): boolean => {
+        for (const cell of cells) {
+          while (plugLeft() && getPortPanelCount(next, "assignedPowerPort", powerPorts[plugIndex].id) >= safePanelsPerPowerOutlet) {
+            plugIndex += 1;
+          }
+          if (!plugLeft()) return false;
+          const plug = powerPorts[plugIndex];
+          // Amps do not move the walk on here either - Panels per Power
+          // Outlet is the figure that splits it, and an outlet over 16A is
+          // reported under Power Outputs rather than refused. Dropping the
+          // panel was the worst of both: no power AND no warning about why.
+          cell.assignedPowerPort = plug.id;
+          cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", plug.id);
+          cell.powerManual = false;
+        }
+        return true;
+      };
+
+      for (const sigPort of primaryPorts) {
         if (!plugLeft()) break;
         // Align power plugs to signal ports: each new signal port starts on a fresh plug.
         if (getPortPanelCount(next, "assignedPowerPort", powerPorts[plugIndex].id) > 0) {
           plugIndex += 1;
         }
-
-        const cells = byPort.get(sigPort)!.sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0));
-        for (const cell of cells) {
-          const cellWatts = PANEL_TYPES[cellPanelType(cell)].power.maxW;
-          let placed = false;
-          while (plugLeft()) {
-            const plug = powerPorts[plugIndex];
-            const currentPanels = getPortPanelCount(next, "assignedPowerPort", plug.id);
-            const currentLoad = getPowerPortLoadWatts(next, plug.id, 0);
-            if (currentPanels >= safePanelsPerPowerOutlet) {
-              plugIndex += 1;
-              continue;
-            }
-            if (currentLoad + cellWatts > MAX_OUTLET_AMPS * VOLTAGE) {
-              plugIndex += 1;
-              continue;
-            }
-            cell.assignedPowerPort = plug.id;
-            cell.powerSequence = getNextSequence(next, "assignedPowerPort", "powerSequence", plug.id);
-            cell.powerManual = false;
-            placed = true;
-            break;
-          }
-          if (!placed) break;
-        }
         if (!plugLeft()) break;
+        if (!placeCells(cellsOf(sigPort))) break;
+      }
+
+      // Anything left on a reserved backup port follows on, without taking a
+      // plug of its own.
+      for (const sigPort of backupPorts) {
+        if (!plugLeft()) break;
+        if (!placeCells(cellsOf(sigPort))) break;
       }
 
       return next;

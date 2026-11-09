@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.75.0`
+Version `0.75.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -33,6 +33,16 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.75.1
+
+**Match Power To Signal follows the main ports only**
+
+- It gave **every** signal port holding panels its own power plug, backup ports included. A backup port is the same run looped back, not another signal line, so each one burned a plug and ran the distro out partway down the wall
+- It now starts a fresh plug for each **primary** port, in order, and anything left on a reserved backup port **follows on** rather than taking a plug of its own. Those panels are still real panels, so they are still fed - they just do not claim new hardware
+- Measured on the same 72-panel wall patched across 8 ports on a VX1000 (primary 1-5): **8 plugs before, 6 after**. On a 20-port setup patched across 15 ports it ran out of plugs entirely and left **27 of 72 panels with no power at all**; all 72 are fed now
+- You reach this by patching with the backup loop off and switching it on afterwards - those ports keep their panels but become backups
+- The amp ceiling no longer drops a panel here either, matching the rest of the tool since v0.75.0: an outlet over 16A is reported under Power Outputs, not quietly left unpatched
 
 ## Recent Changes In v0.75.0
 
