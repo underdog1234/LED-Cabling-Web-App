@@ -1,6 +1,6 @@
 # LED Cabling Web App
 
-Version `0.76.0`
+Version `0.76.1`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
@@ -33,6 +33,20 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.76.1
+
+**Power Outputs now scales with brightness too - it was not**
+
+- The Power Outputs tiles, the phase loads and the over-16A warning read the catalogue figures directly, so with brightness scaling on they stayed on the **unscaled** numbers while the Wall Summary beside them scaled. Two readings of the same outlet that did not agree: Plug 1 showed 3,675 W where Per outlet said 2,903 W
+- They all go through the scaled figure now. Same wall, same patch: Plug 1 and Per outlet both read **2,903 W / 12.77 A**, and Phase 1 follows at 2,903 W instead of 3,675 W
+
+**And it says so, everywhere the figures appear**
+
+- **Power Outputs** carries a banner: the brightness and content it is scaled to, and that turning the wall up makes the figures no longer apply
+- **Wall Summary's Power tile** carries the short version
+- **The PDF** carries `BRIGHTNESS SCALED: 70% brightness, 33% content` in the Power box - the printed sheet is what goes to site, and whoever reads it there has no other way to know the figures are not the panels' full draw
+- Nothing is added when the model is off
 
 ## Recent Changes In v0.76.0
 

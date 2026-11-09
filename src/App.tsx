@@ -107,7 +107,7 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.76.0";
+const APP_VERSION = "0.76.1";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -2856,6 +2856,17 @@ export default function App() {
   const [contentPercent, setContentPercent] = useState(BARCO_TYPICAL_CONTENT_PERCENT);
   const [blackLevelW, setBlackLevelW] = useState<Partial<Record<PanelTypeKey, number>>>({});
   const blackLevelFor = (type: PanelTypeKey) => blackLevelW[type] ?? defaultBlackLevelW(PANEL_TYPES[type].power.maxW);
+  /**
+   * The one sentence every power readout uses to say the figures are scaled.
+   *
+   * null when the model is off, so nothing is added to a project using the
+   * catalogue figures. Written once because a reader finding a scaled number
+   * without this note has no way to tell it is not the panel's full draw -
+   * which is the whole hazard of the feature.
+   */
+  const brightnessPowerNote = brightnessModelOn
+    ? `Scaled to ${brightnessPercent}% brightness (typical content ${contentPercent}%). Sized on full white at that brightness.`
+    : null;
   /** Panel types to ask a black level for: the ones on the wall, plus the selected type for an empty one. */
   const brightnessPanelTypes = useMemo(() => {
     const used = new Set<PanelTypeKey>(grid.filter(isActiveCell).map(cellPanelType));
@@ -3789,7 +3800,12 @@ export default function App() {
       if (!isActiveCell(cell)) continue;
       if (!cell.assignedPowerPort || !stats[cell.assignedPowerPort]) continue;
       const stat = stats[cell.assignedPowerPort];
-      const cellPower = PANEL_TYPES[cellPanelType(cell)].power;
+      // Brightness-scaled, like every other power figure. This read the
+      // catalogue directly, so with the brightness model on the Power Outputs
+      // tiles, the phase loads and the over-16A warning all stayed on the
+      // unscaled numbers while the Wall Summary beside them scaled - two
+      // readings of the same outlet that did not agree.
+      const cellPower = panelPower(cellPanelType(cell));
       stat.panels += 1;
       stat.maxWatts += cellPower.maxW;
       stat.maxAmps += cellPower.maxA;
@@ -3809,7 +3825,7 @@ export default function App() {
     });
 
     return stats;
-  }, [scopedGrid, powerPorts, powerSpec.maxW, powerSpec.maxA, powerSpec.avgW, powerSpec.avgA]);
+  }, [scopedGrid, powerPorts, panelPower]);
 
   /**
    * Outlets drawing more than a 16A socket carries.
@@ -6988,6 +7004,9 @@ const exportJson = () => {
       `Per outlet: ${formatNumber(powerPerCircuitMaxW)} W / ${formatNumber(powerPerCircuitMaxA, 2)} A`,
       `Outlet limit: ${safePanelsPerPowerOutlet} panels`,
       `Unassigned power panels: ${unassignedPowerPanels}`,
+      // On the printed sheet this matters most: whoever reads it on site has
+      // no other way to know these are not the panels' full draw.
+      ...(brightnessPowerNote ? [`BRIGHTNESS SCALED: ${brightnessPercent}% brightness, ${contentPercent}% content`] : []),
     ], 80, 24, 66, 52);
 
     drawInfoBox("Weight + Output", [
@@ -9064,6 +9083,11 @@ const exportJson = () => {
                   </div>
                   <div>Per outlet: {formatNumber(powerPerCircuitMaxW, 0)} W / {formatNumber(powerPerCircuitMaxA, 2)} A</div>
                   <div>Active support span: {activeColsCount} cols × {activeRowsCount} rows</div>
+                  {brightnessPowerNote ? (
+                    <div className="mt-1 rounded border border-sky-500/50 bg-sky-500/10 px-1.5 py-1 text-[11px] text-sky-200">
+                      ⚡ {brightnessPowerNote}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="rounded border border-slate-700 bg-slate-900 p-2">
                   <div className="mb-1 font-bold">Panel Count</div>
@@ -10301,6 +10325,12 @@ const exportJson = () => {
             <div className="mt-1 text-xs text-slate-300">
               Patching follows the current Panels per Power Outlet figure. An outlet over 16A is allowed and flagged, not blocked.
             </div>
+            {brightnessPowerNote ? (
+              <div className="mt-1 rounded border border-sky-500/50 bg-sky-500/10 px-2 py-1 text-xs text-sky-200">
+                ⚡ Brightness scaling is on. {brightnessPowerNote} Every W and A on this page follows it - turn the wall up and
+                these figures no longer apply.
+              </div>
+            ) : null}
           </CardHeader>
           <CardContent className="space-y-4 text-white [text-shadow:0_0_2px_black]">
             {/* Nothing stops an outlet going over 16A any more, so this is
