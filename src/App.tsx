@@ -107,7 +107,18 @@ export const POWER_COLOR = "#f97316";
 // panel too when the backup signal loop is on); orange = first panel of a power chain.
 const SIGNAL_START_COLOR = "#2563eb";
 const POWER_START_COLOR = POWER_COLOR;
-const APP_VERSION = "0.76.1";
+const APP_VERSION = "0.77.0";
+
+// The Test Pattern Generator is its own app in its own repo now
+// (github.com/underdog1234/Test-Pattern-Generator) - everything that used to
+// live in src/generator here moved there wholesale, so there is one copy of it
+// to maintain instead of two drifting ones.
+const TEST_PATTERN_GENERATOR_URL = "https://underdog1234.github.io/Test-Pattern-Generator/";
+
+// MMS's own links page - the shared index of MMS tools and documents, kept as a
+// Google Apps Script web app.
+const MMS_LINKS_URL =
+  "https://script.google.com/macros/s/AKfycbwsrCoqVwHdQHYPUDIDGv64vjwTF4DfAngFZ0KwUWANx6ZaL2EmRquxgYRIWcQYSCS4/exec";
 
 // Target resolution for the Panel Layout PNG embedded in the full PDF
 // report (see buildLayoutCanvas) - a fixed print DPI at the page's own
@@ -5123,16 +5134,22 @@ const projectFilePayload = () => {
   };
 };
 
-// The generator is a separate page, so the open project goes across the same
-// way the Moving Test Pattern window gets it: through localStorage, read once
-// by the new tab (generator.html?fromPlanner=1).
+// The generator lives at its own address now, but the project still goes
+// across the same way it did when it was a second page here: through
+// localStorage, read once by the new tab (?fromPlanner=1).
+//
+// That survives the move only because localStorage is scoped to the ORIGIN,
+// and both sites are served from underdog1234.github.io - just at different
+// paths. If the generator is ever moved to a different host this has to
+// become a postMessage handshake instead, because the new tab would no longer
+// be able to see anything written here.
 const openTestPatternGenerator = () => {
   try {
     localStorage.setItem("testPatternGenerator:plannerProject:v1", JSON.stringify({ sentAt: new Date().toISOString(), project: projectFilePayload() }));
   } catch (err) {
     console.error("Could not hand the project to the Test Pattern Generator", err);
   }
-  window.open(`${location.pathname.replace(/[^/]*$/, "")}generator.html?fromPlanner=1`, "_blank");
+  window.open(`${TEST_PATTERN_GENERATOR_URL}?fromPlanner=1`, "_blank");
 };
 
 const exportJson = () => {
@@ -8610,6 +8627,15 @@ const exportJson = () => {
               >
                 v{APP_VERSION}
               </a>
+              <a
+                className="rounded-full border border-sky-500/60 bg-sky-900/40 px-3 py-1 text-xs font-semibold text-sky-100 hover:bg-sky-800/60"
+                href={MMS_LINKS_URL}
+                target="_blank"
+                rel="noreferrer"
+                title="MMS Links - the shared index of MMS tools and documents"
+              >
+                MMS Links
+              </a>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
@@ -8647,7 +8673,7 @@ const exportJson = () => {
               <Button intent="secondary" onClick={openQuickPanelLayoutTab} title="Open a standalone panel-count calculator in a new tab">
                 <LayoutGrid className="h-4 w-4" />Quick Panel Layout
               </Button>
-              <Button intent="secondary" onClick={openTestPatternGenerator} title="Open the Test Pattern Generator with this project: its Output Canvas, sub-screens and their positions, each running this layout's LED test pattern">
+              <Button intent="secondary" onClick={openTestPatternGenerator} title="Open the Test Pattern Generator (its own app, in a new tab) with this project: its Output Canvas, sub-screens and their positions, each running this layout's LED test pattern">
                 <Video className="h-4 w-4" />Test Pattern Generator
               </Button>
               <Button intent="ghost" onClick={() => setShowHelp(true)}>

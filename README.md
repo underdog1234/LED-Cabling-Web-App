@@ -1,12 +1,12 @@
 # LED Cabling Web App
 
-Version `0.76.1`
+Version `0.77.0`
 
 Standalone React web app for planning LED wall layouts, signal port mapping, power outlet assignment, stock checks, deployment hardware, and PDF/settings/video exports.
 
 ## What It Does
 
-- **Test Pattern Generator** (`generator.html`, also opened from the planner's toolbar) - a standalone page for any video output, projector, monitor or LED screen. See [Test Pattern Generator](#test-pattern-generator) below
+- **Test Pattern Generator** - now its own app at its own address, opened from the planner's toolbar with the open project. See [Test Pattern Generator](#test-pattern-generator) below
 
 - Build LED walls by rows and columns, or place panels freely (non-uniform layouts) with drag, edge-snap and joining
 - Switch between `MG9` and `MT` panel profiles, plus `MG12` triangle and `MG13` curved variants
@@ -33,6 +33,19 @@ Standalone React web app for planning LED wall layouts, signal port mapping, pow
 - **Edit the stock list by hand** where the job needs it - type over any row's quantity, take a row off the list with an X, add any catalogue item the layout does not ask for, see at a glance how many rows are no longer what the tool calculated, and put every one of them back with one button. Edits are saved with the project and carried into the CSV, the PDF and the shortfall list, with the calculated figure shown alongside so nothing changes silently
 - Check stock levels, shortfalls, and deployment hardware requirements, optionally checked against **Rentman** (see [Rentman Integration](#rentman-integration)) for live on-hand stock (reviewed before anything here is updated), what other projects have booked in the project's date range (the **peak on any one day** of it, not the sum of every job that touches it), and what is currently broken or under repair
 - Collapse any section of the UI to reduce clutter on long projects
+
+## Recent Changes In v0.77.0
+
+**The Test Pattern Generator moved out to its own app**
+
+- It now lives at <https://underdog1234.github.io/Test-Pattern-Generator/>, built from its own repository. The planner's **Test Pattern Generator** button opens that address instead of this app's own `generator.html`
+- All of the generator's code is gone from this repository - `generator.html` and the whole of `src/generator/` (20 files), plus its second entry in the Vite build. This app builds as the single page it is again
+- **The project handoff still works.** The button writes the open project to `localStorage` and opens the generator with `?fromPlanner=1`, as before: `localStorage` is scoped to the origin and both sites are served from `underdog1234.github.io`, so the new app reads what this one wrote. Verified against the deployed generator, which still reads the same key. If it is ever moved to a different host the handoff will need a `postMessage` handshake instead
+- Nothing the planner itself uses was removed. The modules the generator borrowed (`testPattern/mp4Encode`, `ScreenPickerModal`, `screenPlacement`, `pixelMapping`, `export/pngDpi`, `novastar/processorModels`) are all still used by this app
+
+**MMS Links in the header**
+
+- A **MMS Links** button sits beside the version badge at the top of the page, opening the shared MMS links index in a new tab
 
 ## Recent Changes In v0.76.1
 
@@ -1625,86 +1638,23 @@ The site uses a relative Vite base path so it works on repository Pages URLs.
 
 ## Test Pattern Generator
 
-Live at `https://underdog1234.github.io/LED-Cabling-Web-App/generator.html`
-(the **Test Pattern Generator** button in the planner opens it). It needs no
-project and no panels: start from a resolution.
+**It is no longer part of this app.** The generator moved out to its own
+repository and its own page:
 
-**Canvas and sub-screens**
+- Live at <https://underdog1234.github.io/Test-Pattern-Generator/>
+- Source at <https://github.com/underdog1234/Test-Pattern-Generator>
 
-- One main canvas of any whole-pixel size (presets for 1280 x 720, 1920 x 1080,
-  1920 x 1200, 2560 x 1440, 3840 x 2160, 4096 x 2160, their portrait versions and
-  the planner's wide canvases, or anything you type, with an optional aspect
-  lock and your own named presets). Unused canvas is black, or any colour
-- Any number of **sub-screens**, each with its own name, colour, resolution,
-  X/Y, test pattern, pattern settings, overlays and animation offset - so
-  different patterns run side by side. Add, duplicate, delete, rename, hide and
-  lock them; overlap them and set the layer order
-- Drag to move, drag the handles to resize (Shift keeps the ratio), or type
-  exact numbers. Arrow keys nudge the selection (Shift for the bigger step;
-  both steps are settable). Every position and size is a whole pixel
-- Snap to canvas edges, canvas centre, other screens and an optional grid, with
-  guides shown while you drag (hold Alt to place freely)
-- Select several screens (Ctrl/Cmd-click, Shift-click, or drag a box) and
-  align left / centre / right / top / middle / bottom to the canvas, the
-  selection or a reference screen; match a reference's size; distribute evenly
-  (gaps differ by at most one pixel when the space doesn't divide); space them
-  with a fixed gap; or arrange in a row, a column or a grid with pixel gaps
-- The planner's Output Canvas warnings: off-canvas, negative positions,
-  overlaps, and a layout bigger than the canvas
-- Optional LED maths: a calculator for resolution from panel rows, columns and
-  panel pixel size, and a per-screen panel grid that drives the LED Moving
-  Pattern. NovaStar processor input assignment (whole canvas or per screen) is
-  kept too
-- Opened from the planner's **Test Pattern Generator** button, the generator
-  starts on the planner's open project (and **Planner project** brings it in
-  again); **Default project** returns to the four-screen starting setup
-- **Import LED Planner project** opens a saved planner file: its Output Canvas
-  resolution, each sub-screen at its canvas position and footprint resolution,
-  running the planner's own Moving Test Pattern, with its processor inputs
+Everything that used to be built here from `generator.html` and `src/generator/`
+went across wholesale, so there is one copy of it to maintain rather than two
+that drift apart. Its features are documented in that repository now.
 
-**Patterns**: Screen ID & Resolution, SMPTE and EBU bars, colour checker
-patches, grid / crosshatch, circles with safe areas and aspect frames,
-checkerboard, greyscale steps, gradient ramps, solid fields, colour field
-cycle, moving bar, timecode with sync flash and beep, AV sync flash and beep,
-pixel structure, zone plate, fictional faces (illustrations from a seed,
-across twelve skin tones, each labelled fictional), photo faces (24 portraits
-filling the screen in square cells, grey round the edge, never stretched), the
-LED Moving Pattern, and the planner's own layout pattern for imported screens.
-Animated patterns all loop exactly on the canvas's loop length. Any pattern
-can also scroll (left, right, up, down or diagonally, a whole number of passes
-per loop), and **Auto cycle all patterns** steps every screen through the list.
-Overlays: border, name, resolution, centre crosshair and an analogue clock.
-
-**Sound**: the timecode and AV sync patterns beep with their flashes. The
-editor and the output window each have a Sync beeps switch and an offset in
-milliseconds (the output window starts with it off; press S). Video downloads
-carry the beeps as their soundtrack - in MP4 on the exact flash frames.
-
-**Output and playback**
-
-- Play / pause / restart, a playlist of steps (each step remembers every
-  screen's pattern and settings, for a set number of seconds, looping or not)
-- **Output window** opens the whole canvas or one screen, at native
-  resolution, on the display you choose (same display picker as the planner);
-  it follows the editor live. **Fullscreen** shows it full screen in place.
-  Both report whether the output is really 1:1, with Fit to output and the
-  live-only bouncing logo
-
-**Downloads** - choose before exporting:
-
-- **Entire canvas** at its exact resolution with every visible screen
-- **One sub-screen** at its own resolution - rendered on its own, so a
-  neighbour that overlaps it never appears in the file
-- **Selected sub-screens** as separate files in one ZIP
-
-as a PNG still (at a chosen point in the loop), a WebM loop, or an MP4 loop
-written with the planner's delivery settings. Files are named
-`<screen>_<pattern>_<width>x<height>.<ext>`.
-
-**Saving**: the working setup is autosaved in the browser; named
-configurations can be saved and reloaded there, and any setup saved to or
-opened from a `.testpattern.json` file - every screen's position, resolution,
-pattern, settings, overlays and layer order, the playlist and your presets.
+The planner's **Test Pattern Generator** button still hands the open project
+over: it writes the project to `localStorage` and opens the generator with
+`?fromPlanner=1`, exactly as it did when the generator was a second page here.
+That works across the two sites because `localStorage` is scoped to the
+**origin**, and both are served from `underdog1234.github.io` - only the path
+differs. Moving the generator to a different host would break the handoff and
+would need a `postMessage` handshake instead.
 
 ## Pixel-Accurate Test Pattern
 
